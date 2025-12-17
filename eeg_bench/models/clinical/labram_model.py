@@ -1,3 +1,5 @@
+
+439
 from ..abstract_model import AbstractModel
 from typing import List, Dict, cast, Literal, Optional
 import numpy as np
@@ -262,7 +264,7 @@ class LaBraMModel(AbstractModel):
         self.model = LaBraMBCIModel(num_classes=num_classes, num_labels_per_chunk=num_labels_per_chunk, device=self.device, chunks=self.chunk_len_s).to(self.device)
         self.save = False
 
-    def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:
+    def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:  
         print("inside fit")
         task_name = meta[0]["task_name"]
         
@@ -291,11 +293,28 @@ class LaBraMModel(AbstractModel):
             batch_size = 1
         else: 
             batch_size = 64
-        train_loader = DataLoader(dataset_train, batch_size=batch_size, num_workers=0, shuffle=True, pin_memory=True)
+            
+        # --- GPU Utilization Optimizations (Increased num_workers) ---
+        num_workers = 8 # Increase this based on your CPU core count
+            
+        train_loader = DataLoader(
+            dataset_train, 
+            batch_size=batch_size, 
+            num_workers=num_workers, # Optimized
+            shuffle=True, 
+            pin_memory=True
+        )
         if dataset_val is not None:
-            valid_loader = DataLoader(dataset_val, batch_size=batch_size, num_workers=0, shuffle=False, pin_memory=True)
+            valid_loader = DataLoader(
+                dataset_val, 
+                batch_size=batch_size, 
+                num_workers=num_workers, # Optimized
+                shuffle=False, 
+                pin_memory=True
+            )
         else:
             valid_loader = None
+        # -----------------------------------------------------------
 
         max_epochs = 30
         steps_per_epoch = len(train_loader)
@@ -303,17 +322,25 @@ class LaBraMModel(AbstractModel):
         
         
         # Set up optimizer and OneCycleLR scheduler
+        # Filter parameters to ONLY include those where requires_grad=True (i.e., self.head)
+        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+        
         optimizer = torch.optim.AdamW(
-            list(self.model.head.parameters()) + 
-            list(self.model.feature.parameters()), 
+            trainable_params, # Optimized
             lr=1e-6, 
             weight_decay=0.01)
+            
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=steps_per_epoch, epochs=max_epochs, pct_start=0.2)
         
+        # --- Early Stopping Setup ---
+        patience = 10 
+        patience_counter = 0
         best_val_loss = float('inf')
         best_model_state = None
 
         start_epoch = 1
+        
+        # --- Checkpoint Loading Logic ---
         if self.save and os.path.exists(os.path.join(get_config_value("chkpt"), "labram_checkpoint.pth")):
             checkpoint = torch.load(os.path.join(get_config_value("chkpt"), "labram_checkpoint.pth"))
             self.model.load_state_dict(checkpoint["model"])
@@ -338,11 +365,19 @@ class LaBraMModel(AbstractModel):
                 print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
                 print("  Val Metrics:", val_metrics)
         
-                # Optionally save the best model based on validation loss
+                # --- Early Stopping Logic & Best Model Save ---
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    best_model_state = self.model.state_dict()
+                    best_model_state = self.model.state_dict() # Save best state
+                    patience_counter = 0 # Reset patience
+                else:
+                    patience_counter += 1 # Increment patience
+                    
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered at epoch {epoch} (Patience: {patience})")
+                    break # Exit the training loop
             
+            # --- Checkpoint Saving Logic ---
             if self.save:
                 torch.save(
                 {
@@ -374,7 +409,7 @@ class LaBraMModel(AbstractModel):
             batch_size = 1
         else: 
             batch_size = 64
-        test_loader = DataLoader(dataset_test, batch_size=batch_size, num_workers=0, shuffle=False, pin_memory=True)
+        test_loader = DataLoader(dataset_test, batch_size=batch_size, num_workers=8, shuffle=False, pin_memory=True)
 
         input_chans = utils.get_input_chans(ch_names)
         predictions, indices_mapping = inference(self.model, test_loader, self.device, input_chans)
@@ -403,4 +438,3 @@ class LaBraMModel(AbstractModel):
         
         print(mapped_pred)
         return mapped_pred
-        

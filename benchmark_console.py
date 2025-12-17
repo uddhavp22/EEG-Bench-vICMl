@@ -37,15 +37,43 @@ from eeg_bench.models.bci import (
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
+# NOTE: Removed 'from asyncio.tasks import ALL_COMPLETED' as it was unused and caused an error in some environments.
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def benchmark(tasks, models, seed, reps):
+ALL_TASKS_CLASSES = [
+    ParkinsonsClinicalTask,
+    SchizophreniaClinicalTask,
+    MTBIClinicalTask,
+    OCDClinicalTask,
+    EpilepsyClinicalTask,
+    AbnormalClinicalTask,
+    SleepStagesClinicalTask,
+    SeizureClinicalTask,
+    ArtifactBinaryClinicalTask,
+    ArtifactMulticlassClinicalTask,
+    LeftHandvRightHandMITask,
+    RightHandvFeetMITask,
+    LeftHandvRightHandvFeetvTongueMITask,
+    FiveFingersMITask,
+]
+
+
+def benchmark(tasks, models, seed, reps=1): # Default reps=1
+    print("running bench")
+    if tasks=="full":
+        tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
+    print(tasks)
+    
     for task in tasks:
-        logger.info(f"Running benchmark for task {task}")
+        # Logging for Task Clarity
+        logger.info(f"============================================================")
+        logger.info(f"STARTING BENCHMARK for TASK: {task.name}") 
+        logger.info(f"============================================================")
+        
         X_train, y_train, meta_train = task.get_data(Split.TRAIN)
         X_test, y_test, meta_test = task.get_data(Split.TEST)
 
@@ -56,9 +84,17 @@ def benchmark(tasks, models, seed, reps):
         y_trues = []
         y_trains = []
         is_multilabel_task = task.name in get_multilabel_tasks()
-        for model_class in tqdm(models):
+        
+        for model_class in tqdm(models, desc=f"Models for Task: {task.name}"): # Added tqdm desc
+            model_name = model_class.__name__ # Fix: Define model_name
+            logger.info(f"--- Starting Model: {model_name}")
+            
             for i in range(reps):
+                # Logging for Repetition Clarity
+                logger.info(f"--- REPETITION {i+1}/{reps} (Seed: {seed + i}) ---")
+                
                 set_seed(seed + i)  # set seed for reproducibility
+                
                 if is_multilabel_task:
                     num_classes = len(task.clinical_classes) + 1
                     model = model_class(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
@@ -68,6 +104,8 @@ def benchmark(tasks, models, seed, reps):
                     model = model_class()
                     this_y_train = y_train
                     this_y_test = y_test
+                
+                print(model)
 
                 model.fit(X_train, this_y_train, meta_train)
                 y_pred = []
@@ -93,7 +131,8 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        help="Task to run. Options: parkinsons, schizophrenia, mtbi, ocd, epilepsy, abnormal, sleep_stages, seizure, binary_artifact, multiclass_artifact, left_right, right_feet, left_right_feet_tongue, 5_fingers"
+        # Updated help text
+        help="Task to run. Options: full, parkinsons, schizophrenia, mtbi, ocd, epilepsy, abnormal, sleep_stages, seizure, binary_artifact, multiclass_artifact, left_right, right_feet, left_right_feet_tongue, 5_fingers"
     )
     parser.add_argument(
         "--model",
@@ -172,24 +211,35 @@ def main():
         
         task_key = args.task.lower()
         model_key = args.model.lower()
-
-        if task_key not in tasks_map:
-            parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())}")
-        task_instance = tasks_map[task_key]()
         
+        # --- Handle task selection (single task vs. "full") ---
+        if task_key == "full":
+            tasks_to_run = "full" 
+        elif task_key not in tasks_map:
+            parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")
+        else:
+            tasks_to_run = [tasks_map[task_key]()] # Single task instance list
+            
+        
+        # --- Handle model map selection (must check for "full" task_key) ---
         if task_key in ["parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy", "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"]:
             models_map = clinical_models_map
         elif task_key in ["left_right", "right_feet", "left_right_feet_tongue", "5_fingers"]:
             models_map = bci_models_map
+        elif task_key == "full": # If running "full", assume clinical map for model check
+            models_map = clinical_models_map 
         else:
             models_map = {}
-            parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())}")
+            parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")
+        # -----------------------------------------------------------------
         
         if model_key not in models_map:
             parser.error(f"Invalid model specified. Choose from: {', '.join(models_map.keys())}")
+        
         model_instance = models_map[model_key]
 
-        benchmark([task_instance], [model_instance], args.seed, args.reps)
+        # Final call, using tasks_to_run for both "full" (string) and single task (list)
+        benchmark(tasks_to_run, [model_instance], args.seed, args.reps)
 
 if __name__ == "__main__":
     main()

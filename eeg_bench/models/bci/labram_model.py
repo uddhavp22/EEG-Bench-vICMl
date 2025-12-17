@@ -1,3 +1,16 @@
+
+331
+332
+333
+334
+335
+336
+337
+338
+339
+340
+341
+342
 from ..abstract_model import AbstractModel
 from typing import List, Dict, cast, Literal
 import numpy as np
@@ -24,6 +37,8 @@ import matplotlib.pyplot as plt
 import os
 import requests
 from pathlib import Path
+import math
+import random
 
 def check_and_download_pretrained_model():
     chkpt_dir = Path(get_config_value("chkpt"))
@@ -67,7 +82,7 @@ class LaBraMBCIModel(nn.Module):
         model.load_state_dict(new_checkpoint, strict=False)
         for blk in model.blocks:
             for p in blk.parameters():
-                p.requires_grad = True
+                p.requires_grad = False
         self.feature = model
         self.head = nn.Linear(200, num_classes)
         self.loss_fn = nn.CrossEntropyLoss()
@@ -172,60 +187,91 @@ class LaBraMModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
 
-
     def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:
         print("inside fit of LaBraMModel")
         logging.info("inside fit of LaBraMModel")
         task_name = meta[0]["task_name"]
 
         num_classes = n_unique_labels(task_name)
-        self.model = LaBraMBCIModel(num_classes=num_classes).to(self.device)
+        # Initialize LaBraMBCIModel (which freezes the backbone)
+        self.model = LaBraMBCIModel(num_classes=num_classes).to(self.device) 
 
+        # --- Data Pre-processing and Splitting ---
         datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=True, split_size=0.15)
                 for X_, y_, meta_ in tqdm(zip(cast(List[np.ndarray], X), cast(List[np.ndarray], y), meta),
                               desc="Creating datasets", total=len(meta))]
+        
         dataset_train_list = [dataset[0] for dataset in datasets]
         dataset_val_list = [dataset[1] for dataset in datasets]
 
         dataset_train_list = [dataset for dataset in dataset_train_list if len(dataset) > 0]        
         ch_names_list_train = [dataset.ch_names for dataset in dataset_train_list]
+        
         if dataset_val_list is not None:
             dataset_val_list = [dataset for dataset in dataset_val_list if len(dataset) > 0]
             ch_names_list_val = [dataset.ch_names for dataset in dataset_val_list]
 
+        # Setup Loss Function
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         print("class_weights", class_weights)
         self.model.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+        
         del X, y, meta
-
         torch.cuda.empty_cache()
 
+        # --- DataLoader Setup (Optimized for GPU Utilization) ---
         batch_size = 64
-        train_loader_list = [DataLoader(train_dataset, batch_size=batch_size, num_workers=0, shuffle=True) for train_dataset in dataset_train_list]
-        valid_loader_list = [DataLoader(valid_dataset, batch_size=batch_size, num_workers=0, shuffle=False) for valid_dataset in dataset_val_list]
+        num_workers = 8 # Increased for better parallelism
         
-        max_epochs = 50
+        train_loader_list = [
+            DataLoader(
+                train_dataset, 
+                batch_size=batch_size, 
+                num_workers=num_workers, # Optimized
+                shuffle=True,
+                pin_memory=True # Optimized
+            ) 
+            for train_dataset in dataset_train_list
+        ]
+        valid_loader_list = [
+            DataLoader(
+                valid_dataset, 
+                batch_size=batch_size, 
+                num_workers=num_workers, # Optimized
+                shuffle=False,
+                pin_memory=True # Optimized
+            ) 
+            for valid_dataset in dataset_val_list
+        ]
+        
+        max_epochs = 30
         steps_per_epoch = math.ceil(sum([len(train_loader) for train_loader in train_loader_list]))
         max_lr = 4e-4
         
+        # --- Optimizer and Scheduler Setup (Optimizer Filtered) ---
+        # Filter parameters to ONLY include those where requires_grad=True (i.e., self.head)
+        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         
-        # Set up optimizer and OneCycleLR scheduler
         optimizer = torch.optim.AdamW(
-            list(self.model.head.parameters()) + 
-            list(self.model.feature.parameters()), 
+            trainable_params, # Filtered list of parameters
             lr=1e-6, 
             weight_decay=0.01)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=steps_per_epoch, epochs=max_epochs, pct_start=0.2)
+            
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=max_lr, 
+            steps_per_epoch=steps_per_epoch, 
+            epochs=max_epochs, 
+            pct_start=0.2
+        )
         
-
+        # --- Early Stopping and Best Model Tracking ---
+        patience = 10 
+        patience_counter = 0
         best_val_loss = float('inf')
         best_model_state = None
-        train_losses = []
-        train_accuracies = []
-        val_losses = []
-        val_accuracies = []
-
-        # Training loop
+        
+        # --- Training Loop ---
         for epoch in range(1, max_epochs + 1):
             print(f"Epoch {epoch}/{max_epochs} with LR: {scheduler.get_last_lr()}")
 
@@ -233,6 +279,7 @@ class LaBraMModel(AbstractModel):
             epoch_train_acc = 0
             num_train_batches = 0
             
+            # 1. Training Phase
             train_pairs = list(zip(train_loader_list, ch_names_list_train))
             random.shuffle(train_pairs)
             for train_loader, ch_names in train_pairs:
@@ -243,13 +290,10 @@ class LaBraMModel(AbstractModel):
                 num_train_batches += 1
                 print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
 
-            # Averaging over the training batches
             avg_train_loss = epoch_train_loss / num_train_batches
             avg_train_acc = epoch_train_acc / num_train_batches
             
-            train_losses.append(avg_train_loss)
-            train_accuracies.append(avg_train_acc)
-            
+            # 2. Validation Phase
             epoch_val_loss = 0
             epoch_val_acc = 0
             num_val_batches = 0
@@ -263,23 +307,25 @@ class LaBraMModel(AbstractModel):
                 print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
                 print("  Val Metrics:", val_metrics)
             
-            # Averaging over the validation batches
             avg_val_loss = epoch_val_loss / num_val_batches
             avg_val_acc = epoch_val_acc / num_val_batches
             
-            val_losses.append(avg_val_loss)
-            val_accuracies.append(avg_val_acc)
-            
-            # Optionally save the best model based on validation loss
+            # 3. Early Stopping Check
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                best_model_state = self.model.state_dict()
+                best_model_state = self.model.state_dict() # Save best state
+                patience_counter = 0 # Reset patience
+            else:
+                patience_counter += 1 # Increment patience
+                
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch} (Patience: {patience}) due to no improvement in validation loss.")
+                break # Exit the training loop
         
-        # Load the best model (if saved)
+        # Final Step: Load the model state with the lowest validation loss
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
     
-
     @torch.no_grad()
     def predict(self, X: List[np.ndarray|List[BaseRaw]], meta: List[Dict]) -> np.ndarray:
         print("inside predict")
@@ -306,4 +352,3 @@ class LaBraMModel(AbstractModel):
         
         print(mapped_pred)
         return mapped_pred
-        
