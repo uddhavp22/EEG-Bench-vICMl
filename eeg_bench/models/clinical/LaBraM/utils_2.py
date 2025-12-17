@@ -633,7 +633,7 @@ def calc_class_weights(labels: List[np.ndarray], task_name: str) -> List[float]:
     all_labels = np.array([map_label(label) for label in all_labels])
     
     # Count the occurrences of each class
-    class_counts = np.bincount(all_labels)
+    class_counts = np.bincount(all_labels.astype(np.int64))
     
     # Calculate the total number of samples
     total_samples = len(all_labels)

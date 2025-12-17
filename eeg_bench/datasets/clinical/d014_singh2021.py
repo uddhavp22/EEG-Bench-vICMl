@@ -24,7 +24,8 @@ def _load_data_singh2021(data_path, split: Split, subjects: Sequence[int], targe
     this_subjects = [all_subjects[index] for index in subjects]
     
     df_vars = pd.read_excel(os.path.join(data_path, 'Copy_of_IntervalTiming_Subj_Info_AIE.xlsx'), sheet_name='MAIN')
-
+    seed = 0 if split == Split.TRAIN else 1
+    rng = np.random.default_rng(seed)
     rng.shuffle(this_subjects)
 
     data = []
