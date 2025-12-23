@@ -1,177 +1,387 @@
-from ..abstract_model import AbstractModel
-from typing import List, Dict, Optional, Tuple, Union
+# lejepa_clinical_model.py
+
+from __future__ import annotations
+
+from typing import List, Dict, Optional, Tuple, cast
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+from collections import Counter
 
-# Import the Abstract Backbone we defined previously
-# (Assuming you saved the BCI abstract class in a file, or you can copy the config logic here)
-from models.bci.EEGLeJEPA_model import AbstractLeJEPAForBCI 
+from ..abstract_model import AbstractModel
+from ...config import get_config_value
 
-class SimpleClinicalDataset(Dataset):
+# reuse your clinical dataset builder + label mapping
+from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
+from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
+from .LaBraM import utils  # for get_input_chans
+
+# LeJEPA (your repo)
+import sys
+sys.path.append("/teamspace/studios/this_studio")
+from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
+from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
+from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
+from eegfmchallenge.models.common import EncoderConfig
+
+# positions bank (you said pos_bank(coords) works)
+from transformers import AutoModel
+
+
+class ConcreteLeJEPAClinical(nn.Module):
     """
-    Dataset wrapper that handles the channel locations required by LeJEPA.
+    Backbone + head. Supports:
+      - single-label: logits (B, K)
+      - multilabel-per-chunk: logits (B, K, L)
     """
-    def __init__(self, X_flat, y_flat, channel_coords):
-        self.X = [torch.tensor(x, dtype=torch.float32) for x in X_flat]
-        self.y = torch.tensor(y_flat, dtype=torch.long) if y_flat is not None else None
-        self.coords = torch.tensor(channel_coords, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        # LeJEPA expects: x, channel_locations
-        item = {
-            "x": self.X[idx],
-            "channel_locations": self.coords # Broadcasted later or passed directly
-        }
-        if self.y is not None:
-            item["y"] = self.y[idx]
-        return item
-
-class LEJEPAClinicalModel(AbstractModel):
     def __init__(
-        self, 
-        num_classes: int = 2, 
-        num_labels_per_chunk: Optional[int] = None,
-        freeze_encoder: bool = True
+        self,
+        num_classes: int,
+        num_labels_per_chunk: Optional[int],
+        freeze_encoder: bool = True,
+        pretrained_path: Optional[str] = None,
     ):
-        super().__init__("LEJEPA-Clinical")
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        super().__init__()
+
+        DIM = 384
+        PRED_DIM = 128
+        PROJ_DIM = 16
+
         self.num_classes = num_classes
-        
-        # Initialize the backbone using the Abstract Class from before
-        # This loads the hardcoded config (DIM=384, etc.)
-        self.backbone_wrapper = ConcreteLeJEPA(
-            num_classes=num_classes, 
-            freeze_encoder=freeze_encoder
+        self.num_labels_per_chunk = num_labels_per_chunk
+        self.is_multilabel_task = num_labels_per_chunk is not None
+
+        cfg = EEGLEJEPAConfig(
+            name="EEGLEJEPA",
+            dim=DIM,
+            proj_dim=PROJ_DIM,
+            patch_size=25,
+            max_time=1500,
+            n_channels=128,
+            patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
+            encoder_config=EncoderConfig(dim=DIM, depth=12, heads=6, use_flash_attn=True),
+            predictor_config=EncoderConfig(dim=PRED_DIM, depth=4, heads=4, use_flash_attn=True),
+            channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
+            masking={"mask_ratio": 0.5, "block_size_range": [5, 6, 7, 8, 9, 10], "strategy_probs": [1.0, 0.0, 0.0]},
+            use_scaler=False,
         )
-        self.model = self.backbone_wrapper.to(self.device)
+        self.backbone = cfg.build()
 
-    def _flatten_data(self, X, y=None):
-        """Flattens List[List[np.ndarray]] -> List[np.ndarray]"""
-        X_flat = []
-        y_flat = []
-        
-        # Check if X is nested (List of Lists)
-        if len(X) > 0 and isinstance(X[0], list):
-            for i, sublist in enumerate(X):
-                X_flat.extend(sublist)
-                if y is not None:
-                    # Handle y being nested or flat
-                    if isinstance(y[i], (list, np.ndarray)) and len(y[i]) == len(sublist):
-                         y_flat.extend(y[i])
-                    else:
-                        y_flat.extend([y[i]] * len(sublist))
+        if pretrained_path:
+            ckpt = torch.load(pretrained_path, map_location="cpu")
+            state = ckpt.get("state_dict", ckpt)
+            state = {k.replace("model.", ""): v for k, v in state.items()}
+            self.backbone.load_state_dict(state, strict=False)
+
+        if freeze_encoder:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+            self.backbone.eval()
         else:
-            X_flat = X
-            y_flat = y if y is not None else []
+            for p in self.backbone.parameters():
+                p.requires_grad = True
+            self.backbone.train()
 
-        if y is not None:
-            return X_flat, np.array(y_flat)
-        return X_flat, None
+        out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
+        self.head = nn.Sequential(
+            nn.LayerNorm(DIM),
+            nn.Linear(DIM, 128),
+            nn.ReLU(),
+            nn.Linear(128, out_dim),
+        )
 
-    def _get_channel_coords(self, channel_names: List[str]) -> np.ndarray:
+        self.loss_fn = nn.CrossEntropyLoss()
+
+    def forward(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """
-        Maps channel names to 3D coordinates.
-        You need a standard 10-20 dictionary here.
+        x: (B, C, T)
+        channel_locations: (B, C, 3)
         """
-        # Simplified Mock 10-20 Dictionary (You should replace this with the real one from the benchmark utils)
-        # The benchmark likely has a utility for this: e.g. from eeg_bench.utils import get_coords
-        standard_coords = {
-            "Fp1": [ -0.03, 0.08, 0.03], "Fp2": [ 0.03, 0.08, 0.03],
-            "F7": [-0.07, 0.04, 0.01], "F3": [-0.04, 0.05, 0.04],
-            "Fz": [0.0, 0.06, 0.06], "F4": [0.04, 0.05, 0.04], "F8": [0.07, 0.04, 0.01],
-            # ... add full list ...
-            "C3": [-0.05, 0.0, 0.08], "Cz": [0.0, 0.0, 0.1], "C4": [0.05, 0.0, 0.08],
-            # Fallback for unknown
-        }
-        
-        coords = []
-        for name in channel_names:
-            # SANITIZE: "EEG Fp1-REF" -> "Fp1"
-            clean_name = name.replace('EEG', '').replace('-Ref', '').replace(' ', '').strip()
-            if clean_name.upper().startswith('FP'): clean_name = 'Fp' + clean_name[2:]
-            
-            if clean_name in standard_coords:
-                coords.append(standard_coords[clean_name])
-            else:
-                # Default/Mean coord if unknown (risky but prevents crash)
-                coords.append([0, 0, 0]) 
-                
-        return np.array(coords)
+        outputs = self.backbone(
+            x=x,
+            channel_locations=channel_locations,
+            n_global=1,
+            n_local=0,
+            global_patch_len=20,
+            local_patch_len=0,
+        )
+        cls = outputs["global"]["cls_token"]
+        if cls.dim() == 3:
+            cls = cls.squeeze(1)  # (B, DIM)
 
-    def fit(self, X: List, y: List, meta: List[Dict]) -> None:
-        # 1. Flatten Data
-        X_flat, y_flat = self._flatten_data(X, y)
-        
-        # 2. Prepare Metadata / Coords
-        # Use first dataset's meta for channel names (assuming consistency)
-        channel_coords = self._get_channel_coords(meta[0]["channel_names"])
-        
-        # 3. Create Dataset/Loader
-        dataset = SimpleClinicalDataset(X_flat, y_flat, channel_coords)
-        loader = DataLoader(dataset, batch_size=32, shuffle=True)
-        
-        # 4. Train Loop
-        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=1e-4)
-        criterion = nn.CrossEntropyLoss()
-        
-        self.model.train()
-        print(f"Training LEJEPA-Clinical on {len(X_flat)} samples...")
-        
-        for epoch in range(5): # Short epochs for benchmark
-            for batch in tqdm(loader, desc=f"Epoch {epoch+1}", leave=False):
-                x = batch["x"].to(self.device)
-                coords = batch["channel_locations"].to(self.device)
-                targets = batch["y"].to(self.device)
-                
-                optimizer.zero_grad()
-                logits = self.model(x, coords)
-                loss = criterion(logits, targets)
+        logits = self.head(cls)  # (B, K) or (B, K*L)
+
+        if self.is_multilabel_task:
+            B = logits.shape[0]
+            logits = logits.view(B, self.num_classes, self.num_labels_per_chunk)  # (B, K, L)
+        return logits
+
+
+def _ce_loss(model: ConcreteLeJEPAClinical, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """
+    single-label:
+      logits (B,K), y (B,)
+    multilabel-per-chunk:
+      logits (B,K,L), y (B,L)
+      -> flatten to (B*L,K) / (B*L,)
+    """
+    if not model.is_multilabel_task:
+        return model.loss_fn(logits, y)
+
+    # logits: (B,K,L), y: (B,L)
+    logits2 = logits.permute(0, 2, 1).contiguous().view(-1, model.num_classes)  # (B*L, K)
+    y2 = y.contiguous().view(-1)  # (B*L,)
+    return model.loss_fn(logits2, y2)
+
+
+@torch.no_grad()
+def _infer_indices_majority(pred_idx: np.ndarray, indices_mapping: np.ndarray) -> np.ndarray:
+    unique_idx = np.unique(indices_mapping)
+    out = []
+    for idx in unique_idx:
+        votes = pred_idx[indices_mapping == idx]
+        out.append(Counter(votes).most_common(1)[0][0])
+    return np.asarray(out)
+
+
+class EEGLeJEPAClinicalModel(AbstractModel):
+    def __init__(
+        self,
+        num_classes: int = 2,
+        num_labels_per_chunk: Optional[int] = None,
+        freeze_encoder: bool = True,
+        pretrained_path: Optional[str] = None,
+        batch_size: int = 64,
+        max_epochs: int = 30,
+        lr: float = 1e-4,
+        weight_decay: float = 0.01,
+        num_workers: int = 8,
+        val_split: float = 0.2,
+        patience: int = 10,
+    ):
+        super().__init__("LeJEPAClinical")
+        assert torch.cuda.is_available(), "CUDA is required"
+
+        self.device = torch.device("cuda")
+        self.num_classes = num_classes
+        self.num_labels_per_chunk = num_labels_per_chunk
+        self.is_multilabel_task = num_labels_per_chunk is not None
+
+        # match your clinical LaBraM logic
+        self.chunk_len_s = None if num_labels_per_chunk is None else 16
+
+        self.freeze_encoder = freeze_encoder
+        self.pretrained_path = pretrained_path
+
+        self.batch_size = batch_size
+        self.max_epochs = max_epochs
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.num_workers = num_workers
+        self.val_split = val_split
+        self.patience = patience
+
+        self.pos_bank = AutoModel.from_pretrained(
+            "brain-bzh/reve-positions",
+            trust_remote_code=True,
+            torch_dtype="auto",
+            token="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"
+        )
+
+        self.model = ConcreteLeJEPAClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            freeze_encoder=freeze_encoder,
+            pretrained_path=pretrained_path,
+        ).to(self.device)
+
+    def _coords(self, channel_names: List[str]) -> torch.Tensor:
+        coords = [c.replace("EEG", "").strip() for c in channel_names]
+        c = self.pos_bank(coords)  # per you: returns (C,3)
+        if isinstance(c, dict):
+            # if remote_code returns dict-like, prefer a common key
+            for k in ("coords", "positions", "last_hidden_state"):
+                if k in c:
+                    c = c[k]
+                    break
+        if c.dim() == 3 and c.shape[0] == 1:
+            c = c.squeeze(0)
+        return c.to(self.device).float()
+
+    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
+        task_name = meta[0]["task_name"]
+
+        # class weights same as clinical LaBraM
+        class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
+        self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
+        dataset_train = make_dataset_2(
+            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
+        )
+        ch_names = [c.upper() for c in dataset_train.ch_names]
+        print("[LeJEPA] dataset_train.ch_names (first 20):", ch_names[:20], "len=", len(ch_names))
+        if len(dataset_train) == 0:
+            raise ValueError(
+            f"[LeJEPA] dataset_train is empty. "
+            f"Check channel selection + windowing. "
+            f"Example meta[0]: name={meta[0].get('name')} sfreq={meta[0].get('sampling_frequency')} "
+            f"n_ch={len(meta[0].get('channel_names', []))} chunk_len_s={self.chunk_len_s}"
+
+        )
+
+        if self.val_split is not None:
+            dataset_train, dataset_val = dataset_train.split_train_val(self.val_split)
+        else:
+            dataset_val = None
+
+        ch_names_train = dataset_train.ch_names
+        ch_names_val = dataset_val.ch_names if dataset_val is not None else None
+
+        bs = 1 if self.chunk_len_s is None else self.batch_size
+
+        train_loader = DataLoader(
+            dataset_train, batch_size=bs, shuffle=True, num_workers=self.num_workers, pin_memory=True
+        )
+        val_loader = (
+            DataLoader(dataset_val, batch_size=bs, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+            if dataset_val is not None
+            else None
+        )
+
+        # only train head (and anything unfrozen)
+        optim_params = filter(lambda p: p.requires_grad, self.model.parameters())
+        optimizer = optim.AdamW(optim_params, lr=self.lr, weight_decay=self.weight_decay)
+
+        best_val = float("inf")
+        best_state = None
+        patience_ctr = 0
+
+        coords_train = self._coords(ch_names_train)
+
+        coords_val = self._coords(ch_names_val) if ch_names_val is not None else None
+
+        for _epoch in range(1, self.max_epochs + 1):
+            # ---- train
+            self.model.train()
+            if self.freeze_encoder:
+                self.model.backbone.eval()
+
+            for batch in tqdm(train_loader, desc="LeJEPA clinical train", leave=True):
+                x, yb, channels = batch  # matches your LaBraM clinical dataset contract
+
+                yb = yb.to(self.device)
+                if channels != -1 and channels[0] != -1:
+                    chs = [arr[0] for arr in channels]
+                    coords_b = self._coords(chs)
+                else:
+                    coords_b = coords_train
+
+                x = x.to(self.device)
+                cb = coords_b.unsqueeze(0).expand(x.size(0), -1, -1)
+
+                optimizer.zero_grad(set_to_none=True)
+                logits = self.model(x, cb)
+                loss = _ce_loss(self.model, logits, yb)
                 loss.backward()
                 optimizer.step()
 
-    def predict(self, X: List, meta: List[Dict]) -> np.ndarray:
-        X_flat, _ = self._flatten_data(X)
-        channel_coords = self._get_channel_coords(meta[0]["channel_names"])
-        
-        dataset = SimpleClinicalDataset(X_flat, None, channel_coords)
-        loader = DataLoader(dataset, batch_size=32, shuffle=False)
-        
-        self.model.eval()
-        preds = []
-        with torch.no_grad():
-            for batch in tqdm(loader, desc="Predicting"):
-                x = batch["x"].to(self.device)
-                coords = batch["channel_locations"].to(self.device)
-                
-                logits = self.model(x, coords)
-                preds.append(torch.argmax(logits, dim=1).cpu().numpy())
-        
-        return np.concatenate(preds)
+            # ---- val
+            if val_loader is None:
+                continue
 
-# --- Concrete Implementation of the Abstract Backbone ---
-class ConcreteLeJEPA(AbstractLeJEPAForBCI):
-    def __init__(self, num_classes, freeze_encoder=True):
-        super().__init__(freeze_encoder=freeze_encoder)
-        # Simple Linear Head on top of the 384-dim CLS token
-        self.head = nn.Linear(384, num_classes)
-        
-    def forward(self, x, channel_locations):
-        # x: (B, C, T)
-        # 1. Extract Features (CLS token)
-        # Note: We duplicate the coords for the batch if needed, or pass as is 
-        # depending on how your backbone expects it. 
-        # Usually backbone expects (B, C, 3).
-        if channel_locations.dim() == 2: # (C, 3)
-            B = x.shape[0]
-            channel_locations = channel_locations.unsqueeze(0).expand(B, -1, -1)
-            
-        feats = self.extract_features(x, channel_locations)
-        
-        # 2. Classify
-        return self.head(feats)
+            self.model.eval()
+            total_loss = 0.0
+            n = 0
+
+            with torch.no_grad():
+                for batch in tqdm(val_loader, desc="LeJEPA clinical val", leave=True):
+                    x, yb, channels = batch
+                    yb = yb.to(self.device)
+
+                    if channels != -1 and channels[0] != -1:
+                        chs = [arr[0] for arr in channels]
+                        coords_b = self._coords(chs)
+                    else:
+                        coords_b = cast(torch.Tensor, coords_val)
+
+                    x = x.to(self.device)
+                    cb = coords_b.unsqueeze(0).expand(x.size(0), -1, -1)
+
+                    logits = self.model(x, cb)
+                    loss = _ce_loss(self.model, logits, yb)
+
+                    total_loss += loss.item() * x.size(0)
+                    n += x.size(0)
+
+            val_loss = total_loss / max(n, 1)
+
+            if val_loss < best_val:
+                best_val = val_loss
+                best_state = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
+                patience_ctr = 0
+            else:
+                patience_ctr += 1
+                if patience_ctr >= self.patience:
+                    break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state, strict=True)
+
+    @torch.no_grad()
+    def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
+        task_name = meta[0]["task_name"]
+
+        dataset_test = make_dataset_2(
+            X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=True
+        )
+        if len(dataset_test) == 0:
+            return np.array([])
+
+        ch_names = dataset_test.ch_names
+        coords_default = self._coords(ch_names)
+
+        bs = 1 if self.chunk_len_s is None else self.batch_size
+        test_loader = DataLoader(
+            dataset_test, batch_size=bs, shuffle=False, num_workers=self.num_workers, pin_memory=True
+        )
+
+        self.model.eval()
+        pred_idx_all = []
+        idx_map_all = []
+
+        for batch in tqdm(test_loader, desc="LeJEPA clinical test", leave=True):
+            x, idx, channels = batch  # your dataset returns (x, idx, channels) at test time
+            if channels != -1 and channels[0] != -1:
+                chs = [arr[0] for arr in channels]
+                coords_b = self._coords(chs)
+            else:
+                coords_b = coords_default
+
+            x = x.to(self.device)
+            cb = coords_b.unsqueeze(0).expand(x.size(0), -1, -1)
+
+            logits = self.model(x, cb)
+
+            if self.is_multilabel_task:
+                # logits (B,K,L) -> per-window pred (B,L)
+                pred = torch.argmax(logits, dim=1)  # (B,L)
+                # keep raw multilabel predictions; dataset/benchmark expects these directly
+                pred_idx_all.append(pred.detach().cpu().numpy())
+                idx_map_all.append(idx.detach().cpu().numpy())
+            else:
+                pred = torch.argmax(logits, dim=1)  # (B,)
+                pred_idx_all.append(pred.detach().cpu().numpy())
+                idx_map_all.append(idx.detach().cpu().numpy())
+
+        pred_idx = np.concatenate(pred_idx_all, axis=0)
+        idx_map = np.concatenate(idx_map_all, axis=0)
+
+        if self.chunk_len_s is not None and not self.is_multilabel_task:
+            pred_idx = _infer_indices_majority(pred_idx, idx_map)
+
+        # map to benchmark label space
+        mapped = np.array([map_label_reverse(int(p), task_name) for p in np.asarray(pred_idx).reshape(-1)])
+        return mapped

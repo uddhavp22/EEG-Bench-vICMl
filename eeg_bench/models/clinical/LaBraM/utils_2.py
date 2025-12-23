@@ -571,12 +571,66 @@ def process_one_cli_unm(parameters, output_queue):
         # resample data
         signals = resample(signals.astype(np.float32), sfreq, 200, axis=1, filter='kaiser_best')
         out_freq = 200
+
+    elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+        # --- pick channels like clinical SVM / LaBraM does ---
+        ch_names = [ch.upper() for ch in o_channels]
+
+        # Clinical: usually use the fixed clinical channel list (like BrainfeaturesSVMModel)
+        # If you want task-dependent channels instead, swap this for get_channels(task_name).
+        # Here is the clinical 49-ch list you showed (keep it in one place in your codebase).
+        required_channels = [
+            'C4','FC3','P6','O1','CP4','C5','PO7','TP7','F4','P3','CP6','C3','FC4','F5','FC5',
+            'CP2','F2','P2','P5','F8','CP1','FC1','C6','F7','C2','T7','FCZ','CZ','AF3','FC6',
+            'F6','TP8','CP5','P7','O2','F1','FC2','FZ','F3','P8','C1','P4','POZ','T8','PO8',
+            'AF4','P1','OZ','CP3'
+        ]
+        required_channels = [c.upper() for c in required_channels]
+
+        # Keep only channels present, stable order
+        target_channels = [ch for ch in required_channels if ch in ch_names]
+
+        if len(target_channels) == 0:
+            raise ValueError("No required LeJEPA clinical channels found in recording")
+
+        # Slice signals and update channel list
+        signals = signals[[ch_names.index(ch) for ch in target_channels], :]
+
+        # Limit to max duration (same as others)
+        max_duration_s = 30 * 60
+        if signals.shape[1] > int(max_duration_s * sfreq):
+            signals = signals[:, : int(max_duration_s * sfreq)]
+
+        # Filtering (match your other clinical branches)
+        signals = filter_data(
+            signals.astype(np.float64),
+            sfreq=sfreq,
+            l_freq=l_freq,
+            h_freq=h_freq,
+            method="fir",
+            verbose=False,
+        )
+        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+
+        # Resample to what your LeJEPA training expects.
+        # If your LeJEPA config expects 1500 timepoints @ 100 Hz for 15s windows, set to 100.
+        # If you want to mirror LaBraM clinical, set to 200.
+        # Pick ONE and keep it consistent with dataset windowing.
+        out_freq = 250
+        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+
+        # IMPORTANT: include target_channels so dataset can compute coords later
+        output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
+        logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(target_channels)})")
+        return
+
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
     # Send the processed data to the writer process
     output_queue.put((idx, signals, label, chunk_len_s, out_freq))
     logging.info(f"Processed recording {idx} with label {label}")
+    
     return
 
 def make_multilabels(X, y, task_event_map, chunk_len_s, num_labels_per_chunk, model_name):
