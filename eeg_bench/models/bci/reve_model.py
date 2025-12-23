@@ -1,6 +1,4 @@
-from ..abstract_model import AbstractModel
 import torch
-
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel
@@ -9,8 +7,13 @@ from typing import List, Dict, Union
 from tqdm import tqdm
 import logging
 from functools import partial
+from ..abstract_model import AbstractModel
 
-my_token='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'
+
+
+
+# Assuming AbstractModel is available in your path
+# from abstract_model import AbstractModel 
 
 class SimpleDataset(Dataset):
     """
@@ -33,7 +36,6 @@ class SimpleDataset(Dataset):
             return {"data": self.X[idx], "labels": self.y[idx]}
         return {"data": self.X[idx]}
 
-
 class REVEWrapper(nn.Module):
     """
     Wraps the HuggingFace REVE model.
@@ -42,13 +44,12 @@ class REVEWrapper(nn.Module):
     def __init__(self, n_channels, n_timepoints, n_classes, hidden_dim=512):
         super().__init__()
         # Load the backbone
+
+        my_token='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'
         self.backbone = AutoModel.from_pretrained(
             "brain-bzh/reve-base", 
             trust_remote_code=True, 
-            torch_dtype="auto",
-            token='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'
-            
-
+            torch_dtype="auto",token=my_token
         )
         
         # Freeze the backbone
@@ -85,14 +86,13 @@ class REVEBenchmarkModel(AbstractModel):
     def __init__(self):
         super().__init__("REVEModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        my_token='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'
         
         # Load the position bank once
         self.pos_bank = AutoModel.from_pretrained(
             "brain-bzh/reve-positions", 
             trust_remote_code=True, 
-            torch_dtype="auto",
-            token='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'
-
+            torch_dtype="auto",token=my_token
         )
         self.model = None
 

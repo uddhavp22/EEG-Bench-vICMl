@@ -33,6 +33,8 @@ from eeg_bench.models.bci import (
     LaBraMModel as LaBraMBci,
     BENDRModel as BENDRBci,
     NeuroGPTModel as NeuroGPTBci,
+    REVEBenchmarkModel as REVEBci,
+    LeJEPABBCIModel as LeJEPABci
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
@@ -59,18 +61,7 @@ ALL_TASKS_CLASSES = [
     RightHandvFeetMITask,
     LeftHandvRightHandvFeetvTongueMITask,
     FiveFingersMITask,
-]
-ALL_TASKS_CLASSES = [
-    EpilepsyClinicalTask,
-    AbnormalClinicalTask,
-    SleepStagesClinicalTask,
-    SeizureClinicalTask,
-    ArtifactBinaryClinicalTask,
-    ArtifactMulticlassClinicalTask,
-    LeftHandvRightHandMITask,
-    RightHandvFeetMITask,
-    LeftHandvRightHandvFeetvTongueMITask,
-    FiveFingersMITask,
+
 ]
 
 def benchmark(tasks, models, seed, reps=1): # Default reps=1
@@ -163,7 +154,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use. Options: lda, svm, labram, bendr, neurogpt"
+        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa"
     )
     parser.add_argument(
         "--seed",
@@ -210,6 +201,7 @@ def main():
         "labram": LaBraMClinical,
         "bendr": BENDRClinical,
         "neurogpt": NeuroGPTClinical,
+
     }
     bci_models_map = {
         "lda": CSPLDA,
@@ -217,6 +209,8 @@ def main():
         "labram": LaBraMBci,
         "bendr": BENDRBci,
         "neurogpt": NeuroGPTBci,
+        "reve": REVEBci
+        "lejepa": LeJEPABci
     }
 
     if args.all:
