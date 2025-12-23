@@ -283,6 +283,12 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 cb = coords_b.unsqueeze(0).expand(x.size(0), -1, -1)
 
                 optimizer.zero_grad(set_to_none=True)
+                print("x.shape:", tuple(x.shape), "dtype:", x.dtype, "device:", x.device)
+                if torch.is_tensor(cb):
+                    print("cb.shape:", tuple(cb.shape), "cb min/max:", cb.min().item(), cb.max().item(), "dtype:", cb.dtype)
+                else:
+                    print("cb:", type(cb), cb)
+
                 logits = self.model(x, cb)
                 loss = _ce_loss(self.model, logits, yb)
                 loss.backward()
