@@ -20,13 +20,14 @@ from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from .LaBraM import utils
 
 
-from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
-from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
-from eegfmchallenge.models.common import EncoderConfig
 # LeJEPA Models
 import sys
 sys.path.append("/teamspace/studios/this_studio")
 from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
+
+from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
+from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
+from eegfmchallenge.models.common import EncoderConfig
 from transformers import AutoModel
 
 class ConcreteLeJEPAClinical(nn.Module):
@@ -106,7 +107,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
         
         # 1. Dataset Loading (matching LaBraM exact args)
-        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True)
+        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False)
         
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
@@ -130,7 +131,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         coords_train = self._coords(dataset_train.ch_names)
         coords_val = self._coords(dataset_val.ch_names)
 
-        for epoch in range(1, 11):
+        for epoch in range(1, 4):
             self.model.train()
             for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
                 x, yb = x.to(self.device), yb.to(self.device)
@@ -146,30 +147,48 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 del x, yb, logits; torch.cuda.empty_cache()
 
     @torch.no_grad()
-    def predict(self, X, meta) -> np.ndarray:
+    def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
-        dataset_test = make_dataset_2(X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=True)
         
-        bs = 64 if self.chunk_len_s else 1
-        loader = DataLoader(dataset_test, batch_size=bs, shuffle=False)
+        # FIX: Ensure chunk_len_s is 16, NOT None
+        # This forces the test set to be broken into 16s windows
+        dataset_test = make_dataset_2(
+            X, None, meta, task_name, self.name, 
+            chunk_len_s=16, # Match training!
+            is_train=False, 
+            use_cache=True
+        )
+        
+        if len(dataset_test) == 0:
+            return np.array([])
+            
+        loader = DataLoader(dataset_test, batch_size=32, shuffle=False)
         coords = self._coords(dataset_test.ch_names)
-
         self.model.eval()
-        preds, indices = [], []
-        for x, idx, _ in tqdm(loader, desc="Predicting"):
+
+        preds_all = []
+        idx_map_all = []
+
+        for batch in tqdm(loader, desc="Predicting"):
+            x, idx, _ = batch
             x = x.to(self.device)
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+
             logits = self.model(x, cb)
-            preds.append(torch.argmax(logits, dim=1).cpu())
-            indices.append(idx.cpu())
+            
+            # Get window-level predictions
+            pred = torch.argmax(logits, dim=1)
+            preds_all.append(pred.cpu().numpy())
+            idx_map_all.append(idx.cpu().numpy())
 
-        preds = torch.cat(preds).numpy()
-        indices = torch.cat(indices).numpy()
+        preds = np.concatenate(preds_all)
+        idx_map = np.concatenate(idx_map_all)
 
-        if self.chunk_len_s and not self.model.is_multilabel_task:
-            # Majority voting
-            unique_ids = np.unique(indices)
-            final_preds = [Counter(preds[indices == i]).most_common(1)[0][0] for i in unique_ids]
-            preds = np.array(final_preds)
+        # Majority voting: Combine windows back into 1 patient prediction
+        unique_indices = np.unique(idx_map)
+        final_predictions = []
+        for i in unique_indices:
+            patient_votes = preds[idx_map == i]
+            final_predictions.append(Counter(patient_votes).most_common(1)[0][0])
 
-        return np.array([map_label_reverse(p, task_name) for p in preds])
+        return np.array([map_label_reverse(p, task_name) for p in final_predictions])
