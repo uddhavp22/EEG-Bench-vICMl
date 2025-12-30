@@ -197,7 +197,16 @@ class Kaya2018Dataset(BaseBCIDataset):
                 continue
 
             print(f"[↓] Downloading {file['name']}...")
-            response = requests.get(file["url"], stream=True)
+            session = requests.Session()
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Referer": "https://figshare.com/",
+                "Connection": "keep-alive",
+            }
+
+            response = session.get(file["url"], headers=headers, stream=True, allow_redirects=True, timeout=60)
             response.raise_for_status()
 
             with open(dest_path, "wb") as out_file:

@@ -145,8 +145,11 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
     model.train()
     running_loss, running_corrects, total_samples = 0.0, 0, 0
 
+
     for batch in tqdm(dataloader, desc="Training", leave=True):
+        
         x, y, channels = batch
+        print("x_shape:", x.shape)
         # x = x.to(device) will be done in the model
         y = y.to(device)
         

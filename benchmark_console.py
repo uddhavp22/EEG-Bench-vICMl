@@ -35,7 +35,7 @@ from eeg_bench.models.bci import (
     BENDRModel as BENDRBci,
     NeuroGPTModel as NeuroGPTBci,
     REVEBenchmarkModel as REVEBci,
-    LeJEPABBCIModel as LeJEPABci
+    EEGLeJEPABCIModel as LeJEPABci
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
