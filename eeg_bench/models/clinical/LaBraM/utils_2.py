@@ -576,16 +576,8 @@ def process_one_cli_unm(parameters, output_queue):
         # --- pick channels like clinical SVM / LaBraM does ---
         ch_names = [ch.upper() for ch in o_channels]
 
-        # Clinical: usually use the fixed clinical channel list (like BrainfeaturesSVMModel)
-        # If you want task-dependent channels instead, swap this for get_channels(task_name).
-        # Here is the clinical 49-ch list you showed (keep it in one place in your codebase).
-        required_channels = [
-            'C4','FC3','P6','O1','CP4','C5','PO7','TP7','F4','P3','CP6','C3','FC4','F5','FC5',
-            'CP2','F2','P2','P5','F8','CP1','FC1','C6','F7','C2','T7','FCZ','CZ','AF3','FC6',
-            'F6','TP8','CP5','P7','O2','F1','FC2','FZ','F3','P8','C1','P4','POZ','T8','PO8',
-            'AF4','P1','OZ','CP3'
-        ]
-        required_channels = [c.upper() for c in required_channels]
+        # Use task-dependent channels to keep LeJEPA inputs aligned with dataset ch_names.
+        required_channels = [c.upper() for c in get_channels(task_name)]
 
         # Keep only channels present, stable order
         target_channels = [ch for ch in required_channels if ch in ch_names]
