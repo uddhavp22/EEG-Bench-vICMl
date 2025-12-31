@@ -166,7 +166,7 @@ def main():
     parser.add_argument(
         "--reps",
         type=int,
-        default=5,
+        default=1,
         help="Number of repetitions with different seeds for variability assessment"
     )
     parser.add_argument(

@@ -1,5 +1,5 @@
 # lejepa_clinical_model.py
-
+from pathlib import Path
 from __future__ import annotations
 from typing import List, Dict, Optional, cast
 import numpy as np
@@ -31,27 +31,40 @@ from eegfmchallenge.models.common import EncoderConfig
 from transformers import AutoModel
 
 class ConcreteLeJEPAClinical(nn.Module):
-    def __init__(self, num_classes, num_labels_per_chunk, pretrained_path=None):
+    def __init__(self, num_classes, num_labels_per_chunk, base_path=None ,freeze_encoder=True):
         super().__init__()
         DIM = 384
         self.is_multilabel_task = num_labels_per_chunk is not None
+        if base_path:
+            base_path = Path(base_path) / f"version_{version}"
+            config_path = base_path / "config" / "config.pkl"
+            ckpt_path = base_path / "checkpoints/last.ckpt"
+        else:
+            config_path=None
+            ckpt_path=None
+
+        if config_path:
+            with open(config_path, "rb") as f:
+                pretrain_config = pickle.load(f)
+            cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+        else:
+            cfg = EEGLEJEPAConfig(
+                name="EEGLEJEPA",
+                dim=384,
+                proj_dim=16,
+                patch_size=25,
+                n_channels=128,
+                max_time=2000,
+                # ADD THESE THREE REQUIRED FIELDS:
+                patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
+                channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
+                encoder_config=EncoderConfig(dim=384, depth=12, heads=6, use_flash_attn=True),
+                # Optional but good to include:
+                predictor_config=EncoderConfig(dim=128, depth=4, heads=4, use_flash_attn=True),
+                masking={"mask_ratio": 0.5, "block_size_range": [5, 10], "strategy_probs": [1.0, 0.0, 0.0]},
+                use_scaler=False,
+            )
         
-        cfg = EEGLEJEPAConfig(
-            name="EEGLEJEPA",
-            dim=384,
-            proj_dim=16,
-            patch_size=25,
-            n_channels=128,
-            max_time=2000,
-            # ADD THESE THREE REQUIRED FIELDS:
-            patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
-            channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
-            encoder_config=EncoderConfig(dim=384, depth=12, heads=6, use_flash_attn=True),
-            # Optional but good to include:
-            predictor_config=EncoderConfig(dim=128, depth=4, heads=4, use_flash_attn=True),
-            masking={"mask_ratio": 0.5, "block_size_range": [5, 10], "strategy_probs": [1.0, 0.0, 0.0]},
-            use_scaler=False,
-        )
         self.backbone = cfg.build()
 
         if pretrained_path:
@@ -62,6 +75,15 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         # Head follows LaBraM clinical style: Linear mapping to classes
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
+
+        if freeze_encoder:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+            self.backbone.eval() # Force eval mode to freeze running stats/dropout
+        else:
+            for p in self.backbone.parameters():
+                p.requires_grad = True
+            self.backbone.train()
         self.head = nn.Linear(DIM, out_dim)
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
@@ -131,7 +153,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         coords_train = self._coords(dataset_train.ch_names)
         coords_val = self._coords(dataset_val.ch_names)
 
-        for epoch in range(1, 4):
+        num_epochs=30
+
+        for epoch in range(num_epochs):
             self.model.train()
             for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
                 x, yb = x.to(self.device), yb.to(self.device)
