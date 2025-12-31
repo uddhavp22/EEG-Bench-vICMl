@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from tqdm import tqdm
 from ...config import get_config_value
+from ...utils import wandb_utils
 import gc
 from collections import Counter
 import logging
@@ -374,6 +375,18 @@ class LaBraMModel(AbstractModel):
                     patience_counter = 0 # Reset patience
                 else:
                     patience_counter += 1 # Increment patience
+
+                if self.wandb_run:
+                    wandb_utils.log(
+                        {
+                            f"{self.name}/train_loss": train_loss,
+                            f"{self.name}/train_acc": train_acc,
+                            f"{self.name}/val_loss": val_loss,
+                            f"{self.name}/val_acc": val_acc,
+                            f"{self.name}/lr": current_lr,
+                        },
+                        step=epoch,
+                    )
                     
                 if patience_counter >= patience:
                     print(f"Early stopping triggered at epoch {epoch} (Patience: {patience})")

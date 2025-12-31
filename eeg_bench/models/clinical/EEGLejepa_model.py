@@ -29,6 +29,7 @@ from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
 from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
 from eegfmchallenge.models.common import EncoderConfig
 from transformers import AutoModel
+from ...utils import wandb_utils
 
 class ConcreteLeJEPAClinical(nn.Module):
     def __init__(self, num_classes, num_labels_per_chunk, base_path=None ,freeze_encoder=True):
@@ -157,6 +158,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
         for epoch in range(num_epochs):
             self.model.train()
+            total_loss = 0.0
+            total_samples = 0
+            correct = 0
+            total_acc_samples = 0
             for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
                 x, yb = x.to(self.device), yb.to(self.device)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -166,9 +171,22 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
                 optimizer.step()
+                total_loss += loss.item() * x.size(0)
+                total_samples += x.size(0)
+                if logits.dim() == 2:
+                    preds = torch.argmax(logits, dim=1)
+                    target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                    correct += (preds == target).sum().item()
+                    total_acc_samples += x.size(0)
                 
                 # Manual memory cleanup like LaBraM
                 del x, yb, logits; torch.cuda.empty_cache()
+
+            if self.wandb_run and total_samples:
+                metrics = {f"{self.name}/train_loss": total_loss / total_samples}
+                if total_acc_samples:
+                    metrics[f"{self.name}/train_acc"] = correct / total_acc_samples
+                wandb_utils.log(metrics, step=epoch + 1)
 
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
