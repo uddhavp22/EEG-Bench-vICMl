@@ -182,10 +182,34 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 # Manual memory cleanup like LaBraM
                 del x, yb, logits; torch.cuda.empty_cache()
 
+            val_loss = 0.0
+            val_samples = 0
+            val_correct = 0
+            val_acc_samples = 0
+            self.model.eval()
+            with torch.no_grad():
+                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}"):
+                    x, yb = x.to(self.device), yb.to(self.device)
+                    cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
+                    logits = self.model(x, cb)
+                    loss = self.model.loss_fn(logits, yb)
+                    val_loss += loss.item() * x.size(0)
+                    val_samples += x.size(0)
+                    if logits.dim() == 2:
+                        preds = torch.argmax(logits, dim=1)
+                        target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                        val_correct += (preds == target).sum().item()
+                        val_acc_samples += x.size(0)
+                    del x, yb, logits; torch.cuda.empty_cache()
+
             if self.wandb_run and total_samples:
                 metrics = {f"{self.name}/train_loss": total_loss / total_samples}
                 if total_acc_samples:
                     metrics[f"{self.name}/train_acc"] = correct / total_acc_samples
+                if val_samples:
+                    metrics[f"{self.name}/val_loss"] = val_loss / val_samples
+                    if val_acc_samples:
+                        metrics[f"{self.name}/val_acc"] = val_correct / val_acc_samples
                 wandb_utils.log(metrics, step=epoch + 1)
 
     @torch.no_grad()
