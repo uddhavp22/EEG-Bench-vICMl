@@ -39,7 +39,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         if base_path:
             base_path = Path(base_path) / f"version_{version}"
             config_path = base_path / "config" / "config.pkl"
-            ckpt_path = base_path / "checkpoints/last.ckpt"
+            pretrained_path = base_path / "checkpoints/last.ckpt"
         else:
             config_path=None
             pretrained_path=None
@@ -102,7 +102,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path=None):
+    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="None"):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
