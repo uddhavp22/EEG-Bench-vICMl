@@ -19,6 +19,7 @@ from tqdm import tqdm
 import math
 from joblib import Memory
 from ...config import get_config_value
+from ...utils import wandb_utils
 from datetime import datetime
 import logging
 import matplotlib.pyplot as plt
@@ -305,7 +306,18 @@ class LaBraMModel(AbstractModel):
                 patience_counter = 0 # Reset patience
             else:
                 patience_counter += 1 # Increment patience
-                
+
+            if self.wandb_run:
+                wandb_utils.log(
+                    {
+                        f"{self.name}/train_loss": avg_train_loss,
+                        f"{self.name}/train_acc": avg_train_acc,
+                        f"{self.name}/val_loss": avg_val_loss,
+                        f"{self.name}/val_acc": avg_val_acc,
+                    },
+                    step=epoch,
+                )
+
             if patience_counter >= patience:
                 print(f"Early stopping triggered at epoch {epoch} (Patience: {patience}) due to no improvement in validation loss.")
                 break # Exit the training loop

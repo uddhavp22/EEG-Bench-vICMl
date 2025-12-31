@@ -18,6 +18,7 @@ import sys
 sys.path.append("/teamspace/studios/this_studio")
 from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
 from transformers import AutoModel
+from ...utils import wandb_utils
 
 class ConcreteLeJEPABCI(nn.Module):
     def __init__(self, num_classes: int, pretrained_path: str = None):
@@ -103,6 +104,9 @@ class EEGLeJEPABCIModel(AbstractModel):
         
         self.model.train()
         for epoch in range(10): # BCI tasks converge quickly
+            total_loss = 0.0
+            correct = 0
+            total = 0
             for x, y_batch in tqdm(train_loader, desc=f"BCI Fit Epoch {epoch}"):
                 x, y_batch = x.to(self.device), y_batch.to(self.device).argmax(dim=1)
                 cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -112,6 +116,19 @@ class EEGLeJEPABCIModel(AbstractModel):
                 loss = self.model.loss_fn(logits, y_batch)
                 loss.backward()
                 optimizer.step()
+                total_loss += loss.item() * x.size(0)
+                preds = torch.argmax(logits, dim=1)
+                correct += (preds == y_batch).sum().item()
+                total += x.size(0)
+
+            if self.wandb_run and total:
+                wandb_utils.log(
+                    {
+                        f"{self.name}/train_loss": total_loss / total,
+                        f"{self.name}/train_acc": correct / total,
+                    },
+                    step=epoch + 1,
+                )
 
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:

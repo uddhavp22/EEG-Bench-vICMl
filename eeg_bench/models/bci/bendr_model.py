@@ -21,6 +21,7 @@ import math
 from .BENDR.dn3_ext import ConvEncoderBENDR
 from joblib import Memory
 from ...config import get_config_value
+from ...utils import wandb_utils
 import os
 import requests
 
@@ -247,6 +248,17 @@ class BENDRModel(AbstractModel):
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_model_state = self.model.state_dict()
+
+            if self.wandb_run:
+                wandb_utils.log(
+                    {
+                        f"{self.name}/train_loss": avg_train_loss,
+                        f"{self.name}/train_acc": avg_train_acc,
+                        f"{self.name}/val_loss": avg_val_loss,
+                        f"{self.name}/val_acc": avg_val_acc,
+                    },
+                    step=epoch,
+                )
         
         # Load the best model (if saved)
         if best_model_state is not None:

@@ -8,6 +8,7 @@ from tqdm import tqdm
 import logging
 from functools import partial
 from ..abstract_model import AbstractModel
+from ...utils import wandb_utils
 
 
 
@@ -204,7 +205,18 @@ class REVEBenchmarkModel(AbstractModel):
                 
                 pbar.set_postfix({'loss': total_loss/total})
 
-            print(f"Epoch {epoch+1} - Acc: {correct/total:.4f} - Loss: {total_loss/len(train_loader):.4f}")
+            avg_loss = total_loss / len(train_loader)
+            avg_acc = correct / total if total else 0
+            print(f"Epoch {epoch+1} - Acc: {avg_acc:.4f} - Loss: {avg_loss:.4f}")
+
+            if self.wandb_run:
+                wandb_utils.log(
+                    {
+                        f"{self.name}/train_loss": avg_loss,
+                        f"{self.name}/train_acc": avg_acc,
+                    },
+                    step=epoch + 1,
+                )
 
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         self.model.eval()

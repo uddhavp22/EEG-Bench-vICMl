@@ -7,9 +7,13 @@ class AbstractModel(ABC):
 
     def __init__(self, name: str):
         self.name = name
+        self.wandb_run = None
 
     def __str__(self):
         return self.name
+
+    def set_wandb_run(self, run) -> None:
+        self.wandb_run = run
 
     def validate_meta(self, meta: Dict) -> None:
         """

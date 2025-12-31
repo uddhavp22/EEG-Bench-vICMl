@@ -13,6 +13,7 @@ import math
 from torch.utils.data import DataLoader
 from .BENDR.dn3_ext import ConvEncoderBENDR
 from ...config import get_config_value
+from ...utils import wandb_utils
 from collections import Counter
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse, make_multilabels
@@ -258,6 +259,18 @@ class BENDRModel(AbstractModel):
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_state = self.model.state_dict()
+
+                if self.wandb_run:
+                    wandb_utils.log(
+                        {
+                            f"{self.name}/train_loss": train_loss,
+                            f"{self.name}/train_acc": train_acc,
+                            f"{self.name}/val_loss": val_loss,
+                            f"{self.name}/val_acc": val_acc,
+                            f"{self.name}/lr": current_lr,
+                        },
+                        step=epoch,
+                    )
         
         # Load the best model (if saved)
         if best_model_state is not None:
