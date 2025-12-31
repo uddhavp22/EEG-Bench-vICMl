@@ -182,7 +182,7 @@ def main():
     parser.add_argument(
         "--wandb-entity",
         type=str,
-        default="upanchavati", # Defaulted to your username
+        default="saarangp-ucla", # Defaulted to your username
         help="Weights & Biases entity (team/user) for logging loss curves"
     )
     # ------------------------------------------------------
@@ -321,3 +321,6 @@ def main():
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run)
     finally:
         wandb_utils.finish()
+
+if __name__ == "__main__":
+    main()

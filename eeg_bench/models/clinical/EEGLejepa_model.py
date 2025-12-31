@@ -32,7 +32,7 @@ from transformers import AutoModel
 from ...utils import wandb_utils
 
 class ConcreteLeJEPAClinical(nn.Module):
-    def __init__(self, num_classes, num_labels_per_chunk, base_path=None ,freeze_encoder=True):
+    def __init__(self, num_classes, num_labels_per_chunk, base_path=None ,version=None ,freeze_encoder=False):
         super().__init__()
         DIM = 384
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -42,7 +42,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             ckpt_path = base_path / "checkpoints/last.ckpt"
         else:
             config_path=None
-            ckpt_path=None
+            pretrained_path=None
 
         if config_path:
             with open(config_path, "rb") as f:
@@ -102,7 +102,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, pretrained_path=None):
+    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path=None):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
@@ -116,7 +116,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.model = ConcreteLeJEPAClinical(
             num_classes=num_classes, 
             num_labels_per_chunk=num_labels_per_chunk,
-            pretrained_path=pretrained_path
+            base_path=base_path
         ).to(self.device)
 
     def _coords(self, ch_names):
