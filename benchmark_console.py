@@ -152,7 +152,6 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        # Updated help text
         help="Task to run. Options: full, parkinsons, schizophrenia, mtbi, ocd, epilepsy, abnormal, sleep_stages, seizure, binary_artifact, multiclass_artifact, left_right, right_feet, left_right_feet_tongue, 5_fingers"
     )
     parser.add_argument(
@@ -172,18 +171,22 @@ def main():
         default=1,
         help="Number of repetitions with different seeds for variability assessment"
     )
+    
+    # --- CHANGE 1: Added defaults to Project and Entity ---
     parser.add_argument(
         "--wandb-project",
         type=str,
-        default=None,
+        default="eeg-bench-default", # Default project name (you can rename this)
         help="Weights & Biases project name for logging loss curves"
     )
     parser.add_argument(
         "--wandb-entity",
         type=str,
-        default=None,
+        default="upanchavati", # Defaulted to your username
         help="Weights & Biases entity (team/user) for logging loss curves"
     )
+    # ------------------------------------------------------
+
     parser.add_argument(
         "--wandb-mode",
         type=str,
@@ -197,6 +200,15 @@ def main():
         default=None,
         help="Weights & Biases group name for runs"
     )
+
+    # --- CHANGE 2: Added a flag to explicitly DISABLE wandb ---
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Set this flag to disable WandB logging (overrides defaults)"
+    )
+    # ----------------------------------------------------------
+
     parser.add_argument(
         "--all",
         action="store_true",
@@ -231,7 +243,6 @@ def main():
         "bendr": BENDRClinical,
         "neurogpt": NeuroGPTClinical,
         "lejepa": LeJEPAClinical
-
     }
     bci_models_map = {
         "lda": CSPLDA,
@@ -244,10 +255,13 @@ def main():
     }
 
     wandb_run = None
-    if args.wandb_project and args.wandb_mode != "disabled":
+    
+    # --- CHANGE 3: Logic now checks if "no_wandb" is FALSE ---
+    # It will run by default because args.no_wandb is False unless the flag is used.
+    if not args.no_wandb and args.wandb_mode != "disabled":
         wandb_run = wandb_utils.init_run(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
+            project=args.wandb_project, # Uses the default "eeg-bench-default"
+            entity=args.wandb_entity,   # Uses the default "upanchavati"
             group=args.wandb_group,
             name="EEG-Bench",
             mode=args.wandb_mode,
@@ -260,6 +274,7 @@ def main():
             },
         )
         wandb_utils.set_run(wandb_run)
+    # ---------------------------------------------------------
 
     try:
         if args.all:
@@ -281,36 +296,28 @@ def main():
             task_key = args.task.lower()
             model_key = args.model.lower()
             
-            # --- Handle task selection (single task vs. "full") ---
             if task_key == "full":
                 tasks_to_run = "full" 
             elif task_key not in tasks_map:
                 parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")
             else:
-                tasks_to_run = [tasks_map[task_key]()] # Single task instance list
-                
+                tasks_to_run = [tasks_map[task_key]()] 
             
-            # --- Handle model map selection (must check for "full" task_key) ---
             if task_key in ["parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy", "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"]:
                 models_map = clinical_models_map
             elif task_key in ["left_right", "right_feet", "left_right_feet_tongue", "5_fingers"]:
                 models_map = bci_models_map
-            elif task_key == "full": # If running "full", assume clinical map for model check
+            elif task_key == "full": 
                 models_map = clinical_models_map 
             else:
                 models_map = {}
                 parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")
-            # -----------------------------------------------------------------
             
             if model_key not in models_map:
                 parser.error(f"Invalid model specified. Choose from: {', '.join(models_map.keys())}")
             
             model_instance = models_map[model_key]
 
-            # Final call, using tasks_to_run for both "full" (string) and single task (list)
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run)
     finally:
         wandb_utils.finish()
-
-if __name__ == "__main__":
-    main()
