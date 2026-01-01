@@ -128,15 +128,8 @@ class REVEClinicalModel(AbstractModel):
             dataset_train = make_dataset_2(
                 X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
             )
-        if len(dataset_train) == 0:
-            print("[Warning] Dataset empty after retry. Skipping training.")
-            return
 
         dataset_train, dataset_val = dataset_train.split_train_val(0.2)
-
-        if len(dataset_train) == 0:
-            print("[Warning] Training split is empty after train/val split. Skipping training.")
-            return
 
         sample_data, _, _ = dataset_train[0]
         if self.model is None:
