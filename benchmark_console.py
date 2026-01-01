@@ -26,7 +26,8 @@ from eeg_bench.models.clinical import (
     LaBraMModel as LaBraMClinical,
     BENDRModel as BENDRClinical,
     NeuroGPTModel as NeuroGPTClinical,
-    EEGLeJEPAClinicalModel as LeJEPAClinical
+    EEGLeJEPAClinicalModel as LeJEPAClinical,
+    REVEClinicalModel as REVEClinical,
 )
 from eeg_bench.models.bci import (
     CSPLDAModel as CSPLDA,
@@ -242,7 +243,8 @@ def main():
         "labram": LaBraMClinical,
         "bendr": BENDRClinical,
         "neurogpt": NeuroGPTClinical,
-        "lejepa": LeJEPAClinical
+        "lejepa": LeJEPAClinical,
+        "reve": REVEClinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
