@@ -46,11 +46,10 @@ class REVEWrapper(nn.Module):
         super().__init__()
         # Load the backbone
 
-        my_token='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'
         self.backbone = AutoModel.from_pretrained(
             "brain-bzh/reve-base", 
             trust_remote_code=True, 
-            torch_dtype="auto",token=my_token
+            torch_dtype="auto",
         )
         
         # Freeze the backbone
@@ -87,13 +86,12 @@ class REVEBenchmarkModel(AbstractModel):
     def __init__(self):
         super().__init__("REVEModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        my_token='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'
         
         # Load the position bank once
         self.pos_bank = AutoModel.from_pretrained(
             "brain-bzh/reve-positions", 
             trust_remote_code=True, 
-            torch_dtype="auto",token=my_token
+            torch_dtype="auto",
         )
         self.model = None
 
@@ -104,7 +102,13 @@ class REVEBenchmarkModel(AbstractModel):
         """
         # Get embeddings for the specific channels of this task
         # shape: [1, n_channels, embed_dim]
-        raw_positions = self.pos_bank(channel_names) 
+        raw_positions = self.pos_bank(channel_names)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
+                "positions", raw_positions.get("coords", raw_positions.get("last_hidden_state"))
+            )
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
         
         def collate(batch, positions):
             # Stack data: [Batch, Channels, Time]
