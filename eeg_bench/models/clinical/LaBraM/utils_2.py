@@ -611,12 +611,12 @@ def process_one_cli_unm(parameters, output_queue):
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
         # Defossez-style robust scaling (LeJEPA only).
-        signals = signals * 1e6  # convert to microvolts
-        signals -= np.median(signals, axis=0, keepdims=True)
-        scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-        if scale < 1e-6:
-            scale = 1.0
-        signals = np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
+        # signals = signals * 1e6  # convert to microvolts
+        # signals -= np.median(signals, axis=0, keepdims=True)
+        # scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
+        # if scale < 1e-6:
+        #     scale = 1.0
+        # signals = np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
