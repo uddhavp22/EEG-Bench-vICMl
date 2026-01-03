@@ -17,14 +17,15 @@ from ...config import get_config_value
 from ...utils import wandb_utils
 
 import sys
-sys.path.append("/teamspace/studios/this_studio")
-from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
-from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
-from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
-from eegfmchallenge.models.common import EncoderConfig
+sys.path.append("/home/spanchavati/")
+from eegfm.models.eeglejepa import EEGLEJEPAConfig
+from eegfm.models.patch_embedder import ConvPatchEmbedderConfig
+from eegfm.models.channel_mixer import DynamicChannelMixerConfig
+from eegfm.models.common import EncoderConfig
 from transformers import AutoModel
 import random
 import math
+import pickle
 
 class ConcreteLeJEPABCI(nn.Module):
     def __init__(self, num_classes: int, pretrained_path: str | None = None, freeze_encoder: bool = True):
@@ -84,10 +85,16 @@ class EEGLeJEPABCIModel(AbstractModel):
         self.freeze_encoder = freeze_encoder
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
         
-        self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", 
-            trust_remote_code=True,
-        ).to(self.device)
+
+        # try:
+        #     self.pos_bank = AutoModel.from_pretrained(
+        #         "brain-bzh/reve-positions", 
+        #     ).to(self.device)
+        # except:
+        print("Loading folder saved pos bank")
+        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank").to(self.device)
+
+
 
     def _get_coords(self, ch_names):
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]

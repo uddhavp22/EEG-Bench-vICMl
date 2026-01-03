@@ -23,12 +23,12 @@ from .LaBraM import utils
 
 # LeJEPA Models
 import sys
-sys.path.append("/teamspace/studios/this_studio")
-from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
+sys.path.append("/home/spanchavati/")
+from eegfm.models.eeglejepa import EEGLEJEPAConfig
+from eegfm.models.patch_embedder import ConvPatchEmbedderConfig
+from eegfm.models.channel_mixer import DynamicChannelMixerConfig
+from eegfm.models.common import EncoderConfig
 
-from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
-from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
-from eegfmchallenge.models.common import EncoderConfig
 from transformers import AutoModel
 from ...utils import wandb_utils
 
@@ -161,16 +161,21 @@ class ConcreteLeJEPAClinical(nn.Module):
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/teamspace/studios/this_studio/pretrained_lejepas",version=0):
+    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global_local",version=2):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
         
         # Positions bank
-        self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", trust_remote_code=True
-        ).to(self.device)
+        # try:
+        #     self.pos_bank = AutoModel.from_pretrained(
+        #         "brain-bzh/reve-positions", 
+        #     ).to(self.device)
+        # except:
+            
+        print("Loading folder saved pos bank")
+        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank").to(self.device)
 
         self.model = ConcreteLeJEPAClinical(
             num_classes=num_classes, 
