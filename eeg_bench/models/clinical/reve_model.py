@@ -86,9 +86,10 @@ class REVEClinicalModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_classes = num_classes
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.chunk_len_s = (
-            chunk_len_s if chunk_len_s is not None else (16 if num_labels_per_chunk else 5)
-        )
+        if chunk_len_s is None and num_labels_per_chunk:
+            self.chunk_len_s = 16
+        else:
+            self.chunk_len_s = chunk_len_s
         self.freeze_backbone = freeze_backbone
 
         self.pos_bank = AutoModel.from_pretrained(
@@ -128,8 +129,14 @@ class REVEClinicalModel(AbstractModel):
             dataset_train = make_dataset_2(
                 X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
             )
+        if len(dataset_train) == 0:
+            print("[Warning] Dataset empty after retries. Skipping training.")
+            return
 
         dataset_train, dataset_val = dataset_train.split_train_val(0.2)
+        if len(dataset_train) == 0:
+            print("[Warning] Training split is empty. Skipping training.")
+            return
 
         sample_data, _, _ = dataset_train[0]
         if self.model is None:
