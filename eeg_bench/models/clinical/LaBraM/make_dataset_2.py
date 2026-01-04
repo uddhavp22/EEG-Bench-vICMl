@@ -54,7 +54,7 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
         else:
             y = y[0]
         t_channels = get_channels(task_name)
-        parameters = [(i, raw, label, montage, model_name, chunk_len_s) for i, (raw, label, montage) in enumerate(zip(X, y, montage_types))]
+        parameters = [(i, raw, label, montage, task_name, model_name, chunk_len_s) for i, (raw, label, montage) in enumerate(zip(X, y, montage_types))]
         worker_func = partial(process_one_epilepsy, output_queue=output_queue)
         with Pool(n_jobs) as pool:
             list(tqdm(pool.imap(worker_func, parameters), total=len(parameters),

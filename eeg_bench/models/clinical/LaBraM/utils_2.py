@@ -316,6 +316,15 @@ def process_bendr(raw):
 
     return signals[reorder_channels, :]
 
+def process_lejepa(raw, chs, out_sfreq=250):
+    raw = raw.reorder_channels(chs)
+    # Limit the raw data to a maximum of 30 minutes
+    max_duration_s = 30 * 60  # 30 minutes in seconds
+    if raw.times[-1] > max_duration_s:
+        raw.crop(tmax=max_duration_s)
+    raw = process_filter(raw, out_sfreq)
+    return raw.get_data(units="uV")
+
 def process_one_abnormal(parameters, output_queue):
     """
     Preprocess a single recording.
@@ -353,7 +362,7 @@ def process_one_epilepsy(parameters, output_queue):
     Preprocess a single recording.
     Instead of writing directly to disk, send the processed result to the output_queue.
     """
-    idx, raw, label, montage, model_name, chunk_len_s = parameters
+    idx, raw, label, montage, task_name, model_name, chunk_len_s = parameters
 
     if label is not None:
         label = map_label(label)
@@ -371,6 +380,17 @@ def process_one_epilepsy(parameters, output_queue):
         signals = process_neurogpt(raw)
     elif model_name == "BENDRModel":
         signals = process_bendr(raw)
+    elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+        t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
+        if "le" in montage:
+            ch_name_pattern = "EEG {}-LE"
+        else:
+            ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_lejepa(raw, chs, out_sfreq=250)
+        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(t_channels)})")
+        return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
