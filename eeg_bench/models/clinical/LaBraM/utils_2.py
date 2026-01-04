@@ -348,6 +348,14 @@ def process_one_abnormal(parameters, output_queue):
     elif model_name == "BENDRModel":
         signals = process_bendr(raw)
         assert raw.info['sfreq'] == 200
+    elif model_name == "LeJEPAClinical":
+        t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
+        t_channels = list(set(standard_1020).intersection(set(t_channels)))
+        ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_lejepa(raw, chs, out_sfreq=250)
+        assert raw.info['sfreq'] == 250
+    
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 

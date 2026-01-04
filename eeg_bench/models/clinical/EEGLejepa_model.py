@@ -150,6 +150,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
     def forward(self, x, coords):
         # Uses your downstream forward
+        breakpoint()
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
         if cls.dim() == 3:
