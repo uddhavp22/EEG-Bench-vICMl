@@ -119,6 +119,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Build backbone
         # ------------------------------------------------------------
         self.backbone = cfg.build()
+        self.chunk_length = 5000 #20s chunks!
 
         # ------------------------------------------------------------
         # Load pretrained weights (if available)
@@ -149,13 +150,29 @@ class ConcreteLeJEPAClinical(nn.Module):
 
 
     def forward(self, x, coords):
-        # Uses your downstream forward
-        breakpoint()
+
+        B, C, T = x.shape
+        n_chunks = T // self.chunk_length
+        x = x[:, :, :n_chunks * self.chunk_length]
+
+        # Reshape into segments:
+        x = x.view(B, C, n_chunks, self.chunk_length)
+        # Permute to (batch_size, num_chunks, n_channels, chunk_length)
+        x = x.permute(0, 2, 1, 3)
+        # Merge batch and chunk dimensions for efficient processing:
+        x = x.reshape(B * n_chunks, C, self.chunk_length)
+
+
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
+
+        # Restore the batch and chunk dimensions:
+        embedding_dim = cls.shape[1]
+        cls = cls.view(B, n_chunks, embedding_dim)
+        
+        # Simple aggregation: mean pooling over segments
         if cls.dim() == 3:
             cls = cls.mean(dim=1)
-        
         logits = self.head(cls)
         if self.is_multilabel_task:
             logits = logits.reshape(x.shape[0], self.num_classes, -1)
