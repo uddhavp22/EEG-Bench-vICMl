@@ -175,7 +175,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # except:
             
         print("Loading folder saved pos bank")
-        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank").to(self.device)
+        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank", trust_remote_code=True).to(self.device)
 
         self.model = ConcreteLeJEPAClinical(
             num_classes=num_classes, 
@@ -195,16 +195,17 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
         
         # 1. Dataset Loading (matching LaBraM exact args)
-        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False)
+        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True)
         
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
-            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False)
+            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False)
 
         # 3. Validation Split
         val_split = 0.2
         dataset_train, dataset_val = dataset_train.split_train_val(val_split)
+
 
         # 4. DataLoader Setup
         bs = 64 if self.chunk_len_s else 1
@@ -287,7 +288,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             X, None, meta, task_name, self.name, 
             chunk_len_s=16, # Match training!
             is_train=False, 
-            use_cache=False
+            use_cache = True
         )
         
         if len(dataset_test) == 0:
