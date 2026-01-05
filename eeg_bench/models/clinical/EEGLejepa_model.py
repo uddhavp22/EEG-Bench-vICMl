@@ -300,11 +300,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
         
-        # FIX: Ensure chunk_len_s is 16, NOT None
-        # This forces the test set to be broken into 16s windows
+        
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, 
-            chunk_len_s=16, # Match training!
+            chunk_len_s=None,
             is_train=False, 
             use_cache = True
         )
