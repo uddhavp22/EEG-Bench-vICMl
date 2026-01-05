@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Dict, Optional
+import os
 
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from ..abstract_model import AbstractModel
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from ...utils import wandb_utils
+os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
 from transformers import AutoModel
 from collections import Counter
 
