@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from typing import List, Dict, Optional, cast
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -29,6 +30,7 @@ from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
 from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
 from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
 from eegfmchallenge.models.common import EncoderConfig
+os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
 from transformers import AutoModel
 from ...utils import wandb_utils
 
