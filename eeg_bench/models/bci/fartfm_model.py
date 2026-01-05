@@ -32,7 +32,7 @@ class ConcreteFartfmBCI(nn.Module):
         
         DIM = 384
         cfg = EEGLEJEPAConfig(
-            name="EEGLEJEPA",
+            name="fartfm",
             dim=DIM,
             proj_dim=16,
             patch_size=25,

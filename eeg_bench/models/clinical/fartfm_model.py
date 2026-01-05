@@ -80,7 +80,7 @@ class ConcreteFartfmClinical(nn.Module):
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
         else:
             cfg = EEGLEJEPAConfig(
-                name="EEGLEJEPA",
+                name="fartfm",
                 dim=384,
                 proj_dim=16,
                 patch_size=25,
