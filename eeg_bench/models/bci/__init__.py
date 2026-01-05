@@ -4,5 +4,4 @@ from .csp_svm_model import CSPSVMModel
 from .labram_model import LaBraMModel
 from .neurogpt_model import NeuroGPTModel
 from .reve_model import REVEBenchmarkModel
-from .EEGLeJEPA_model import EEGLeJEPABCIModel
-
+from .fartfm_model import FartfmBCIModel

@@ -1,4 +1,4 @@
-# lejepa_clinical_model.py
+# fartfm_clinical_model.py
 
 from __future__ import annotations
 from typing import List, Dict, Optional, cast
@@ -21,7 +21,7 @@ from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from .LaBraM import utils
 
 
-# LeJEPA Models
+# Fartfm Models
 import sys
 sys.path.append("/teamspace/studios/this_studio")
 from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
@@ -35,7 +35,7 @@ from ...utils import wandb_utils
 import pickle
 from pathlib import Path
 
-class ConcreteLeJEPAClinical(nn.Module):
+class ConcreteFartfmClinical(nn.Module):
     def __init__(
         self,
         num_classes,
@@ -64,12 +64,12 @@ class ConcreteLeJEPAClinical(nn.Module):
             if candidate_config.exists():
                 config_path = candidate_config
             else:
-                print(f"[LeJEPAClinical] No config found at {candidate_config}. Using default config.")
+                print(f"[FartfmClinical] No config found at {candidate_config}. Using default config.")
 
             if candidate_ckpt.exists():
                 pretrained_path = candidate_ckpt
             else:
-                print(f"[LeJEPAClinical] No checkpoint found at {candidate_ckpt}. Training from scratch.")
+                print(f"[FartfmClinical] No checkpoint found at {candidate_ckpt}. Training from scratch.")
 
         # ------------------------------------------------------------
         # Build model config
@@ -128,7 +128,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
-            print("[LeJEPAClinical] Loaded pretrained weights")
+            print("[FartfmClinical] Loaded pretrained weights")
 
         # ------------------------------------------------------------
         # Freeze encoder if requested
@@ -160,9 +160,9 @@ class ConcreteLeJEPAClinical(nn.Module):
             logits = logits.reshape(x.shape[0], self.num_classes, -1)
         return logits
 
-class EEGLeJEPAClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/teamspace/studios/this_studio/pretrained_lejepas",version=0):
-        super().__init__("LeJEPAClinical")
+class FartfmClinicalModel(AbstractModel):
+    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/teamspace/studios/this_studio/pretrained_fartfms",version=0):
+        super().__init__("fartfmClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
@@ -172,7 +172,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             "brain-bzh/reve-positions", trust_remote_code=True
         ).to(self.device)
 
-        self.model = ConcreteLeJEPAClinical(
+        self.model = ConcreteFartfmClinical(
             num_classes=num_classes, 
             num_labels_per_chunk=num_labels_per_chunk,
             base_path=base_path,
