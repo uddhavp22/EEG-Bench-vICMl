@@ -183,7 +183,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
     def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global_local",version=2):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.chunk_len_s = None if num_labels_per_chunk is None else 16
+        self.chunk_len_s = 30 if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
         
         # Positions bank
@@ -304,7 +304,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, 
-            chunk_len_s=self.model.chunk_length//250,
+            chunk_len_s=self.chunk_len_s,
             is_train=False, 
             use_cache = True
         )
