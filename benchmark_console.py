@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import logging
 from tqdm import tqdm
 from eeg_bench.enums.split import Split
@@ -20,24 +21,6 @@ from eeg_bench.tasks.bci import (
     LeftHandvRightHandvFeetvTongueMITask,
     FiveFingersMITask,
 )
-from eeg_bench.models.clinical import (
-    BrainfeaturesLDAModel as BrainfeaturesLDA,
-    BrainfeaturesSVMModel as BrainfeaturesSVM,
-    LaBraMModel as LaBraMClinical,
-    BENDRModel as BENDRClinical,
-    NeuroGPTModel as NeuroGPTClinical,
-    FartfmClinicalModel as FartfmClinical,
-    REVEClinicalModel as REVEClinical,
-)
-from eeg_bench.models.bci import (
-    CSPLDAModel as CSPLDA,
-    CSPSVMModel as CSPSVM,
-    LaBraMModel as LaBraMBci,
-    BENDRModel as BENDRBci,
-    NeuroGPTModel as NeuroGPTBci,
-    REVEBenchmarkModel as REVEBci,
-    FartfmBCIModel as FartfmBci
-)
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
@@ -47,6 +30,14 @@ from eeg_bench.utils import wandb_utils
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _lazy_model_loader(module_path, class_name):
+    def _load():
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+
+    return _load
 
 
 ALL_TASKS_CLASSES = [
@@ -238,22 +229,52 @@ def main():
 
     # Mapping command-line strings to model classes
     clinical_models_map = {
-        "lda": BrainfeaturesLDA,
-        "svm": BrainfeaturesSVM,
-        "labram": LaBraMClinical,
-        "bendr": BENDRClinical,
-        "neurogpt": NeuroGPTClinical,
-        "fartfm": FartfmClinical,
-        "reve": REVEClinical,
+        "lda": _lazy_model_loader(
+            "eeg_bench.models.clinical.brainfeatures_lda_model",
+            "BrainfeaturesLDAModel",
+        ),
+        "svm": _lazy_model_loader(
+            "eeg_bench.models.clinical.brainfeatures_svm_model",
+            "BrainfeaturesSVMModel",
+        ),
+        "labram": _lazy_model_loader(
+            "eeg_bench.models.clinical.labram_model",
+            "LaBraMModel",
+        ),
+        "bendr": _lazy_model_loader(
+            "eeg_bench.models.clinical.bendr_model",
+            "BENDRModel",
+        ),
+        "neurogpt": _lazy_model_loader(
+            "eeg_bench.models.clinical.neurogpt_model",
+            "NeuroGPTModel",
+        ),
+        "fartfm": _lazy_model_loader(
+            "eeg_bench.models.clinical.fartfm_model",
+            "FartfmClinicalModel",
+        ),
+        "reve": _lazy_model_loader(
+            "eeg_bench.models.clinical.reve_model",
+            "REVEClinicalModel",
+        ),
     }
     bci_models_map = {
-        "lda": CSPLDA,
-        "svm": CSPSVM,
-        "labram": LaBraMBci,
-        "bendr": BENDRBci,
-        "neurogpt": NeuroGPTBci,
-        "reve": REVEBci,
-        "fartfm": FartfmBci
+        "lda": _lazy_model_loader("eeg_bench.models.bci.csp_lda_model", "CSPLDAModel"),
+        "svm": _lazy_model_loader("eeg_bench.models.bci.csp_svm_model", "CSPSVMModel"),
+        "labram": _lazy_model_loader("eeg_bench.models.bci.labram_model", "LaBraMModel"),
+        "bendr": _lazy_model_loader("eeg_bench.models.bci.bendr_model", "BENDRModel"),
+        "neurogpt": _lazy_model_loader(
+            "eeg_bench.models.bci.neurogpt_model",
+            "NeuroGPTModel",
+        ),
+        "reve": _lazy_model_loader(
+            "eeg_bench.models.bci.reve_model",
+            "REVEBenchmarkModel",
+        ),
+        "fartfm": _lazy_model_loader(
+            "eeg_bench.models.bci.fartfm_model",
+            "FartfmBCIModel",
+        ),
     }
 
     wandb_run = None
@@ -288,7 +309,7 @@ def main():
                     models_map = bci_models_map
 
                 task_instance = task_cls()
-                model_classes = list(models_map.values())
+                model_classes = [model_loader() for model_loader in models_map.values()]
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run)
 
         else:
@@ -318,9 +339,9 @@ def main():
             if model_key not in models_map:
                 parser.error(f"Invalid model specified. Choose from: {', '.join(models_map.keys())}")
             
-            model_instance = models_map[model_key]
+            model_class = models_map[model_key]()
 
-            benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run)
+            benchmark(tasks_to_run, [model_class], args.seed, args.reps, wandb_run=wandb_run)
     finally:
         wandb_utils.finish()
 
