@@ -73,18 +73,18 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None): # Default reps=1
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
     print(tasks)
 
-    for task in tasks:
-        # --- ADD THIS DATA CHECK ---
-        try:
-            X_train, y_train, meta_train = task.get_data(Split.TRAIN)
-            X_test, y_test, meta_test = task.get_data(Split.TEST)
+    # for task in tasks:
+    #     # --- ADD THIS DATA CHECK ---
+    #     try:
+    #         X_train, y_train, meta_train = task.get_data(Split.TRAIN)
+    #         X_test, y_test, meta_test = task.get_data(Split.TEST)
             
-            if len(X_train) == 0:
-                logger.warning(f"Skipping task {task.name}: No training data found (check if dataset is downloaded).")
-                continue
-        except Exception as e:
-            logger.error(f"Failed to load data for task {task.name}: {e}")
-            continue
+    #         if len(X_train) == 0:
+    #             logger.warning(f"Skipping task {task.name}: No training data found (check if dataset is downloaded).")
+    #             continue
+    #     except Exception as e:
+    #         logger.error(f"Failed to load data for task {task.name}: {e}")
+    #         continue
     
     for task in tasks:
         # Logging for Task Clarity

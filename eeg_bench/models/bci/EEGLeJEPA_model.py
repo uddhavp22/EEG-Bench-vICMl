@@ -92,7 +92,7 @@ class EEGLeJEPABCIModel(AbstractModel):
         #     ).to(self.device)
         # except:
         print("Loading folder saved pos bank")
-        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank").to(self.device)
+        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank", trust_remote_code=True).to(self.device)
 
 
 
