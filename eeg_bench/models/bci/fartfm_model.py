@@ -1,4 +1,4 @@
-# lejepa_bci_model.py
+# fartfm_bci_model.py
 
 from __future__ import annotations
 from typing import List, Dict
@@ -26,13 +26,13 @@ from transformers import AutoModel
 import random
 import math
 
-class ConcreteLeJEPABCI(nn.Module):
+class ConcreteFartfmBCI(nn.Module):
     def __init__(self, num_classes: int, pretrained_path: str | None = None, freeze_encoder: bool = True):
         super().__init__()
         
         DIM = 384
         cfg = EEGLEJEPAConfig(
-            name="EEGLEJEPA",
+            name="fartfm",
             dim=DIM,
             proj_dim=16,
             patch_size=25,
@@ -75,9 +75,9 @@ class ConcreteLeJEPABCI(nn.Module):
             
         return self.head(cls)
 
-class EEGLeJEPABCIModel(AbstractModel):
+class FartfmBCIModel(AbstractModel):
     def __init__(self, pretrained_path: str | None = None, freeze_encoder: bool = True):
-        super().__init__("LeJEPABCI")
+        super().__init__("fartfmBCI")
         assert torch.cuda.is_available(), "CUDA is not available"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.pretrained_path = pretrained_path
@@ -147,7 +147,7 @@ class EEGLeJEPABCIModel(AbstractModel):
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         task_name = meta[0]["task_name"]
         num_classes = n_unique_labels(task_name)
-        self.model = ConcreteLeJEPABCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
+        self.model = ConcreteFartfmBCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
 
         datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
                     for X_, y_, m_ in zip(X, y, meta)]
