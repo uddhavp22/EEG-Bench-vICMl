@@ -153,7 +153,8 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         B, C, T = x.shape
         n_chunks = T // self.chunk_length
-        x = x[:, :, :n_chunks * self.chunk_length]
+        chunk_trunc = n_chunks * self.chunk_length if n_chunks else T
+        x = x[:, :, :chunk_trunc]
 
         # Reshape into segments:
         x = x.view(B, C, n_chunks, self.chunk_length)
@@ -303,7 +304,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, 
-            chunk_len_s=None,
+            chunk_len_s=self.model.chunk_length//250,
             is_train=False, 
             use_cache = True
         )
@@ -322,8 +323,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             x, idx, _ = batch
             x = x.to(self.device)
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
-
-            logits = self.model(x, cb)
+            
+            logits = self.model(x, cb) #forward insteadhere?    
+            # logits = self.
             
             # Get window-level predictions
             pred = torch.argmax(logits, dim=1)
