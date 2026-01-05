@@ -18,7 +18,6 @@ from ...config import get_config_value
 # LaBraM Clinical Utilities
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
-from .LaBraM import utils
 
 
 # Fartfm Models
