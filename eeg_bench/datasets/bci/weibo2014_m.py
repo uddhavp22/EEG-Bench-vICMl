@@ -91,6 +91,8 @@ class Weibo2014MDataset(BaseBCIDataset):
             self.data = np.array([])
             self.labels = np.array([])
             return
-        self.data, self.labels, _ = self.cache.cache(_load_data_weibo2014)(
-            paradigm, MI_Limb, self.subjects
+        cache_key = self._moabb_cache_key(paradigm.__class__.__name__)
+        self.data, self.labels, _ = self._load_moabb_cached(
+            cache_key,
+            lambda: _load_data_weibo2014(paradigm, MI_Limb, self.subjects),
         )  # type: ignore

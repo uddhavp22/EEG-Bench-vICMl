@@ -80,6 +80,8 @@ class Zhou2016MDataset(BaseBCIDataset):
             self.data = np.array([])
             self.labels = np.array([])
             return
-        self.data, self.labels, _ = self.cache.cache(_load_data_zhou2016)(
-            paradigm, Zhou2016M, self.subjects
+        cache_key = self._moabb_cache_key(paradigm.__class__.__name__)
+        self.data, self.labels, _ = self._load_moabb_cached(
+            cache_key,
+            lambda: _load_data_zhou2016(paradigm, Zhou2016M, self.subjects),
         )  # type: ignore

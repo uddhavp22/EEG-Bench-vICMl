@@ -75,6 +75,8 @@ class Cho2017MDataset(BaseBCIDataset):
             self.data = np.array([])
             self.labels = np.array([])
             return
-        self.data, self.labels, _ = self.cache.cache(_load_data_cho2017)(
-            paradigm, Cho2017M, self.subjects
+        cache_key = self._moabb_cache_key(paradigm.__class__.__name__)
+        self.data, self.labels, _ = self._load_moabb_cached(
+            cache_key,
+            lambda: _load_data_cho2017(paradigm, Cho2017M, self.subjects),
         )  # type: ignore
