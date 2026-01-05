@@ -26,7 +26,7 @@ from eeg_bench.models.clinical import (
     LaBraMModel as LaBraMClinical,
     BENDRModel as BENDRClinical,
     NeuroGPTModel as NeuroGPTClinical,
-    EEGLeJEPAClinicalModel as LeJEPAClinical,
+    FartfmClinicalModel as FartfmClinical,
     REVEClinicalModel as REVEClinical,
 )
 from eeg_bench.models.bci import (
@@ -36,7 +36,7 @@ from eeg_bench.models.bci import (
     BENDRModel as BENDRBci,
     NeuroGPTModel as NeuroGPTBci,
     REVEBenchmarkModel as REVEBci,
-    EEGLeJEPABCIModel as LeJEPABci
+    FartfmBCIModel as FartfmBci
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
@@ -158,7 +158,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa"
+        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, fartfm"
     )
     parser.add_argument(
         "--seed",
@@ -243,7 +243,7 @@ def main():
         "labram": LaBraMClinical,
         "bendr": BENDRClinical,
         "neurogpt": NeuroGPTClinical,
-        "lejepa": LeJEPAClinical,
+        "fartfm": FartfmClinical,
         "reve": REVEClinical,
     }
     bci_models_map = {
@@ -253,7 +253,7 @@ def main():
         "bendr": BENDRBci,
         "neurogpt": NeuroGPTBci,
         "reve": REVEBci,
-        "lejepa": LeJEPABci
+        "fartfm": FartfmBci
     }
 
     wandb_run = None

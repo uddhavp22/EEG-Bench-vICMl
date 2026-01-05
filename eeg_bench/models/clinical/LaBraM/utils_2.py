@@ -316,7 +316,7 @@ def process_bendr(raw):
 
     return signals[reorder_channels, :]
 
-def process_lejepa(raw, chs, out_sfreq=250):
+def process_fartfm(raw, chs, out_sfreq=250):
     raw = raw.reorder_channels(chs)
     # Limit the raw data to a maximum of 30 minutes
     max_duration_s = 30 * 60  # 30 minutes in seconds
@@ -380,16 +380,16 @@ def process_one_epilepsy(parameters, output_queue):
         signals = process_neurogpt(raw)
     elif model_name == "BENDRModel":
         signals = process_bendr(raw)
-    elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+    elif model_name == "fartfmClinical" or model_name == "fartfmBCI" or model_name == "fartfm":
         t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
         if "le" in montage:
             ch_name_pattern = "EEG {}-LE"
         else:
             ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        signals = process_lejepa(raw, chs, out_sfreq=250)
+        signals = process_fartfm(raw, chs, out_sfreq=250)
         output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
-        logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(t_channels)})")
+        logging.info(f"Processed recording {idx} with label {label} (fartfm channels={len(t_channels)})")
         return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
@@ -602,18 +602,18 @@ def process_one_cli_unm(parameters, output_queue):
         signals = resample(signals.astype(np.float32), sfreq, 200, axis=1, filter='kaiser_best')
         out_freq = 200
 
-    elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+    elif model_name == "fartfmClinical" or model_name == "fartfmBCI" or model_name == "fartfm":
         # --- pick channels like clinical SVM / LaBraM does ---
         ch_names = [ch.upper() for ch in o_channels]
 
-        # Use task-dependent channels to keep LeJEPA inputs aligned with dataset ch_names.
+        # Use task-dependent channels to keep fartfm inputs aligned with dataset ch_names.
         required_channels = [c.upper() for c in get_channels(task_name)]
 
         # Keep only channels present, stable order
         target_channels = [ch for ch in required_channels if ch in ch_names]
 
         if len(target_channels) == 0:
-            raise ValueError("No required LeJEPA clinical channels found in recording")
+            raise ValueError("No required fartfm clinical channels found in recording")
 
         # Slice signals and update channel list
         signals = signals[[ch_names.index(ch) for ch in target_channels], :]
@@ -634,13 +634,13 @@ def process_one_cli_unm(parameters, output_queue):
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
 
-        # Resample to what your LeJEPA training expects.
-        # If your LeJEPA config expects 1500 timepoints @ 100 Hz for 15s windows, set to 100.
+        # Resample to what your fartfm training expects.
+        # If your fartfm config expects 1500 timepoints @ 100 Hz for 15s windows, set to 100.
         # If you want to mirror LaBraM clinical, set to 200.
         # Pick ONE and keep it consistent with dataset windowing.
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
-        # Defossez-style robust scaling (LeJEPA only).
+        # Defossez-style robust scaling (fartfm only).
         # signals = signals * 1e6  # convert to microvolts
         # signals -= np.median(signals, axis=0, keepdims=True)
         # scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
@@ -650,7 +650,7 @@ def process_one_cli_unm(parameters, output_queue):
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
-        logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(target_channels)})")
+        logging.info(f"Processed recording {idx} with label {label} (fartfm channels={len(target_channels)})")
         return
 
     elif model_name == "REVEModel":
