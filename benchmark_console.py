@@ -3,24 +3,6 @@ import importlib
 import logging
 from tqdm import tqdm
 from eeg_bench.enums.split import Split
-from eeg_bench.tasks.clinical import (
-    AbnormalClinicalTask,
-    SchizophreniaClinicalTask,
-    MTBIClinicalTask,
-    OCDClinicalTask,
-    EpilepsyClinicalTask,
-    ParkinsonsClinicalTask,
-    SeizureClinicalTask,
-    ArtifactBinaryClinicalTask,
-    ArtifactMulticlassClinicalTask,
-    SleepStagesClinicalTask,
-)
-from eeg_bench.tasks.bci import (
-    LeftHandvRightHandMITask,
-    RightHandvFeetMITask,
-    LeftHandvRightHandvFeetvTongueMITask,
-    FiveFingersMITask,
-)
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
@@ -40,28 +22,77 @@ def _lazy_model_loader(module_path, class_name):
     return _load
 
 
-ALL_TASKS_CLASSES = [
-    ParkinsonsClinicalTask,
-    SchizophreniaClinicalTask,
-    MTBIClinicalTask,
-    OCDClinicalTask,
-    EpilepsyClinicalTask,
-    AbnormalClinicalTask,
-    SleepStagesClinicalTask,
-    SeizureClinicalTask,
-    ArtifactBinaryClinicalTask,
-    ArtifactMulticlassClinicalTask,
-    LeftHandvRightHandMITask,
-    RightHandvFeetMITask,
-    LeftHandvRightHandvFeetvTongueMITask,
-    FiveFingersMITask,
+def _lazy_task_loader(module_path, class_name):
+    def _load():
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
 
+    return _load
+
+
+ALL_TASKS_LOADERS = [
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.parkinsons_clinical_task",
+        "ParkinsonsClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.schizophrenia_clinical_task",
+        "SchizophreniaClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.mtbi_clinical_task",
+        "MTBIClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.ocd_clinical_task",
+        "OCDClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.epilepsy_clinical_task",
+        "EpilepsyClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.abnormal_clinical_task",
+        "AbnormalClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.sleep_stages_clinical_task",
+        "SleepStagesClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.seizure_clinical_task",
+        "SeizureClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.binary_artifact_clinical_task",
+        "ArtifactBinaryClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.clinical.multiclass_artifact_clinical_task",
+        "ArtifactMulticlassClinicalTask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.bci.left_hand_right_hand_mi_task",
+        "LeftHandvRightHandMITask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.bci.right_hand_feet_mi_task",
+        "RightHandvFeetMITask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.bci.left_hand_right_hand_feet_tongue_mi_task",
+        "LeftHandvRightHandvFeetvTongueMITask",
+    ),
+    _lazy_task_loader(
+        "eeg_bench.tasks.bci.five_fingers_mi_task",
+        "FiveFingersMITask",
+    ),
 ]
 
 def benchmark(tasks, models, seed, reps=1, wandb_run=None): # Default reps=1
     print("running bench")
     if tasks=="full":
-        tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
+        tasks = [task_loader()() for task_loader in ALL_TASKS_LOADERS]
     print(tasks)
 
     for task in tasks:
@@ -211,20 +242,62 @@ def main():
 
     # Mapping command-line strings to task classes
     tasks_map = {
-        "parkinsons": ParkinsonsClinicalTask,
-        "schizophrenia": SchizophreniaClinicalTask,
-        "mtbi": MTBIClinicalTask,
-        "ocd": OCDClinicalTask,
-        "epilepsy": EpilepsyClinicalTask,
-        "abnormal": AbnormalClinicalTask,
-        "left_right": LeftHandvRightHandMITask,
-        "right_feet": RightHandvFeetMITask,
-        "left_right_feet_tongue": LeftHandvRightHandvFeetvTongueMITask,
-        "5_fingers": FiveFingersMITask,
-        "sleep_stages": SleepStagesClinicalTask,
-        "seizure": SeizureClinicalTask,
-        "binary_artifact": ArtifactBinaryClinicalTask,
-        "multiclass_artifact": ArtifactMulticlassClinicalTask,
+        "parkinsons": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.parkinsons_clinical_task",
+            "ParkinsonsClinicalTask",
+        ),
+        "schizophrenia": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.schizophrenia_clinical_task",
+            "SchizophreniaClinicalTask",
+        ),
+        "mtbi": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.mtbi_clinical_task",
+            "MTBIClinicalTask",
+        ),
+        "ocd": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.ocd_clinical_task",
+            "OCDClinicalTask",
+        ),
+        "epilepsy": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.epilepsy_clinical_task",
+            "EpilepsyClinicalTask",
+        ),
+        "abnormal": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.abnormal_clinical_task",
+            "AbnormalClinicalTask",
+        ),
+        "left_right": _lazy_task_loader(
+            "eeg_bench.tasks.bci.left_hand_right_hand_mi_task",
+            "LeftHandvRightHandMITask",
+        ),
+        "right_feet": _lazy_task_loader(
+            "eeg_bench.tasks.bci.right_hand_feet_mi_task",
+            "RightHandvFeetMITask",
+        ),
+        "left_right_feet_tongue": _lazy_task_loader(
+            "eeg_bench.tasks.bci.left_hand_right_hand_feet_tongue_mi_task",
+            "LeftHandvRightHandvFeetvTongueMITask",
+        ),
+        "5_fingers": _lazy_task_loader(
+            "eeg_bench.tasks.bci.five_fingers_mi_task",
+            "FiveFingersMITask",
+        ),
+        "sleep_stages": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.sleep_stages_clinical_task",
+            "SleepStagesClinicalTask",
+        ),
+        "seizure": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.seizure_clinical_task",
+            "SeizureClinicalTask",
+        ),
+        "binary_artifact": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.binary_artifact_clinical_task",
+            "ArtifactBinaryClinicalTask",
+        ),
+        "multiclass_artifact": _lazy_task_loader(
+            "eeg_bench.tasks.clinical.multiclass_artifact_clinical_task",
+            "ArtifactMulticlassClinicalTask",
+        ),
     }
 
     # Mapping command-line strings to model classes
@@ -302,13 +375,13 @@ def main():
     try:
         if args.all:
             logger.info("Running all task/model combinations...")
-            for task_key, task_cls in tasks_map.items():
+            for task_key, task_loader in tasks_map.items():
                 if task_key in ["parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy", "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"]:
                     models_map = clinical_models_map
                 else:
                     models_map = bci_models_map
 
-                task_instance = task_cls()
+                task_instance = task_loader()()
                 model_classes = [model_loader() for model_loader in models_map.values()]
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run)
 
@@ -324,7 +397,7 @@ def main():
             elif task_key not in tasks_map:
                 parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")
             else:
-                tasks_to_run = [tasks_map[task_key]()] 
+                tasks_to_run = [tasks_map[task_key]()()] 
             
             if task_key in ["parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy", "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"]:
                 models_map = clinical_models_map

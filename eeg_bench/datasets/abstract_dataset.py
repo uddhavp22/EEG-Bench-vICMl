@@ -3,10 +3,14 @@ import os
 from joblib import Memory
 from ..enums.bci_classes import BCIClasses
 from ..enums.clinical_classes import ClinicalClasses
-from typing import Dict, Sequence, Tuple, List
-from mne.io import BaseRaw
+from typing import Dict, Sequence, Tuple, List, TYPE_CHECKING, Any
 import numpy as np
 from ..config import get_config_value
+
+if TYPE_CHECKING:
+    from mne.io import BaseRaw
+else:
+    BaseRaw = Any
 
 ClassesType = BCIClasses | ClinicalClasses
 DataType = np.ndarray | List[BaseRaw]

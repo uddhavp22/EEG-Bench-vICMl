@@ -1,15 +1,33 @@
+import importlib
+
 from .base_clinical_dataset import BaseClinicalDataset
-from .d001_cavanagh2018a import Cavanagh2018aDataset
-from .d002_cavanagh2018b import Cavanagh2018bDataset
-from .d004_albrecht2019 import Albrecht2019Dataset
-from .d005_singh2018 import Singh2018Dataset
-from .d007_brown2020 import Brown2020Dataset
-from .d008_gruendler2009 import Gruendler2009Dataset
-from .d009_cavanagh2019 import Cavanagh2019Dataset
-from .d011_singh2020 import Singh2020Dataset
-from .d014_singh2021 import Singh2021Dataset
-from .tueg_epilepsy import TUEGEpilepsyDataset
-from .tueg_abnormal import TUEGAbnormalDataset
-from .chb_mit import CHBMITDataset
-from .sleep_telemetry import SleepTelemetryDataset
-from .tueg_artifact import TUARDataset
+
+_DATASET_IMPORTS = {
+    "Cavanagh2018aDataset": "eeg_bench.datasets.clinical.d001_cavanagh2018a",
+    "Cavanagh2018bDataset": "eeg_bench.datasets.clinical.d002_cavanagh2018b",
+    "Albrecht2019Dataset": "eeg_bench.datasets.clinical.d004_albrecht2019",
+    "Singh2018Dataset": "eeg_bench.datasets.clinical.d005_singh2018",
+    "Brown2020Dataset": "eeg_bench.datasets.clinical.d007_brown2020",
+    "Gruendler2009Dataset": "eeg_bench.datasets.clinical.d008_gruendler2009",
+    "Cavanagh2019Dataset": "eeg_bench.datasets.clinical.d009_cavanagh2019",
+    "Singh2020Dataset": "eeg_bench.datasets.clinical.d011_singh2020",
+    "Singh2021Dataset": "eeg_bench.datasets.clinical.d014_singh2021",
+    "TUEGEpilepsyDataset": "eeg_bench.datasets.clinical.tueg_epilepsy",
+    "TUEGAbnormalDataset": "eeg_bench.datasets.clinical.tueg_abnormal",
+    "CHBMITDataset": "eeg_bench.datasets.clinical.chb_mit",
+    "SleepTelemetryDataset": "eeg_bench.datasets.clinical.sleep_telemetry",
+    "TUARDataset": "eeg_bench.datasets.clinical.tueg_artifact",
+}
+
+__all__ = ["BaseClinicalDataset", *_DATASET_IMPORTS.keys()]
+
+
+def __getattr__(name: str):
+    if name in _DATASET_IMPORTS:
+        module = importlib.import_module(_DATASET_IMPORTS[name])
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + __all__)
