@@ -323,7 +323,25 @@ def process_fartfm(raw, chs, out_sfreq=250):
     if raw.times[-1] > max_duration_s:
         raw.crop(tmax=max_duration_s)
     raw = process_filter(raw, out_sfreq)
+    signals = raw.get_data(units="V")
+    return defosse_scale(signals)
+
+def process_reve(raw, chs, out_sfreq=200):
+    raw = raw.reorder_channels(chs)
+    # Limit the raw data to a maximum of 30 minutes
+    max_duration_s = 30 * 60  # 30 minutes in seconds
+    if raw.times[-1] > max_duration_s:
+        raw.crop(tmax=max_duration_s)
+    raw = process_filter(raw, out_sfreq)
     return raw.get_data(units="uV")
+
+def defosse_scale(signals: np.ndarray) -> np.ndarray:
+    signals = signals * 1e6  # convert to microvolts
+    signals -= np.median(signals, axis=0, keepdims=True)
+    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
+    if scale < 1e-6:
+        scale = 1.0
+    return np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
 
 def process_one_abnormal(parameters, output_queue):
     """
@@ -348,6 +366,24 @@ def process_one_abnormal(parameters, output_queue):
     elif model_name == "BENDRModel":
         signals = process_bendr(raw)
         assert raw.info['sfreq'] == 200
+    elif model_name == "fartfmClinical" or model_name == "fartfmBCI" or model_name == "fartfm":
+        t_channels = get_channels("abnormal_clinical")
+        t_channels = [ch for ch in t_channels if ch in standard_1020]
+        ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_fartfm(raw, chs, out_sfreq=250)
+        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (fartfm channels={len(t_channels)})")
+        return
+    elif model_name == "REVEModel":
+        t_channels = get_channels("abnormal_clinical")
+        t_channels = [ch for ch in t_channels if ch in standard_1020]
+        ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_reve(raw, chs, out_sfreq=200)
+        output_queue.put((idx, signals, label, chunk_len_s, 200, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (REVE channels={len(t_channels)})")
+        return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -390,6 +426,17 @@ def process_one_epilepsy(parameters, output_queue):
         signals = process_fartfm(raw, chs, out_sfreq=250)
         output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (fartfm channels={len(t_channels)})")
+        return
+    elif model_name == "REVEModel":
+        t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
+        if "le" in montage:
+            ch_name_pattern = "EEG {}-LE"
+        else:
+            ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_reve(raw, chs, out_sfreq=200)
+        output_queue.put((idx, signals, label, chunk_len_s, 200, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (REVE channels={len(t_channels)})")
         return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
@@ -480,6 +527,27 @@ def process_one_multilabel(parameters, output_queue):
             assert len(reorder_channels) > 0
             signals = signals[reorder_channels, :]
         # if num_matching == 0, just keep the original channels
+    elif model_name == "fartfmClinical" or model_name == "fartfmBCI" or model_name == "fartfm":
+        target_channels = sorted(list(set(t_channels).intersection(set(raw.ch_names))))
+        if len(target_channels) > 0:
+            raw = raw.reorder_channels(target_channels)
+        else:
+            print("WARN: No channels from this sample match with those known to fartfm. Keeping original channels.")
+            target_channels = list(raw.ch_names)
+        raw = process_filter(raw, 250)
+        signals = raw.get_data(units="V")
+        signals = defosse_scale(signals)
+        out_channels = target_channels
+    elif model_name == "REVEModel":
+        target_channels = sorted(list(set(t_channels).intersection(set(raw.ch_names))))
+        if len(target_channels) > 0:
+            raw = raw.reorder_channels(target_channels)
+        else:
+            print("WARN: No channels from this sample match with those known to REVE. Keeping original channels.")
+            target_channels = list(raw.ch_names)
+        raw = process_filter(raw, 200)
+        signals = raw.get_data(units="uV")
+        out_channels = target_channels
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -641,12 +709,7 @@ def process_one_cli_unm(parameters, output_queue):
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
         # Defossez-style robust scaling (fartfm only).
-        signals = signals * 1e6  # convert to microvolts
-        signals -= np.median(signals, axis=0, keepdims=True)
-        scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-        if scale < 1e-6:
-            scale = 1.0
-        signals = np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
+        signals = defosse_scale(signals)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
