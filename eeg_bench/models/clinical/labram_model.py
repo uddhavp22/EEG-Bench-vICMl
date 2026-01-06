@@ -45,7 +45,7 @@ class LaBraMBCIModel(nn.Module):
         super().__init__()
         self.device = device
         self.chunks = chunks
-        checkpoint = torch.load(check_and_download_pretrained_model())
+        checkpoint = torch.load(check_and_download_pretrained_model(),weights_only=False)
         new_checkpoint = {}
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
