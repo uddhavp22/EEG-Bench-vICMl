@@ -72,7 +72,7 @@ class REVEClinicalWrapper(nn.Module):
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
     
-        self.head = nn.Sequential(torch.nn.Flatten(start_dim=1),torch.nn.LazyLinear(out_dim))
+        self.head = nn.Sequential(torch.nn.Flatten(start_dim=1),torch.nn.Linear(n_channels*hidden_dim,out_dim))
 
 
         self.loss_fn = nn.CrossEntropyLoss()
@@ -80,7 +80,9 @@ class REVEClinicalWrapper(nn.Module):
     def forward(self, x, pos):
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             features = self.backbone(x, pos)
+
             #print(features.shape)
+        features = features.mean(dim=2) 
         logits = self.head(features)
         #print(logits.shape)
         if self.is_multilabel_task:

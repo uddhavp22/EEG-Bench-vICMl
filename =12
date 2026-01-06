@@ -1,0 +1,36 @@
+Retrieving notices: - \ | / done
+Channels:
+ - conda-forge
+ - defaults
+Platform: linux-64
+Collecting package metadata (repodata.json): \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / done
+Solving environment: \ | done
+
+## Package Plan ##
+
+  environment location: /home/zeus/miniconda3/envs/cloudspace
+
+  added / updated specs:
+    - libstdcxx-ng
+
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    libstdcxx-ng-13.2.0        |       hc0a3c3a_7         3.7 MB  conda-forge
+    ------------------------------------------------------------
+                                           Total:         3.7 MB
+
+The following packages will be UPDATED:
+
+  ca-certificates    pkgs/main/linux-64::ca-certificates-2~ --> conda-forge/noarch::ca-certificates-2026.1.4-hbd8a1cb_0 
+  certifi            pkgs/main/linux-64::certifi-2025.11.1~ --> conda-forge/noarch::certifi-2026.1.4-pyhd8ed1ab_0 
+  libstdcxx-ng       pkgs/main::libstdcxx-ng-11.2.0-h12345~ --> conda-forge::libstdcxx-ng-13.2.0-hc0a3c3a_7 
+
+
+
+Downloading and Extracting Packages: ...working...libstdcxx-ng-13.2.0  | 3.7 MB    |            |   0% libstdcxx-ng-13.2.0  | 3.7 MB    |            |   0% libstdcxx-ng-13.2.0  | 3.7 MB    | ########## | 100% libstdcxx-ng-13.2.0  | 3.7 MB    | ########## | 100% libstdcxx-ng-13.2.0  | 3.7 MB    | ########## | 100%                                                       done
+Preparing transaction: - done
+Verifying transaction: | done
+Executing transaction: - \ | / - \ | / - \ | / - \ done
