@@ -50,7 +50,7 @@ class REVEClinicalWrapper(nn.Module):
         self.backbone = AutoModel.from_pretrained(
             "brain-bzh/reve-base",
             trust_remote_code=True,
-            torch_dtype="auto",
+            dtype="auto",
             token='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'
         )
 
@@ -68,9 +68,11 @@ class REVEClinicalWrapper(nn.Module):
                 or 512
             )
 
-        
+
+
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Linear(hidden_dim, out_dim)
+    
+        self.head = nn.Sequential(torch.nn.Flatten(start_dim=1),torch.nn.LazyLinear(out_dim))
 
 
         self.loss_fn = nn.CrossEntropyLoss()
@@ -78,9 +80,12 @@ class REVEClinicalWrapper(nn.Module):
     def forward(self, x, pos):
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             features = self.backbone(x, pos)
+            #print(features.shape)
         logits = self.head(features)
+        #print(logits.shape)
         if self.is_multilabel_task:
             logits = logits.view(x.shape[0], self.num_classes, -1)
+            print(logits.shape)
         return logits
 
 
@@ -152,6 +157,8 @@ class REVEClinicalModel(AbstractModel):
         print("Input shape",sample_data.shape)
         if self.model is None:
             self._init_model(sample_data)
+        
+        #print(self.model.backbone.config)
 
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
