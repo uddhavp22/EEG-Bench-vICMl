@@ -156,7 +156,7 @@ class EEGLeJEPABCIModel(AbstractModel):
         num_classes = n_unique_labels(task_name)
         self.model = ConcreteLeJEPABCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
 
-        datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
+        datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15, use_scaler=True)
                     for X_, y_, m_ in zip(X, y, meta)]
         
         dataset_train_list = [dataset[0] for dataset in datasets]
@@ -272,9 +272,12 @@ class EEGLeJEPABCIModel(AbstractModel):
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
+        if not hasattr(self, "model"):
+            num_classes = n_unique_labels(task_name)
+            self.model = ConcreteLeJEPABCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
         self.model.eval()
         
-        dataset_test_list = [self.cache.cache(make_dataset)(X_, None, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=False, split_size=0)
+        dataset_test_list = [self.cache.cache(make_dataset)(X_, None, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=False, split_size=0, use_scaler=True)
                              for X_, meta_ in zip(X, meta)]
         dataset_test_list = [dataset for dataset in dataset_test_list if len(dataset) > 0]
         ch_names_list = [dataset.ch_names for dataset in dataset_test_list]

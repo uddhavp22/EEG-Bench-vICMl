@@ -324,7 +324,17 @@ def process_lejepa(raw, chs, out_sfreq=250):
     if raw.times[-1] > max_duration_s:
         raw.crop(tmax=max_duration_s)
     raw = process_filter(raw, out_sfreq)
-    return raw.get_data(units="uV")
+    signals = raw.get_data(units="uV")
+    return apply_lejepa_scaling(signals)
+
+def apply_lejepa_scaling(signals: np.ndarray) -> np.ndarray:
+    # Defossez-style robust scaling (LeJEPA only).
+    signals = signals * 1e6  # convert to microvolts if needed; cancels under robust scaling
+    signals -= np.median(signals, axis=0, keepdims=True)
+    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
+    if scale < 1e-6:
+        scale = 1.0
+    return np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
 
 def process_one_abnormal(parameters, output_queue):
     """
@@ -649,13 +659,7 @@ def process_one_cli_unm(parameters, output_queue):
         # Pick ONE and keep it consistent with dataset windowing.
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
-        # Defossez-style robust scaling (LeJEPA only).
-        signals = signals * 1e6  # convert to microvolts
-        signals -= np.median(signals, axis=0, keepdims=True)
-        scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-        if scale < 1e-6:
-            scale = 1.0
-        signals = np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
+        signals = apply_lejepa_scaling(signals)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))

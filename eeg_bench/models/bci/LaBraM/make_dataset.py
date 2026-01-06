@@ -32,7 +32,8 @@ standard_1020 = [
 
 def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int, 
                  ch_names: List[str], target_rate: int = 200, target_channels: Optional[List[str]] = None,
-                 l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1) -> LaBraMBCIDataset:
+                 l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1,
+                 use_scaler: bool = False) -> LaBraMBCIDataset:
     """
     data: np.ndarray, shape=(n_trials, n_channels, n_samples)
     labels: np.ndarray, shape=(n_trials,)
@@ -69,6 +70,14 @@ def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, samp
     data = resample(data, sampling_rate, target_rate, axis=2, filter='kaiser_best')
     
     logging.info(f"data shape after resampling: {data.shape}")
+    if use_scaler:
+        # Defossez-style robust scaling (per-trial).
+        data = data.astype(np.float32) * 1e6
+        data = data - np.median(data, axis=1, keepdims=True)
+        scale = np.percentile(data, 75, axis=(1, 2)) - np.percentile(data, 25, axis=(1, 2))
+        scale[scale < 1e-6] = 1.0
+        data = data / scale[:, None, None]
+        data = np.clip(data, -20.0, 20.0).astype(np.float32)
     # Extend data to have a whole number of seconds by padding with zeros or trimming
     n_samples = data.shape[2]
     n_seconds = np.floor(n_samples / target_rate).astype(int)
