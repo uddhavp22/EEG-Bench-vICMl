@@ -19,10 +19,20 @@ from transformers import AutoModel
 from collections import Counter
 
 
+
 class REVEClinicalWrapper(nn.Module):
     """
     Wraps the HuggingFace REVE model with a classification head.
     """
+    from torch.backends.cuda import SDPBackend
+    try:
+        from torch.nn.attention import sdpa_kernel
+    except (ImportError, ModuleNotFoundError):
+        # Fallback: create a simple context manager that does nothing
+        from contextlib import contextmanager
+        @contextmanager
+        def sdpa_kernel(backends):
+            yield
 
     def __init__(
         self,
@@ -41,6 +51,7 @@ class REVEClinicalWrapper(nn.Module):
             "brain-bzh/reve-base",
             trust_remote_code=True,
             torch_dtype="auto",
+            token='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'
         )
 
         if freeze_backbone:
@@ -57,20 +68,17 @@ class REVEClinicalWrapper(nn.Module):
                 or 512
             )
 
-        input_dim = n_channels * n_timepoints * hidden_dim
+        
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
+        self.head = nn.Linear(hidden_dim, out_dim)
 
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.RMSNorm(input_dim),
-            nn.Dropout(0.1),
-            nn.Linear(input_dim, out_dim),
-        )
+
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x, pos):
-        features = self.backbone(x, pos)
-        logits = self.classifier(features)
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            features = self.backbone(x, pos)
+        logits = self.head(features)
         if self.is_multilabel_task:
             logits = logits.view(x.shape[0], self.num_classes, -1)
         return logits
@@ -95,7 +103,7 @@ class REVEClinicalModel(AbstractModel):
         self.freeze_backbone = freeze_backbone
 
         self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", trust_remote_code=True
+            "brain-bzh/reve-positions", trust_remote_code=True,token='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'
         ).to(self.device)
         self.model: Optional[REVEClinicalWrapper] = None
 
@@ -124,12 +132,12 @@ class REVEClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         dataset_train = make_dataset_2(
-            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
+            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
         )
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
             dataset_train = make_dataset_2(
-                X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
+                X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
             )
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty after retries. Skipping training.")
@@ -141,6 +149,7 @@ class REVEClinicalModel(AbstractModel):
             return
 
         sample_data, _, _ = dataset_train[0]
+        print("Input shape",sample_data.shape)
         if self.model is None:
             self._init_model(sample_data)
 
@@ -173,6 +182,8 @@ class REVEClinicalModel(AbstractModel):
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
+
+            
 
                 optimizer.zero_grad()
                 logits = self.model(x, cb)

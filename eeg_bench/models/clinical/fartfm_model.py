@@ -15,10 +15,17 @@ import gc
 from pathlib import Path
 from ..abstract_model import AbstractModel
 from ...config import get_config_value
-
+from transformers import AutoModel
 # LaBraM Clinical Utilities
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
+
+import transformers
+import os
+print("Transformers version:", transformers.__version__)
+print("Python executable:", __import__('sys').executable)
+print("Working directory:", os.getcwd())
+print("HF_HOME:", os.environ.get('HF_HOME', 'Not set'))
 
 
 # Fartfm Models
@@ -30,7 +37,7 @@ from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
 from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
 from eegfmchallenge.models.common import EncoderConfig
 os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
-from transformers import AutoModel
+
 from ...utils import wandb_utils
 
 import pickle
@@ -81,7 +88,7 @@ class ConcreteFartfmClinical(nn.Module):
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
         else:
             cfg = EEGLEJEPAConfig(
-                name="fartfm",
+                name="EEGLEJEPA",
                 dim=384,
                 proj_dim=16,
                 patch_size=25,
@@ -169,9 +176,8 @@ class FartfmClinicalModel(AbstractModel):
         self.num_labels_per_chunk = num_labels_per_chunk
         
         # Positions bank
-        self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", trust_remote_code=True
-        ).to(self.device)
+
+        self.pos_bank = AutoModel.from_pretrained("brain-bzh/reve-positions", trust_remote_code=True, torch_dtype="auto",token='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').to(self.device)
 
         self.model = ConcreteFartfmClinical(
             num_classes=num_classes, 
