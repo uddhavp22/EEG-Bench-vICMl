@@ -11,6 +11,8 @@ import time
 import os
 from ....config import get_config_value
 from ....utils.utils import get_multilabel_tasks
+from ..preprocess_utils import process_filter
+from ..lejepa_utils import process_lejepa, preprocess_lejepa_clinical
 
 
 channel_mapping = { "FP1": ["FP1", "FZ"],
@@ -236,17 +238,6 @@ def writer_task(output_queue, h5_path):
                             recording_grp.create_dataset('channels', data=channels)
     print("[Writer] All recordings have been written.")
 
-def process_filter(raw, sfreq):
-    l_freq: float = 0.1
-    h_freq: float = 75.0
-    raw.load_data()
-    raw.set_eeg_reference("average")
-    raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
-    if 0.5*raw.info['sfreq'] > 50.0:
-        raw.notch_filter(50.0)
-    raw.resample(sfreq)
-    return raw
-
 def process_labram(raw, chs):
     raw = raw.reorder_channels(chs)
     # Limit the raw data to a maximum of 30 minutes
@@ -316,25 +307,6 @@ def process_bendr(raw):
                 print(f"Channel {key} not found")
 
     return signals[reorder_channels, :]
-
-def process_lejepa(raw, chs, out_sfreq=250):
-    raw = raw.reorder_channels(chs)
-    # Limit the raw data to a maximum of 30 minutes
-    max_duration_s = 30 * 60  # 30 minutes in seconds
-    if raw.times[-1] > max_duration_s:
-        raw.crop(tmax=max_duration_s)
-    raw = process_filter(raw, out_sfreq)
-    signals = raw.get_data(units="uV")
-    return apply_lejepa_scaling(signals)
-
-def apply_lejepa_scaling(signals: np.ndarray) -> np.ndarray:
-    # Defossez-style robust scaling (LeJEPA only).
-    signals = signals * 1e6  # convert to microvolts if needed; cancels under robust scaling
-    signals -= np.median(signals, axis=0, keepdims=True)
-    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-    if scale < 1e-6:
-        scale = 1.0
-    return np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
 
 def process_one_abnormal(parameters, output_queue):
     """
@@ -622,44 +594,16 @@ def process_one_cli_unm(parameters, output_queue):
         out_freq = 200
 
     elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
-        # --- pick channels like clinical SVM / LaBraM does ---
-        ch_names = [ch.upper() for ch in o_channels]
-
-        # Use task-dependent channels to keep LeJEPA inputs aligned with dataset ch_names.
-        required_channels = [c.upper() for c in get_channels(task_name)]
-
-        # Keep only channels present, stable order
-        target_channels = [ch for ch in required_channels if ch in ch_names]
-
-        if len(target_channels) == 0:
-            raise ValueError("No required LeJEPA clinical channels found in recording")
-
-        # Slice signals and update channel list
-        signals = signals[[ch_names.index(ch) for ch in target_channels], :]
-
-        # Limit to max duration (same as others)
-        max_duration_s = 30 * 60
-        if signals.shape[1] > int(max_duration_s * sfreq):
-            signals = signals[:, : int(max_duration_s * sfreq)]
-
-        # Filtering (match your other clinical branches)
-        signals = filter_data(
-            signals.astype(np.float64),
-            sfreq=sfreq,
+        required_channels = get_channels(task_name)
+        signals, out_freq, target_channels = preprocess_lejepa_clinical(
+            signals,
+            o_channels,
+            required_channels,
+            sfreq,
             l_freq=l_freq,
             h_freq=h_freq,
-            method="fir",
-            verbose=False,
+            out_freq=250,
         )
-        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
-
-        # Resample to what your LeJEPA training expects.
-        # If your LeJEPA config expects 1500 timepoints @ 100 Hz for 15s windows, set to 100.
-        # If you want to mirror LaBraM clinical, set to 200.
-        # Pick ONE and keep it consistent with dataset windowing.
-        out_freq = 250
-        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
-        signals = apply_lejepa_scaling(signals)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
