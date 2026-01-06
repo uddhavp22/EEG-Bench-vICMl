@@ -42,7 +42,7 @@ class REVEWrapper(nn.Module):
     Wraps the HuggingFace REVE model.
     Freezes the backbone and adds a custom classification head.
     """
-    def __init__(self, n_channels, n_timepoints, n_classes, hidden_dim=512):
+    def __init__(self, n_channels, n_timepoints, n_classes, hidden_dim=None):
         super().__init__()
         # Load the backbone
 
@@ -51,6 +51,15 @@ class REVEWrapper(nn.Module):
             trust_remote_code=True, 
             torch_dtype="auto",
         )
+
+        if hidden_dim is None:
+            config = getattr(self.backbone, "config", None)
+            hidden_dim = (
+                getattr(config, "hidden_size", None)
+                or getattr(config, "hidden_dim", None)
+                or getattr(config, "d_model", None)
+                or 512
+            )
         
         # Freeze the backbone
         for param in self.backbone.parameters():
@@ -76,6 +85,8 @@ class REVEWrapper(nn.Module):
         # Pass through frozen backbone
         # Note: We rely on the backbone's internal forward which likely returns the hidden states
         features = self.backbone(x, pos)
+        if isinstance(features, dict):
+            features = features.get("last_hidden_state", features.get("features", features))
         
         # Pass through classifier
         logits = self.classifier(features)
@@ -100,6 +111,7 @@ class REVEBenchmarkModel(AbstractModel):
         Creates the specific collate function required by REVE.
         Maps channel names -> REVE Position Embeddings.
         """
+        channel_names = [c.replace("EEG", "").strip() for c in channel_names]
         # Get embeddings for the specific channels of this task
         # shape: [1, n_channels, embed_dim]
         raw_positions = self.pos_bank(channel_names)
