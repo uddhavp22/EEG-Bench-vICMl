@@ -24,16 +24,6 @@ class REVEClinicalWrapper(nn.Module):
     """
     Wraps the HuggingFace REVE model with a classification head.
     """
-    from torch.backends.cuda import SDPBackend
-    try:
-        from torch.nn.attention import sdpa_kernel
-    except (ImportError, ModuleNotFoundError):
-        # Fallback: create a simple context manager that does nothing
-        from contextlib import contextmanager
-        @contextmanager
-        def sdpa_kernel(backends):
-            yield
-
     def __init__(
         self,
         n_channels: int,
@@ -47,11 +37,13 @@ class REVEClinicalWrapper(nn.Module):
         self.is_multilabel_task = num_labels_per_chunk is not None
         self.num_classes = num_classes
 
+        # Get HuggingFace token from environment variable for security
+        hf_token = os.environ.get('HF_TOKEN', None)
         self.backbone = AutoModel.from_pretrained(
             "brain-bzh/reve-base",
             trust_remote_code=True,
             dtype="auto",
-            token='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'
+            token=hf_token
         )
 
         if freeze_backbone:
@@ -84,10 +76,8 @@ class REVEClinicalWrapper(nn.Module):
             #print(features.shape)
         features = features.mean(dim=2) 
         logits = self.head(features)
-        #print(logits.shape)
         if self.is_multilabel_task:
             logits = logits.view(x.shape[0], self.num_classes, -1)
-            print(logits.shape)
         return logits
 
 
@@ -109,8 +99,12 @@ class REVEClinicalModel(AbstractModel):
             self.chunk_len_s = chunk_len_s
         self.freeze_backbone = freeze_backbone
 
+        # Get HuggingFace token from environment variable for security
+        hf_token = os.environ.get('HF_TOKEN', None)
         self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", trust_remote_code=True,token='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'
+            "brain-bzh/reve-positions",
+            trust_remote_code=True,
+            token=hf_token
         ).to(self.device)
         self.model: Optional[REVEClinicalWrapper] = None
 
@@ -139,12 +133,12 @@ class REVEClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         dataset_train = make_dataset_2(
-            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
+            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
         )
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
             dataset_train = make_dataset_2(
-                X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
+                X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
             )
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty after retries. Skipping training.")
@@ -246,7 +240,7 @@ class REVEClinicalModel(AbstractModel):
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
         dataset_test = make_dataset_2(
-            X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=True
+            X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=False
         )
 
         if len(dataset_test) == 0:
@@ -271,11 +265,13 @@ class REVEClinicalModel(AbstractModel):
         predictions = torch.cat(predictions, dim=0).cpu().numpy()
         indices = torch.cat(indices, dim=0).cpu().numpy()
 
-        if self.chunk_len_s is not None and not self.model.is_multilabel_task:
+        # Aggregate predictions if using chunking (for both single-label and multi-label tasks)
+        if self.chunk_len_s is not None:
             unique_indices = np.unique(indices)
             aggregated_predictions = []
             for idx in unique_indices:
                 idx_predictions = predictions[indices == idx]
+                # Use majority voting to aggregate chunk predictions
                 most_common_prediction = Counter(idx_predictions).most_common(1)[0][0]
                 aggregated_predictions.append(most_common_prediction)
             predictions = np.array(aggregated_predictions)

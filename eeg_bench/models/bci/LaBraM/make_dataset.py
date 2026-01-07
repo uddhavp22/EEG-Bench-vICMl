@@ -1,5 +1,5 @@
 from .labram_datasets import LaBraMBCIDataset
-from .utils_2 import map_label, n_unique_labels
+from .utils_2 import map_label, n_unique_labels, defosse_scale
 import numpy as np
 from typing import List, Tuple, Optional, cast
 from resampy import resample
@@ -30,26 +30,43 @@ standard_1020 = [
     "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1", "FP2-F4", "F4-C4", "C4-P4", "P4-O2"
 ]
 
-def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int, 
+def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int,
                  ch_names: List[str], target_rate: int = 200, target_channels: Optional[List[str]] = None,
-                 l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1) -> LaBraMBCIDataset:
+                 l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1,
+                 model_name: Optional[str] = None) -> LaBraMBCIDataset:
     """
+    Preprocess BCI data with model-specific handling.
+
     data: np.ndarray, shape=(n_trials, n_channels, n_samples)
     labels: np.ndarray, shape=(n_trials,)
     ch_names: List[str], list of channel names
     target_channels: List[str], list of target channel names
     sampling_rate: int, sampling rate of the data
-    target_rate: int, target sampling rate
+    target_rate: int, target sampling rate (default 200 Hz)
     l_freq: int, low cut-off frequency
     h_freq: int, high cut-off frequency
+    model_name: str, model name for model-specific preprocessing
+        - "fartfmBCI": Uses 250 Hz sampling, defosse scaling (V->uV with robust normalization)
+        - "REVEModel": Uses 200 Hz sampling, uV units without scaling
+        - Default (LaBraM, etc.): Uses 200 Hz sampling, standard preprocessing
     """
     print("\ndata shape: ", data.shape)
     logging.info(f"data shape: {data.shape}")
+
+    # Override target_rate based on model requirements
+    if model_name == "fartfmBCI":
+        target_rate = 250  # FARTFM expects 250 Hz
+        logging.info(f"FARTFM detected: Using 250 Hz sampling rate")
+    elif model_name == "REVEModel":
+        target_rate = 200  # REVE expects 200 Hz
+        logging.info(f"REVE detected: Using 200 Hz sampling rate")
+
     if len(data) == 0:
         if train:
             return LaBraMBCIDataset(data, labels, sampling_rate, ch_names), LaBraMBCIDataset(data, labels, sampling_rate, ch_names)
         else:
             return LaBraMBCIDataset(data, labels, sampling_rate, ch_names)
+
     # filter out the channels that are not in the target_channels
     if target_channels is not None:
         ch_names = [ch.upper() for ch in ch_names]
@@ -67,7 +84,23 @@ def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, samp
     data = notch_filter(data, Fs=sampling_rate, freqs=50, verbose=False)
     # resample data
     data = resample(data, sampling_rate, target_rate, axis=2, filter='kaiser_best')
-    
+
+    # Model-specific preprocessing
+    if model_name == "fartfmBCI":
+        # FARTFM requires Defossez-style robust scaling
+        # Input: data is currently in default units (typically uV from MNE)
+        # FARTFM expects data in Volts before scaling, so convert uV -> V
+        logging.info("Applying FARTFM-specific preprocessing: V->uV with defosse scaling")
+        data = data * 1e-6  # Convert uV to V
+        # Apply defosse scaling (this will convert back to uV internally and apply robust normalization)
+        for i in range(data.shape[0]):
+            data[i] = defosse_scale(data[i])
+    elif model_name == "REVEModel":
+        # REVE expects microvolts (uV) without additional scaling
+        # MNE typically outputs in uV by default, so no conversion needed
+        logging.info("Applying REVE-specific preprocessing: using uV units without scaling")
+        # Data is already in uV from filter_data output, no additional processing needed
+
     logging.info(f"data shape after resampling: {data.shape}")
     # Extend data to have a whole number of seconds by padding with zeros or trimming
     n_samples = data.shape[2]
@@ -83,7 +116,7 @@ def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, samp
     if labels is not None:
         labels = np.array([map_label(label, task_name) for label in labels])
         labels = np.eye(n_unique_labels(task_name))[labels]
-        print("labels shape: ", labels.shape)  
+        print("labels shape: ", labels.shape)
     if train:
         data_train, data_val, labels_train, labels_val = train_test_split(data, labels, test_size=split_size, random_state=42)
         return LaBraMBCIDataset(data_train, labels_train, target_rate, target_channels), LaBraMBCIDataset(data_val, labels_val, target_rate, target_channels)

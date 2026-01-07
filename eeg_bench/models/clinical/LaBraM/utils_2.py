@@ -75,7 +75,7 @@ class LaBraMDataset2(Dataset):
     
     def __getitem__(self, idx):
         rec_name = self.recording_names[idx]
-        
+
         channels = -1
         with h5py.File(self.h5_path, 'r') as hf:
             recording_grp = hf[f'/recordings/{rec_name}']
@@ -83,8 +83,8 @@ class LaBraMDataset2(Dataset):
             label = recording_grp['label'][()] if 'label' in recording_grp else None
             if 'channels' in recording_grp:
                 channels = [ch.decode().upper() for ch in recording_grp['channels']]
-        
-        if self.is_train_set:        
+
+        if self.is_train_set:
             # If the recording is longer than 128 seconds (24000 samples at 200Hz),
             # select a random contiguous subsample of 320 seconds
             required_length = 128 * 200  # 24000 samples
@@ -92,10 +92,10 @@ class LaBraMDataset2(Dataset):
                 max_start = data.shape[-1] - required_length
                 start = np.random.randint(0, max_start + 1)
                 data = data[..., start:start+required_length]
-        
+
         # Convert to torch tensor
         data = torch.from_numpy(data).float()
-        
+
         return data, label, channels  # Data, label, channels for train
     
     def split_train_val(self, val_split=0.1):

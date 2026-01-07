@@ -86,6 +86,23 @@ def reverse_map_label(label: int, task_name: str) -> str:
     else:
         raise ValueError("Invalid label: ", label)
 
+def defosse_scale(signals: np.ndarray) -> np.ndarray:
+    """
+    Apply Defossez-style robust scaling for FARTFM model.
+    This scaling is ONLY for FARTFM - other models should NOT use it.
+
+    Args:
+        signals (np.ndarray): Input signals in Volts
+    Returns:
+        np.ndarray: Scaled signals (clipped to [-20, 20])
+    """
+    signals = signals * 1e6  # convert Volts to microvolts
+    signals -= np.median(signals, axis=0, keepdims=True)
+    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
+    if scale < 1e-6:
+        scale = 1.0
+    return np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
+
 def calc_class_weights(labels: List[np.ndarray], task_name: str) -> List[float]:
     """
     Calculate class weights for the given labels.
@@ -99,15 +116,15 @@ def calc_class_weights(labels: List[np.ndarray], task_name: str) -> List[float]:
 
     # Map labels to integers
     all_labels = np.array([map_label(label, task_name) for label in all_labels])
-    
+
     # Count the occurrences of each class
     class_counts = np.bincount(all_labels)
-    
+
     # Calculate the total number of samples
     total_samples = len(all_labels)
-    
+
     # Calculate class weights for each class (0 weight if class count is 0)
     n_classes = len(class_counts)
     class_weights = [np.float32(total_samples / (n_classes * count)) if count > 0 else np.float32(0.0) for count in class_counts]
-    
+
     return class_weights

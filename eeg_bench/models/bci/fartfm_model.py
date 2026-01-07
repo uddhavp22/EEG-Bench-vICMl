@@ -16,6 +16,7 @@ from joblib import Memory
 from ...config import get_config_value
 from ...utils import wandb_utils
 
+import os
 import sys
 sys.path.append("/teamspace/studios/this_studio")
 from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
@@ -84,9 +85,12 @@ class FartfmBCIModel(AbstractModel):
         self.freeze_encoder = freeze_encoder
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
         
+        # Get HuggingFace token from environment variable for security
+        hf_token = os.environ.get('HF_TOKEN', None)
         self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", 
+            "brain-bzh/reve-positions",
             trust_remote_code=True,
+            token=hf_token
         ).to(self.device)
 
     def _get_coords(self, ch_names):
@@ -149,7 +153,8 @@ class FartfmBCIModel(AbstractModel):
         num_classes = n_unique_labels(task_name)
         self.model = ConcreteFartfmBCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
 
-        datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
+        # Pass model_name to enable FARTFM-specific preprocessing (250 Hz + defosse scaling)
+        datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15, model_name="fartfmBCI")
                     for X_, y_, m_ in zip(X, y, meta)]
         
         dataset_train_list = [dataset[0] for dataset in datasets]
@@ -266,8 +271,9 @@ class FartfmBCIModel(AbstractModel):
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
         self.model.eval()
-        
-        dataset_test_list = [self.cache.cache(make_dataset)(X_, None, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=False, split_size=0)
+
+        # Pass model_name to enable FARTFM-specific preprocessing (250 Hz + defosse scaling)
+        dataset_test_list = [self.cache.cache(make_dataset)(X_, None, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=False, split_size=0, model_name="fartfmBCI")
                              for X_, meta_ in zip(X, meta)]
         dataset_test_list = [dataset for dataset in dataset_test_list if len(dataset) > 0]
         ch_names_list = [dataset.ch_names for dataset in dataset_test_list]

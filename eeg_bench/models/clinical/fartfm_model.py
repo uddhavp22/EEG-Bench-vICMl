@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import pickle
 from collections import Counter
 import gc
 from pathlib import Path
@@ -20,28 +19,19 @@ from transformers import AutoModel
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 
-import transformers
 import os
-print("Transformers version:", transformers.__version__)
-print("Python executable:", __import__('sys').executable)
-print("Working directory:", os.getcwd())
-print("HF_HOME:", os.environ.get('HF_HOME', 'Not set'))
-
+os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
 
 # Fartfm Models
 import sys
 sys.path.append("/teamspace/studios/this_studio")
 from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig
-
 from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig
 from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig
 from eegfmchallenge.models.common import EncoderConfig
-os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
 
 from ...utils import wandb_utils
-
 import pickle
-from pathlib import Path
 
 class ConcreteFartfmClinical(nn.Module):
     def __init__(
@@ -169,7 +159,7 @@ class ConcreteFartfmClinical(nn.Module):
         return logits
 
 class FartfmClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/teamspace/studios/this_studio/pretrained_fartfms",version=0):
+    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/teamspace/studios/this_studio/pretrained_lejepas",version=0):
         super().__init__("fartfmClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
@@ -177,7 +167,14 @@ class FartfmClinicalModel(AbstractModel):
         
         # Positions bank
 
-        self.pos_bank = AutoModel.from_pretrained("brain-bzh/reve-positions", trust_remote_code=True, torch_dtype="auto",token='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').to(self.device)
+        # Get HuggingFace token from environment variable for security
+        hf_token = os.environ.get('HF_TOKEN', None)
+        self.pos_bank = AutoModel.from_pretrained(
+            "brain-bzh/reve-positions",
+            trust_remote_code=True,
+            torch_dtype="auto",
+            token=hf_token
+        ).to(self.device)
 
         self.model = ConcreteFartfmClinical(
             num_classes=num_classes, 
@@ -282,13 +279,13 @@ class FartfmClinicalModel(AbstractModel):
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
-        
+
         # FIX: Ensure chunk_len_s is 16, NOT None
         # This forces the test set to be broken into 16s windows
         dataset_test = make_dataset_2(
-            X, None, meta, task_name, self.name, 
-            chunk_len_s=16, # Match training!
-            is_train=False, 
+            X, None, meta, task_name, self.name,
+            chunk_len_s=16,  # Match training!
+            is_train=False,
             use_cache=False
         )
         
