@@ -12,29 +12,47 @@ import pickle
 from collections import Counter
 import gc
 import math
+import sys
+import logging
 from pathlib import Path
 from ..abstract_model import AbstractModel
-from ...config import get_config_value
+from ...config import get_config_value, LeJEPAConfig
 
 # LaBraM Clinical Utilities
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from .LaBraM import utils
 
-
-# LeJEPA Models
-import sys
-sys.path.append("/home/spanchavati/")
-from eegfm.models.eeglejepa import EEGLEJEPAConfig
-from eegfm.models.patch_embedder import ConvPatchEmbedderConfig
-from eegfm.models.channel_mixer import DynamicChannelMixerConfig
-from eegfm.models.common import EncoderConfig
-
 from transformers import AutoModel
 from ...utils import wandb_utils
 
-import pickle
-from pathlib import Path
+logger = logging.getLogger(__name__)
+
+# eegfm imports are done dynamically in _setup_eegfm_imports()
+EEGLEJEPAConfig = None
+ConvPatchEmbedderConfig = None
+DynamicChannelMixerConfig = None
+EncoderConfig = None
+
+
+def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
+    """Setup eegfm imports by adding path to sys.path if needed."""
+    global EEGLEJEPAConfig, ConvPatchEmbedderConfig, DynamicChannelMixerConfig, EncoderConfig
+
+    if eegfm_path and eegfm_path not in sys.path:
+        sys.path.insert(0, eegfm_path)
+        logger.info(f"Added eegfm path to sys.path: {eegfm_path}")
+
+    # Import eegfm modules
+    from eegfm.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
+    from eegfm.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
+    from eegfm.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
+    from eegfm.models.common import EncoderConfig as _EncoderConfig
+
+    EEGLEJEPAConfig = _EEGLEJEPAConfig
+    ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig
+    DynamicChannelMixerConfig = _DynamicChannelMixerConfig
+    EncoderConfig = _EncoderConfig
 
 class ConcreteLeJEPAClinical(nn.Module):
     def __init__(
@@ -181,28 +199,83 @@ class ConcreteLeJEPAClinical(nn.Module):
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global_local",version=2):
+    def __init__(
+        self,
+        config: Optional[LeJEPAConfig] = None,
+        num_classes: int = 2,
+        num_labels_per_chunk: Optional[int] = None,
+        base_path: Optional[str] = None,
+        version: Optional[int] = None,
+        freeze_encoder: bool = True
+    ):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
-        
-        # Positions bank
-        # try:
-        #     self.pos_bank = AutoModel.from_pretrained(
-        #         "brain-bzh/reve-positions", 
-        #     ).to(self.device)
-        # except:
-            
-        print("Loading folder saved pos bank")
-        self.pos_bank = AutoModel.from_pretrained("/home/spanchavati/EEG-Bench-vICMl/REVE_posbank", trust_remote_code=True).to(self.device)
+
+        # Handle config vs legacy parameters
+        if config is not None:
+            # Use checkpoint path from config (get_checkpoint_path resolves full_path vs base_path+version)
+            checkpoint_path = config.get_checkpoint_path()
+            if checkpoint_path:
+                # Extract base_path and version from full path for ConcreteLeJEPAClinical
+                # which expects base_path/version_X/checkpoints/last.ckpt structure
+                ckpt_path = Path(checkpoint_path)
+                if ckpt_path.name == "last.ckpt" and ckpt_path.parent.name == "checkpoints":
+                    version_dir = ckpt_path.parent.parent
+                    if version_dir.name.startswith("version_"):
+                        base_path = str(version_dir.parent)
+                        version = int(version_dir.name.replace("version_", ""))
+                    else:
+                        # full_path mode - pass checkpoint directly
+                        base_path = None
+                        version = None
+                else:
+                    base_path = None
+                    version = None
+            else:
+                base_path = config.checkpoint_base_path
+                version = config.checkpoint_version
+            freeze_encoder = config.freeze_encoder
+            pos_bank_path = config.pos_bank_path
+            eegfm_path = config.eegfm_path
+        else:
+            # Legacy mode - use parameters directly (with old defaults if not provided)
+            pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
+            eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
+
+        # Setup eegfm imports
+        _setup_eegfm_imports(eegfm_path)
+
+        # Load position bank with HuggingFace fallback
+        self.pos_bank = self._load_position_bank(pos_bank_path)
 
         self.model = ConcreteLeJEPAClinical(
-            num_classes=num_classes, 
+            num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
             base_path=base_path,
-            version=version
+            version=version,
+            freeze_encoder=freeze_encoder
         ).to(self.device)
+
+    def _load_position_bank(self, local_fallback_path: str):
+        """Load REVE position bank - try HuggingFace first, fall back to local."""
+        try:
+            logger.info("Attempting to load position bank from HuggingFace Hub...")
+            pos_bank = AutoModel.from_pretrained(
+                "brain-bzh/reve-positions",
+                trust_remote_code=True
+            ).to(self.device)
+            logger.info("Successfully loaded position bank from HuggingFace Hub")
+            return pos_bank
+        except Exception as e:
+            logger.warning(f"Failed to load from HuggingFace Hub: {e}")
+            logger.info(f"Falling back to local path: {local_fallback_path}")
+            pos_bank = AutoModel.from_pretrained(
+                local_fallback_path,
+                trust_remote_code=True
+            ).to(self.device)
+            return pos_bank
 
     def _coords(self, ch_names):
         names = [c.replace("EEG", "").strip() for c in ch_names]
