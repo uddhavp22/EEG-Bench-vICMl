@@ -240,6 +240,9 @@ class EEGLeJEPABCIModel(AbstractModel):
                 else:
                     patience_counter += 1
 
+                # Get current learning rate
+                current_lr = scheduler.get_last_lr()[0]
+
                 if self.wandb_run:
                     wandb_utils.log(
                         {
@@ -247,14 +250,19 @@ class EEGLeJEPABCIModel(AbstractModel):
                             f"{self.name}/train_acc": avg_train_acc,
                             f"{self.name}/val_loss": avg_val_loss,
                             f"{self.name}/val_acc": avg_val_acc,
+                            f"{self.name}/lr": current_lr,
                         },
                         step=epoch,
                     )
 
+                # Always print to console for visibility
+                print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                      f"train_loss={avg_train_loss:.4f} train_acc={avg_train_acc:.4f} | "
+                      f"val_loss={avg_val_loss:.4f} val_acc={avg_val_acc:.4f} | "
+                      f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
+
                 if patience_counter >= patience:
-                    print(
-                        f"Early stopping triggered at epoch {epoch} (Patience: {patience}) due to no improvement in validation loss."
-                    )
+                    print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
                     break
             else:
                 if self.wandb_run:
@@ -265,6 +273,9 @@ class EEGLeJEPABCIModel(AbstractModel):
                         },
                         step=epoch,
                     )
+                # Console output for no-validation case
+                print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                      f"train_loss={avg_train_loss:.4f} train_acc={avg_train_acc:.4f}")
 
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
