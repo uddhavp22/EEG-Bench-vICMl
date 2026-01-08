@@ -16,7 +16,7 @@ import logging
 
 def apply_defossez_scaling(
     signals: np.ndarray,
-    is_uv: bool = True,
+    is_uv: bool = None,
     clip_range: tuple = (-20.0, 20.0),
     min_scale: float = 1e-6
 ) -> np.ndarray:
@@ -25,13 +25,21 @@ def apply_defossez_scaling(
 
     Args:
         signals: Input EEG signals, shape (n_trials, n_channels, n_timepoints) or (n_channels, n_timepoints)
-        is_uv: If True, data is already in microvolts; if False, converts from V to uV
+        is_uv: If True, data is already in microvolts; if False, converts from V to uV.
+               If None (default), auto-detects based on data magnitude.
         clip_range: Tuple of (min, max) values for clipping after scaling
         min_scale: Minimum scale value to prevent division by near-zero
 
     Returns:
         Scaled signals as float32 array
     """
+    # Auto-detect if data is in volts or microvolts
+    if is_uv is None:
+        # EEG in volts: typical magnitude ~1e-6 to 1e-4
+        # EEG in microvolts: typical magnitude ~1 to 1000
+        median_magnitude = np.median(np.abs(signals))
+        is_uv = median_magnitude > 1e-3  # If median > 1mV, assume already in µV
+
     if not is_uv:
         signals = signals * 1e6
     signals = signals - np.median(signals, axis=-1, keepdims=True)
@@ -176,8 +184,8 @@ def make_dataset_lejepa(data: np.ndarray, labels: np.ndarray|None, task_name: st
     elif new_n_samples < n_samples:
         data = data[:, :, :new_n_samples]
 
-    # Apply Defossez scaling (BCI data from MOABB is typically in V, so is_uv=False)
-    data = apply_defossez_scaling(data, is_uv=False)
+    # Apply Defossez scaling (auto-detects if data is in V or µV)
+    data = apply_defossez_scaling(data)
 
     # One hot encode labels
     if labels is not None:

@@ -15,7 +15,7 @@ from ....utils.utils import get_multilabel_tasks
 
 def apply_defossez_scaling(
     signals: np.ndarray,
-    is_uv: bool = True,
+    is_uv: bool = None,
     clip_range: tuple = (-20.0, 20.0),
     min_scale: float = 1e-6
 ) -> np.ndarray:
@@ -24,13 +24,21 @@ def apply_defossez_scaling(
 
     Args:
         signals: Input EEG signals, shape (n_channels, n_timepoints)
-        is_uv: If True, data is already in microvolts; if False, converts from V to uV
+        is_uv: If True, data is already in microvolts; if False, converts from V to uV.
+               If None (default), auto-detects based on data magnitude.
         clip_range: Tuple of (min, max) values for clipping after scaling
         min_scale: Minimum scale value to prevent division by near-zero
 
     Returns:
         Scaled signals as float32 array
     """
+    # Auto-detect if data is in volts or microvolts
+    if is_uv is None:
+        # EEG in volts: typical magnitude ~1e-6 to 1e-4
+        # EEG in microvolts: typical magnitude ~1 to 1000
+        median_magnitude = np.median(np.abs(signals))
+        is_uv = median_magnitude > 1e-3  # If median > 1mV, assume already in µV
+
     if not is_uv:
         signals = signals * 1e6
     signals = signals - np.median(signals, axis=0, keepdims=True)
@@ -342,7 +350,7 @@ def process_lejepa(raw, chs, out_sfreq=250):
         raw.crop(tmax=max_duration_s)
     raw = process_filter(raw, out_sfreq)
     signals = raw.get_data(units="uV")
-    signals = apply_defossez_scaling(signals, is_uv=True)
+    signals = apply_defossez_scaling(signals)
     return signals
 
 def process_one_abnormal(parameters, output_queue):
@@ -520,7 +528,7 @@ def process_one_multilabel(parameters, output_queue):
 
         raw = process_filter(raw, 250)
         signals = raw.get_data(units="uV")
-        signals = apply_defossez_scaling(signals, is_uv=True)
+        signals = apply_defossez_scaling(signals)
         out_channels = list(raw.ch_names)
 
         output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
@@ -685,7 +693,7 @@ def process_one_cli_unm(parameters, output_queue):
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
         # Apply Defossez scaling - data is NOT in uV yet (raw numpy from dataset)
-        signals = apply_defossez_scaling(signals, is_uv=False)
+        signals = apply_defossez_scaling(signals)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
