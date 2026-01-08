@@ -100,20 +100,13 @@ class Cavanagh2019Dataset(BaseClinicalDataset):
             self.load_data(split=Split.TRAIN)
 
     def _download(self):
-        marker_path = os.path.join(self.data_path, ".download_complete")
-        if os.path.exists(marker_path):
-            return
-
-        expected_index = os.path.join(self.data_path, "scripts", "BigAgg_Data.mat")
-        expected_data = glob.glob(os.path.join(self.data_path, "data", "*_3AOB.mat"))
-        if os.path.exists(expected_index) and expected_data:
-            with open(marker_path, "w") as file:
-                file.write("Dataset files detected locally; marked as downloaded.")
+        if os.path.exists(os.path.join(self.data_path, ".download_complete")):
+            # It appears the dataset is already downloaded
             return
         print(f"===== Downloading Dataset {self.name} =====")
         snapshot_download("jalauer/" + self.name, repo_type="dataset", local_dir=self.data_path, local_dir_use_symlinks=False, resume_download=True)
         print(f"===== Dataset {self.name} download complete. Files stored at {self.data_path} =====")
-        with open(marker_path, "w") as file:
+        with open(os.path.join(self.data_path, ".download_complete"), "w") as file:
             file.write("This file tells the benchmarking code that the download of this dataset has completed, in order to avoid repeated downloads.")
 
     def load_data(self, split) -> None:

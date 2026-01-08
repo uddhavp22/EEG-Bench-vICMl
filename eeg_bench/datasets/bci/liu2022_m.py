@@ -75,8 +75,6 @@ class Liu2022MDataset(BaseBCIDataset):
             self.data = np.array([])
             self.labels = np.array([])
             return
-        cache_key = self._moabb_cache_key(paradigm.__class__.__name__)
-        self.data, self.labels, _ = self._load_moabb_cached(
-            cache_key,
-            lambda: _load_data_liu2022(paradigm, Liu2022M, self.subjects),
+        self.data, self.labels, _ = self.cache.cache(_load_data_liu2022)(
+            paradigm, Liu2022M, self.subjects
         )  # type: ignore

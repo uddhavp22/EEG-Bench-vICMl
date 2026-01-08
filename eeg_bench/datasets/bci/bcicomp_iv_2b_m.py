@@ -69,8 +69,6 @@ class BCICompIV2bMDataset(BaseBCIDataset):
             self.data = np.array([])
             self.labels = np.array([])
         else:
-            cache_key = self._moabb_cache_key(paradigm.__class__.__name__)
-            self.data, self.labels, _ = self._load_moabb_cached(
-                cache_key,
-                lambda: _load_data_bcicomp_iv_2b(paradigm, BCI_IV_2b, self.subjects),
-            )  # type: ignore
+            self.data, self.labels, _ = self.cache.cache(_load_data_bcicomp_iv_2b)(
+            paradigm, BCI_IV_2b, self.subjects
+        )  # type: ignore
