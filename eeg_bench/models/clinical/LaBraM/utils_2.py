@@ -209,31 +209,20 @@ def writer_task(output_queue, h5_path):
                 # Split the signals into chunks
                 chunk_len = int(chunk_len_s * sfreq)
                 n_chunks = signals.shape[1] // chunk_len
-                if n_chunks == 0:
-                    recording_grp = recordings_grp.create_group(f'recording_{idx:04d}_000')
-                    recording_grp.create_dataset('data', data=signals)
-                    if label is not None:
+                if label is not None:
+                    num_labels_per_chunk = label.shape[-1] // n_chunks
+                signals = signals[:, :n_chunks * chunk_len].reshape(signals.shape[0], n_chunks, chunk_len)
+                for i in range(n_chunks):
+                    recording_grp = recordings_grp.create_group(f'recording_{idx:04d}_{i:03d}')
+                    recording_grp.create_dataset('data', data=signals[:, i, :])
+                    if label is not None and type(label) is not np.ndarray:
                         recording_grp.create_dataset('label', data=label)
+                    elif label is not None:
+                        recording_grp.create_dataset('label', data=label[i*num_labels_per_chunk:(i+1)*num_labels_per_chunk])
                     else:
                         recording_grp.create_dataset('label', data=idx)
                     if channels is not None:
-                            recording_grp.create_dataset('channels', data=channels)
-                else:
-                    num_labels_per_chunk = None
-                    if label is not None and isinstance(label, np.ndarray):
-                        num_labels_per_chunk = label.shape[-1] // n_chunks
-                    signals = signals[:, :n_chunks * chunk_len].reshape(signals.shape[0], n_chunks, chunk_len)
-                    for i in range(n_chunks):
-                        recording_grp = recordings_grp.create_group(f'recording_{idx:04d}_{i:03d}')
-                        recording_grp.create_dataset('data', data=signals[:, i, :])
-                        if label is not None and not isinstance(label, np.ndarray):
-                            recording_grp.create_dataset('label', data=label)
-                        elif label is not None and num_labels_per_chunk is not None:
-                            recording_grp.create_dataset('label', data=label[i*num_labels_per_chunk:(i+1)*num_labels_per_chunk])
-                        else:
-                            recording_grp.create_dataset('label', data=idx)
-                        if channels is not None:
-                            recording_grp.create_dataset('channels', data=channels)
+                        recording_grp.create_dataset('channels', data=channels)
     print("[Writer] All recordings have been written.")
 
 def process_filter(raw, sfreq):

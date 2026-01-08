@@ -250,6 +250,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
                 x, yb = x.to(self.device), yb.to(self.device)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
+
                 
                 optimizer.zero_grad()
                 logits = self.model(x, cb)
@@ -336,6 +337,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             pred = torch.argmax(logits, dim=1)
             preds_all.append(pred.cpu().numpy())
             idx_map_all.append(idx.cpu().numpy())
+
+
 
         preds = np.concatenate(preds_all)
         idx_map = np.concatenate(idx_map_all)
