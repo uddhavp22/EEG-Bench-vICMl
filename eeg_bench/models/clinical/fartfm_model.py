@@ -40,7 +40,7 @@ class ConcreteFartfmClinical(nn.Module):
         num_labels_per_chunk,
         base_path=None,
         version=None,
-        freeze_encoder=True,
+        freeze_encoder=False,
     ):
         super().__init__()
 
@@ -185,9 +185,20 @@ class FartfmClinicalModel(AbstractModel):
         ).to(self.device)
 
     def _coords(self, ch_names):
+        import sys
+        from io import StringIO
+
         names = [c.replace("EEG", "").strip() for c in ch_names]
-        print(names)
-        c = self.pos_bank(names)
+        #print(names)
+
+        # Suppress stdout from pos_bank model
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            c = self.pos_bank(names)
+        finally:
+            sys.stdout = old_stdout
+
         if isinstance(c, dict):
             c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
 
@@ -313,15 +324,16 @@ class FartfmClinicalModel(AbstractModel):
 
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name,
-            chunk_len_s=16, 
+            chunk_len_s=self.chunk_len_s, 
             is_train=False,
             use_cache=False
         )
         
         if len(dataset_test) == 0:
             return np.array([])
-            
-        loader = DataLoader(dataset_test, batch_size=32, shuffle=False)
+
+        bs = 64 if self.chunk_len_s else 1
+        loader = DataLoader(dataset_test, batch_size=bs, shuffle=False)
         self.model.eval()
 
         preds_all = []

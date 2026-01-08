@@ -67,7 +67,7 @@ class LaBraMBCIModel(nn.Module):
         #model.load_state_dict(new_checkpoint, strict=False)
         for blk in model.blocks:
             for p in blk.parameters():
-                p.requires_grad = True
+                p.requires_grad = False
         self.feature = model
         self.is_multilabel_task = num_labels_per_chunk is not None
         self.head = nn.Linear(200, num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1))
