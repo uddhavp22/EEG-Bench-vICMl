@@ -11,6 +11,7 @@ from tqdm import tqdm
 import pickle
 from collections import Counter
 import gc
+import math
 from pathlib import Path
 from ..abstract_model import AbstractModel
 from ...config import get_config_value
@@ -212,52 +213,69 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
     def fit(self, X, y, meta) -> None:
         task_name = meta[0]["task_name"]
-        
+
         # 1. Dataset Loading (matching LaBraM exact args)
         dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True)
-        
+
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
             dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False)
 
-        # 3. Validation Split
-        val_split = 0.2
+        # 3. Validation Split (aligned with BCI: 15%)
+        val_split = 0.15
         dataset_train, dataset_val = dataset_train.split_train_val(val_split)
-
 
         # 4. DataLoader Setup
         bs = 64 if self.chunk_len_s else 1
         train_loader = DataLoader(dataset_train, batch_size=bs, shuffle=True, num_workers=8, pin_memory=True)
         val_loader = DataLoader(dataset_val, batch_size=bs, shuffle=False)
-        
-        # 5. Training Setup
+
+        # 5. Training Setup (aligned with BCI)
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = optim.AdamW(self.model.parameters(), lr=4e-4)
-        
+
+        # Optimizer and Scheduler (matching BCI setup)
+        max_epochs = 30
+        steps_per_epoch = math.ceil(len(train_loader))
+        max_lr = 4e-4
+
+        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr,
+            steps_per_epoch=steps_per_epoch,
+            epochs=max_epochs,
+            pct_start=0.2,
+        )
+
+        # Early stopping setup (matching BCI)
+        patience = 10
+        patience_counter = 0
+        best_val_loss = float("inf")
+        best_model_state = None
+
         coords_train = self._coords(dataset_train.ch_names)
         coords_val = self._coords(dataset_val.ch_names)
 
-        num_epochs=30
-
-        for epoch in range(num_epochs):
+        for epoch in range(1, max_epochs + 1):
             self.model.train()
             total_loss = 0.0
             total_samples = 0
             correct = 0
             total_acc_samples = 0
-            for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
+            for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs}", leave=False):
                 x, yb = x.to(self.device), yb.to(self.device)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
 
-
-                
                 optimizer.zero_grad()
                 logits = self.model(x, cb)
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
+
                 total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)
                 if logits.dim() == 2:
@@ -266,18 +284,21 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     correct += (preds == target).sum().item()
                     total_acc_samples += x.size(0)
 
-                
-                
                 # Manual memory cleanup like LaBraM
                 del x, yb, logits; torch.cuda.empty_cache()
 
+            # Compute train metrics
+            train_loss = total_loss / total_samples if total_samples else 0.0
+            train_acc = correct / total_acc_samples if total_acc_samples else 0.0
+
+            # Validation
             val_loss = 0.0
             val_samples = 0
             val_correct = 0
             val_acc_samples = 0
             self.model.eval()
             with torch.no_grad():
-                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}"):
+                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}/{max_epochs}", leave=False):
                     x, yb = x.to(self.device), yb.to(self.device)
                     cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
                     logits = self.model(x, cb)
@@ -291,18 +312,45 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                         val_acc_samples += x.size(0)
                     del x, yb, logits; torch.cuda.empty_cache()
 
-            if total_samples:
-                metrics = {f"{self.name}/train_loss": total_loss / total_samples}
-                if total_acc_samples:
-                    metrics[f"{self.name}/train_acc"] = correct / total_acc_samples
-                if val_samples:
-                    metrics[f"{self.name}/val_loss"] = val_loss / val_samples
-                    if val_acc_samples:
-                        metrics[f"{self.name}/val_acc"] = val_correct / val_acc_samples
-                if self.wandb_run:
-                    wandb_utils.log(metrics, step=epoch + 1)
-                else:
-                    print(metrics)
+            # Compute val metrics
+            avg_val_loss = val_loss / val_samples if val_samples else 0.0
+            val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+
+            # Early stopping check
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            # Logging (wandb or console)
+            current_lr = scheduler.get_last_lr()[0]
+            metrics = {
+                f"{self.name}/train_loss": train_loss,
+                f"{self.name}/train_acc": train_acc,
+                f"{self.name}/val_loss": avg_val_loss,
+                f"{self.name}/val_acc": val_acc,
+                f"{self.name}/lr": current_lr,
+            }
+
+            if self.wandb_run:
+                wandb_utils.log(metrics, step=epoch)
+
+            # Always print to console for visibility
+            print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                  f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                  f"val_loss={avg_val_loss:.4f} val_acc={val_acc:.4f} | "
+                  f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
+
+            # Early stopping trigger
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
+                break
+
+        # Restore best model
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
             
 
 
