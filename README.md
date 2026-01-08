@@ -38,6 +38,23 @@ python benchmark_console.py --model labram --task lr
 
 With the option `--all` instead, it will run all tasks against all models. The number of repetitions can be set via `--reps` (default: 5).
 
+### EEGLeJEPA Options & Sweeps
+Use these flags when evaluating EEGLeJEPA:
+- `--lejepa-ckpt <path>`: evaluate a specific checkpoint.
+- `--lejepa-ckpt-dir <dir>`: evaluate all checkpoints in a folder (supports `.ckpt`/`.pth`).
+- `--lejepa-base-path <path>` and `--lejepa-version <n>`: override the default pretraining log location.
+- `--no-freeze-encoder`: unfreeze the encoder for downstream training.
+- `--data-frac 1 0.5 0.25`: run data-efficiency sweeps (fractions of training data).
+
+Examples:
+```bash
+python benchmark_console.py --task mtbi --model lejepa --lejepa-ckpt /path/to/ckpt.ckpt --data-frac 1 0.5 0.25
+python benchmark_console.py --task mtbi --model lejepa --lejepa-ckpt-dir /path/to/ckpts --data-frac 1
+python benchmark_console.py --task mtbi --model lejepa --no-freeze-encoder
+```
+
+Sweep metrics are appended to `results/sweep_results.csv` with per-dataset and overall rows.
+
 ### Available Tasks
 | Task Code | Task Class                     |
 |-----------|--------------------------------|
