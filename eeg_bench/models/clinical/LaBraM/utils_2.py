@@ -11,6 +11,7 @@ import time
 import os
 from ....config import get_config_value
 from ....utils.utils import get_multilabel_tasks
+from scipy.stats import iqr
 
 
 channel_mapping = { "FP1": ["FP1", "FZ"],
@@ -324,7 +325,7 @@ def process_fartfm(raw, chs, out_sfreq=250):
         raw.crop(tmax=max_duration_s)
     raw = process_filter(raw, out_sfreq)
     signals = raw.get_data(units="V")
-    return defosse_scale(signals)
+    return defossez_scale(signals)
 
 def process_reve(raw, chs, out_sfreq=200):
     raw = raw.reorder_channels(chs)
@@ -335,13 +336,15 @@ def process_reve(raw, chs, out_sfreq=200):
     raw = process_filter(raw, out_sfreq)
     return raw.get_data(units="uV")
 
-def defosse_scale(signals: np.ndarray) -> np.ndarray:
+def defossez_scale(signals: np.ndarray) -> np.ndarray:
     signals = signals * 1e6  # convert to microvolts
     signals -= np.median(signals, axis=0, keepdims=True)
-    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
+    scale = iqr(signals, None, rng=(25, 75), keepdims=True)
     if scale < 1e-6:
         scale = 1.0
-    return np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
+
+    data = np.clip(data / scale, -clip_value, clip_value)
+    return data
 
 def process_one_abnormal(parameters, output_queue):
     """
@@ -536,7 +539,7 @@ def process_one_multilabel(parameters, output_queue):
             target_channels = list(raw.ch_names)
         raw = process_filter(raw, 250)
         signals = raw.get_data(units="V")
-        signals = defosse_scale(signals)
+        signals = defossez_scale(signals)
         out_channels = target_channels
     elif model_name == "REVEModel":
         target_channels = sorted(list(set(t_channels).intersection(set(raw.ch_names))))
@@ -702,14 +705,16 @@ def process_one_cli_unm(parameters, output_queue):
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
 
-        # Resample to what your fartfm training expects.
-        # If your fartfm config expects 1500 timepoints @ 100 Hz for 15s windows, set to 100.
-        # If you want to mirror LaBraM clinical, set to 200.
-        # Pick ONE and keep it consistent with dataset windowing.
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
         # Defossez-style robust scaling (fartfm only).
-        signals = defosse_scale(signals)
+        # NOTE: Data from mtbi_clinical (Cavanagh2019) is already in microvolts,
+        # so we skip the 1e6 multiplication that would be used for Volt data
+        signals -= np.median(signals, axis=0, keepdims=True)
+        scale = iqr(signals, None, rng=(25, 75), keepdims=True)
+        if scale < 1e-6:
+            scale = 1.0
+        signals = np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))

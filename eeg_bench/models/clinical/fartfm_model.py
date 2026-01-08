@@ -150,6 +150,7 @@ class ConcreteFartfmClinical(nn.Module):
         # Uses your downstream forward
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
+        print("cls_token shape",cls.shape)
         if cls.dim() == 3:
             cls = cls.mean(dim=1)
         
@@ -185,10 +186,21 @@ class FartfmClinicalModel(AbstractModel):
 
     def _coords(self, ch_names):
         names = [c.replace("EEG", "").strip() for c in ch_names]
+        print(names)
         c = self.pos_bank(names)
         if isinstance(c, dict):
             c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
-        return c.squeeze(0).to(self.device).float() if c.dim() == 3 else c.to(self.device).float()
+
+        c = c.squeeze(0) if c.dim() == 3 else c
+
+        # Handle case where pos_bank returns fewer coords than requested channels
+        if c.shape[0] < len(names):
+            # Pad with mean of existing coords for missing channels
+            mean_coord = c.mean(dim=0, keepdim=True)
+            padding = mean_coord.repeat(len(names) - c.shape[0], 1)
+            c = torch.cat([c, padding], dim=0)
+
+        return c.to(self.device).float()
 
     def fit(self, X, y, meta) -> None:
         task_name = meta[0]["task_name"]
@@ -215,8 +227,8 @@ class FartfmClinicalModel(AbstractModel):
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = optim.AdamW(self.model.parameters(), lr=4e-4)
         
-        coords_train = self._coords(dataset_train.ch_names)
-        coords_val = self._coords(dataset_val.ch_names)
+        # Note: coords are computed per batch from actual channel names
+        # not pre-computed, to handle variable channels across samples
 
         num_epochs=30
 
@@ -226,9 +238,18 @@ class FartfmClinicalModel(AbstractModel):
             total_samples = 0
             correct = 0
             total_acc_samples = 0
-            for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
+            for x, yb, channels in tqdm(train_loader, desc=f"Epoch {epoch}"):
                 x, yb = x.to(self.device), yb.to(self.device)
-                cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
+
+                # Get coordinates for this batch's actual channels
+                if channels != -1 and channels[0] != -1:
+                    batch_ch_names = [ch_arr[0] for ch_arr in channels]
+                    cb = self._coords(batch_ch_names)
+                else:
+                    # Fallback to dataset-level channels if not available
+                    cb = self._coords(dataset_train.ch_names)
+
+                cb = cb.unsqueeze(0).expand(x.size(0), -1, -1)
                 
                 optimizer.zero_grad()
                 logits = self.model(x, cb)
@@ -252,9 +273,17 @@ class FartfmClinicalModel(AbstractModel):
             val_acc_samples = 0
             self.model.eval()
             with torch.no_grad():
-                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}"):
+                for x, yb, channels in tqdm(val_loader, desc=f"Val {epoch}"):
                     x, yb = x.to(self.device), yb.to(self.device)
-                    cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
+
+                    # Get coordinates for this batch's actual channels
+                    if channels != -1 and channels[0] != -1:
+                        batch_ch_names = [ch_arr[0] for ch_arr in channels]
+                        cb = self._coords(batch_ch_names)
+                    else:
+                        cb = self._coords(dataset_val.ch_names)
+
+                    cb = cb.unsqueeze(0).expand(x.size(0), -1, -1)
                     logits = self.model(x, cb)
                     loss = self.model.loss_fn(logits, yb)
                     val_loss += loss.item() * x.size(0)
@@ -280,11 +309,11 @@ class FartfmClinicalModel(AbstractModel):
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         task_name = meta[0]["task_name"]
 
-        # FIX: Ensure chunk_len_s is 16, NOT None
-        # This forces the test set to be broken into 16s windows
+        #
+
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name,
-            chunk_len_s=16,  # Match training!
+            chunk_len_s=16, 
             is_train=False,
             use_cache=False
         )
@@ -293,16 +322,23 @@ class FartfmClinicalModel(AbstractModel):
             return np.array([])
             
         loader = DataLoader(dataset_test, batch_size=32, shuffle=False)
-        coords = self._coords(dataset_test.ch_names)
         self.model.eval()
 
         preds_all = []
         idx_map_all = []
 
         for batch in tqdm(loader, desc="Predicting"):
-            x, idx, _ = batch
+            x, idx, channels = batch
             x = x.to(self.device)
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+
+            # Get coordinates for this batch's actual channels
+            if channels != -1 and channels[0] != -1:
+                batch_ch_names = [ch_arr[0] for ch_arr in channels]
+                cb = self._coords(batch_ch_names)
+            else:
+                cb = self._coords(dataset_test.ch_names)
+
+            cb = cb.unsqueeze(0).expand(x.size(0), -1, -1)
 
             logits = self.model(x, cb)
             
