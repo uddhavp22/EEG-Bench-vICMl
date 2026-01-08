@@ -13,6 +13,34 @@ from ....config import get_config_value
 from ....utils.utils import get_multilabel_tasks
 
 
+def apply_defossez_scaling(
+    signals: np.ndarray,
+    is_uv: bool = True,
+    clip_range: tuple = (-20.0, 20.0),
+    min_scale: float = 1e-6
+) -> np.ndarray:
+    """
+    Apply Defossez-style robust scaling for LeJEPA preprocessing.
+
+    Args:
+        signals: Input EEG signals, shape (n_channels, n_timepoints)
+        is_uv: If True, data is already in microvolts; if False, converts from V to uV
+        clip_range: Tuple of (min, max) values for clipping after scaling
+        min_scale: Minimum scale value to prevent division by near-zero
+
+    Returns:
+        Scaled signals as float32 array
+    """
+    if not is_uv:
+        signals = signals * 1e6
+    signals = signals - np.median(signals, axis=0, keepdims=True)
+    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
+    if scale < min_scale:
+        scale = 1.0
+    signals = np.clip(signals / scale, clip_range[0], clip_range[1])
+    return signals.astype(np.float32)
+
+
 channel_mapping = { "FP1": ["FP1", "FZ"],
                     "FP2": ["FP2", "FZ"],
                     "F7": ["F7", "FC3"],
@@ -313,7 +341,9 @@ def process_lejepa(raw, chs, out_sfreq=250):
     if raw.times[-1] > max_duration_s:
         raw.crop(tmax=max_duration_s)
     raw = process_filter(raw, out_sfreq)
-    return raw.get_data(units="uV")
+    signals = raw.get_data(units="uV")
+    signals = apply_defossez_scaling(signals, is_uv=True)
+    return signals
 
 def process_one_abnormal(parameters, output_queue):
     """
@@ -344,8 +374,10 @@ def process_one_abnormal(parameters, output_queue):
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
         signals = process_lejepa(raw, chs, out_sfreq=250)
-        assert raw.info['sfreq'] == 250
-    
+        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(t_channels)})")
+        return
+
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -478,6 +510,22 @@ def process_one_multilabel(parameters, output_queue):
             assert len(reorder_channels) > 0
             signals = signals[reorder_channels, :]
         # if num_matching == 0, just keep the original channels
+    elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+        t_channels = sorted(list(set(standard_1020).intersection(set(raw.ch_names))))
+        if len(t_channels) > 0:
+            raw = raw.reorder_channels(t_channels)
+        else:
+            print("WARN: No channels match LeJEPA standard channels. Keeping original")
+            t_channels = list(raw.ch_names)
+
+        raw = process_filter(raw, 250)
+        signals = raw.get_data(units="uV")
+        signals = apply_defossez_scaling(signals, is_uv=True)
+        out_channels = list(raw.ch_names)
+
+        output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
+        logging.info(f"Processed recording {idx} with label {label} (LeJEPA multilabel)")
+        return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -632,19 +680,12 @@ def process_one_cli_unm(parameters, output_queue):
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
 
-        # Resample to what your LeJEPA training expects.
-        # If your LeJEPA config expects 1500 timepoints @ 100 Hz for 15s windows, set to 100.
-        # If you want to mirror LaBraM clinical, set to 200.
-        # Pick ONE and keep it consistent with dataset windowing.
+        # Resample to 250 Hz (LeJEPA training expectation)
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
-        # Defossez-style robust scaling (LeJEPA only).
-        signals = signals * 1e6  # convert to microvolts
-        signals -= np.median(signals, axis=0, keepdims=True)
-        scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-        if scale < 1e-6:
-            scale = 1.0
-        signals = np.clip(signals / scale, -20.0, 20.0).astype(np.float32)
+
+        # Apply Defossez scaling - data is NOT in uV yet (raw numpy from dataset)
+        signals = apply_defossez_scaling(signals, is_uv=False)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
