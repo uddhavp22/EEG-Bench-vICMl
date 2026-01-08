@@ -150,7 +150,7 @@ class ConcreteFartfmClinical(nn.Module):
         # Uses your downstream forward
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
-        print("cls_token shape",cls.shape)
+        #print("cls_token shape",cls.shape)
         if cls.dim() == 3:
             cls = cls.mean(dim=1)
         
