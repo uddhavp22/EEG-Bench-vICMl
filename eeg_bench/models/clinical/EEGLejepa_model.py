@@ -42,6 +42,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         num_labels_per_chunk,
         base_path=None,
         version=None,
+        pretrained_path=None,
         freeze_encoder=True,
     ):
         super().__init__()
@@ -53,9 +54,11 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Pretrained config / checkpoint resolution (SAFE)
         # ------------------------------------------------------------
         config_path = None
-        pretrained_path = None
+        ckpt_path = None
 
-        if base_path is not None and version is not None:
+        if pretrained_path is not None:
+            ckpt_path = Path(pretrained_path)
+        elif base_path is not None and version is not None:
             base_path = Path(base_path) / f"version_{version}"
 
             candidate_config = base_path / "config" / "config.pkl"
@@ -67,7 +70,7 @@ class ConcreteLeJEPAClinical(nn.Module):
                 print(f"[LeJEPAClinical] No config found at {candidate_config}. Using default config.")
 
             if candidate_ckpt.exists():
-                pretrained_path = candidate_ckpt
+                ckpt_path = candidate_ckpt
             else:
                 print(f"[LeJEPAClinical] No checkpoint found at {candidate_ckpt}. Training from scratch.")
 
@@ -124,8 +127,8 @@ class ConcreteLeJEPAClinical(nn.Module):
         # ------------------------------------------------------------
         # Load pretrained weights (if available)
         # ------------------------------------------------------------
-        if pretrained_path is not None:
-            ckpt = torch.load(pretrained_path, map_location="cpu")
+        if ckpt_path is not None:
+            ckpt = torch.load(ckpt_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
@@ -180,7 +183,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):
-    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global_local",version=2):
+    def __init__(self, num_classes=2, num_labels_per_chunk=None, base_path="/home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global_local", version=2, pretrained_path=None, freeze_encoder=True):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = 30 if num_labels_per_chunk is None else 16
@@ -200,7 +203,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             num_classes=num_classes, 
             num_labels_per_chunk=num_labels_per_chunk,
             base_path=base_path,
-            version=version
+            version=version,
+            pretrained_path=pretrained_path,
+            freeze_encoder=freeze_encoder,
         ).to(self.device)
 
     def _coords(self, ch_names):
