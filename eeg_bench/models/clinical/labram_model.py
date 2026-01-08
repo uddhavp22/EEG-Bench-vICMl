@@ -45,7 +45,7 @@ class LaBraMBCIModel(nn.Module):
         super().__init__()
         self.device = device
         self.chunks = chunks
-        checkpoint = torch.load(check_and_download_pretrained_model())
+        checkpoint = torch.load(check_and_download_pretrained_model(),weights_only=False)
         new_checkpoint = {}
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
@@ -67,7 +67,7 @@ class LaBraMBCIModel(nn.Module):
         #model.load_state_dict(new_checkpoint, strict=False)
         for blk in model.blocks:
             for p in blk.parameters():
-                p.requires_grad = True
+                p.requires_grad = False
         self.feature = model
         self.is_multilabel_task = num_labels_per_chunk is not None
         self.head = nn.Linear(200, num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1))

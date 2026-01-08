@@ -245,6 +245,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
 
         # Setup eegfm imports
+        #for uddhav set path directly
         _setup_eegfm_imports(eegfm_path)
 
         # Load position bank with HuggingFace fallback

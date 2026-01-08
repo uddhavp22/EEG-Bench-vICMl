@@ -6,7 +6,7 @@
     "chkpt": "./checkpoints/",
     "results": "./results/",
     "lejepa": {
-        "eegfm_path": null,
+        "eegfm_path": "/teamspace/studios/this_studio/eegfm",
         "pos_bank_path": "./REVE_posbank",
         "checkpoint": {
             "base_path": null,
