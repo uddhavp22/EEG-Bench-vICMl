@@ -251,6 +251,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 x, yb = x.to(self.device), yb.to(self.device)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
 
+
                 
                 optimizer.zero_grad()
                 logits = self.model(x, cb)
@@ -264,6 +265,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     target = yb if yb.dim() == 1 else yb.argmax(dim=1)
                     correct += (preds == target).sum().item()
                     total_acc_samples += x.size(0)
+
+                
                 
                 # Manual memory cleanup like LaBraM
                 del x, yb, logits; torch.cuda.empty_cache()
@@ -288,7 +291,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                         val_acc_samples += x.size(0)
                     del x, yb, logits; torch.cuda.empty_cache()
 
-            if self.wandb_run and total_samples:
+            if total_samples:
                 metrics = {f"{self.name}/train_loss": total_loss / total_samples}
                 if total_acc_samples:
                     metrics[f"{self.name}/train_acc"] = correct / total_acc_samples
@@ -296,7 +299,12 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     metrics[f"{self.name}/val_loss"] = val_loss / val_samples
                     if val_acc_samples:
                         metrics[f"{self.name}/val_acc"] = val_correct / val_acc_samples
-                wandb_utils.log(metrics, step=epoch + 1)
+                if self.wandb_run:
+                    wandb_utils.log(metrics, step=epoch + 1)
+                else:
+                    print(metrics)
+            
+
 
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
