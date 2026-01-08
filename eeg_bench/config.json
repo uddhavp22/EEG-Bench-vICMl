@@ -5,6 +5,16 @@
     "tmp": "./tmp/",
     "chkpt": "./checkpoints/",
     "results": "./results/",
+    "lejepa": {
+        "eegfm_path": null,
+        "pos_bank_path": "./REVE_posbank",
+        "checkpoint": {
+            "base_path": null,
+            "version": null,
+            "full_path": null
+        },
+        "freeze_encoder": true
+    },
     "cavanagh2018a": null,
     "cavanagh2018b": null,
     "albrecht2019": null,

@@ -42,6 +42,7 @@ from eeg_bench.utils.evaluate_and_plot import print_classification_results, gene
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
 from eeg_bench.utils import wandb_utils
+from eeg_bench.config import load_lejepa_config, merge_lejepa_config_with_cli
 # NOTE: Removed 'from asyncio.tasks import ALL_COMPLETED' as it was unused and caused an error in some environments.
 
 logging.basicConfig(level=logging.INFO,
@@ -105,23 +106,35 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None): # Default reps=1
         y_trains = []
         is_multilabel_task = task.name in get_multilabel_tasks()
         
-        for model_class in tqdm(models, desc=f"Models for Task: {task.name}"): # Added tqdm desc
-            model_name = model_class.__name__ # Fix: Define model_name
+        for model_entry in tqdm(models, desc=f"Models for Task: {task.name}"): # Added tqdm desc
+            # Handle both class types and factory functions
+            is_factory = callable(model_entry) and not isinstance(model_entry, type)
+            model_name = model_entry.__name__ if hasattr(model_entry, '__name__') else str(model_entry)
             logger.info(f"--- Starting Model: {model_name}")
-            
+
             for i in range(reps):
                 # Logging for Repetition Clarity
                 logger.info(f"--- REPETITION {i+1}/{reps} (Seed: {seed + i}) ---")
-                
+
                 set_seed(seed + i)  # set seed for reproducibility
-                
+
                 if is_multilabel_task:
                     num_classes = len(task.clinical_classes) + 1
-                    model = model_class(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
+                    if is_factory:
+                        # Factory function - call with args
+                        model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
+                    else:
+                        # Class - instantiate with args
+                        model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
                     this_y_train = make_multilabels(X_train, y_train, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
                     this_y_test = make_multilabels(X_test, y_test, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
                 else:
-                    model = model_class()
+                    if is_factory:
+                        # Factory function - call without args
+                        model = model_entry()
+                    else:
+                        # Class - instantiate without args
+                        model = model_entry()
                     this_y_train = y_train
                     this_y_test = y_test
                 
@@ -216,7 +229,66 @@ def main():
         default=False,
         help="Run all combinations of tasks and models"
     )
+
+    # LeJEPA configuration
+    parser.add_argument(
+        "--lejepa-config",
+        type=str,
+        default=None,
+        help="Path to LeJEPA JSON config file (overrides default config.json lejepa section)"
+    )
+    parser.add_argument(
+        "--lejepa-checkpoint-base-path",
+        type=str,
+        default=None,
+        help="Base path for LeJEPA checkpoint (uses version subdir)"
+    )
+    parser.add_argument(
+        "--lejepa-checkpoint-version",
+        type=int,
+        default=None,
+        help="Checkpoint version subdirectory for LeJEPA"
+    )
+    parser.add_argument(
+        "--lejepa-checkpoint-full-path",
+        type=str,
+        default=None,
+        help="Full checkpoint path for LeJEPA (overrides base_path+version)"
+    )
+    parser.add_argument(
+        "--lejepa-pos-bank-path",
+        type=str,
+        default=None,
+        help="Local fallback path for REVE position bank"
+    )
+    parser.add_argument(
+        "--lejepa-freeze-encoder",
+        action="store_true",
+        help="Freeze the LeJEPA encoder during training"
+    )
+    parser.add_argument(
+        "--lejepa-no-freeze-encoder",
+        action="store_true",
+        help="Do NOT freeze the LeJEPA encoder (allow fine-tuning)"
+    )
+
     args = parser.parse_args()
+
+    # Load and merge LeJEPA configuration
+    lejepa_config = merge_lejepa_config_with_cli(
+        load_lejepa_config(args.lejepa_config), args
+    )
+
+    # Factory functions for LeJEPA models (to inject config)
+    def make_lejepa_clinical(num_classes=2, num_labels_per_chunk=None):
+        return LeJEPAClinical(
+            config=lejepa_config,
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk
+        )
+
+    def make_lejepa_bci():
+        return LeJEPABci(config=lejepa_config)
 
     # Mapping command-line strings to task classes
     tasks_map = {
@@ -236,14 +308,14 @@ def main():
         "multiclass_artifact": ArtifactMulticlassClinicalTask,
     }
 
-    # Mapping command-line strings to model classes
+    # Mapping command-line strings to model classes (or factory functions for LeJEPA)
     clinical_models_map = {
         "lda": BrainfeaturesLDA,
         "svm": BrainfeaturesSVM,
         "labram": LaBraMClinical,
         "bendr": BENDRClinical,
         "neurogpt": NeuroGPTClinical,
-        "lejepa": LeJEPAClinical,
+        "lejepa": make_lejepa_clinical,
         "reve": REVEClinical,
     }
     bci_models_map = {
@@ -253,7 +325,7 @@ def main():
         "bendr": BENDRBci,
         "neurogpt": NeuroGPTBci,
         "reve": REVEBci,
-        "lejepa": LeJEPABci
+        "lejepa": make_lejepa_bci
     }
 
     wandb_run = None
