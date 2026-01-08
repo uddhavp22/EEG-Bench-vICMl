@@ -1,5 +1,5 @@
 {
-    "data": "/radraid2/spanchavati/EEGBench/data/",
+    "data": "./data/",
     "cache": "./cache/",
     "log": "./logs/",
     "tmp": "./tmp/",

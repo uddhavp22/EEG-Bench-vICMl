@@ -129,7 +129,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None): # Default reps=1
 
                 if hasattr(model, "set_wandb_run"):
                     model.set_wandb_run(wandb_run)
-                # model.fit(X_train, this_y_train, meta_train)
+                model.fit(X_train, this_y_train, meta_train)
                 y_pred = []
                 for x, m in zip(X_test, meta_test):
                     y_pred.append(model.predict([x], [m]))

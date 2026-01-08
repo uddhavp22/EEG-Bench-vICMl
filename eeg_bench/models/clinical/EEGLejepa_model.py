@@ -304,15 +304,20 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, 
-            chunk_len_s=self.model.chunk_length//250,
+            chunk_len_s=self.chunk_len_s,
             is_train=False, 
             use_cache = True
         )
         
         if len(dataset_test) == 0:
             return np.array([])
+
+        if self.chunk_len_s is None:
+            batch_size = 1
+        else: 
+            batch_size = 64
             
-        loader = DataLoader(dataset_test, batch_size=32, shuffle=False)
+        loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False)
         coords = self._coords(dataset_test.ch_names)
         self.model.eval()
 
@@ -334,6 +339,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
         preds = np.concatenate(preds_all)
         idx_map = np.concatenate(idx_map_all)
+
 
         # Majority voting: Combine windows back into 1 patient prediction
         unique_indices = np.unique(idx_map)
