@@ -100,6 +100,7 @@ def save_results(
     task_name,
     data_percentage: float = 1.0,
     data_stats: Optional[Dict] = None,
+    linear_probe: bool = False,
 ):
 
     # Get the current timestamp
@@ -107,9 +108,10 @@ def save_results(
     models_names_unique = list(set(models_names))
     models_str = "_".join(models_names_unique) if models_names_unique else "models"
 
-    # Build the filename with task name, models, percentage, and timestamp
+    # Build the filename with task name, models, percentage, LP indicator, and timestamp
     pct_str = f"_pct{int(data_percentage * 100)}" if data_percentage < 1.0 else ""
-    filename = os.path.join(get_config_value("results"), "raw", f"{task_name}_{models_str}{pct_str}_{timestamp}.json")
+    lp_str = "_LP" if linear_probe else ""
+    filename = os.path.join(get_config_value("results"), "raw", f"{task_name}_{models_str}{pct_str}{lp_str}_{timestamp}.json")
 
     if task_name in get_multilabel_tasks():
         y_trains = [[[y_2.tolist() for y_2 in y] for y in y_train] for y_train in y_trains]
@@ -134,6 +136,7 @@ def save_results(
         "timestamp": timestamp,
         "data_percentage": data_percentage,
         "data_stats": data_stats,
+        "linear_probe": linear_probe,
     }
 
     # Save the results to the file

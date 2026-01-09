@@ -68,7 +68,7 @@ ALL_TASKS_CLASSES = [
 
 ]
 
-def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None):
+def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
@@ -76,6 +76,9 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
 
     if data_percentages is None:
         data_percentages = [1.0]
+
+    if linear_probe:
+        logger.info("Running in LINEAR PROBE mode (encoders frozen)")
 
     for task in tasks:
         # Logging for Task Clarity
@@ -155,7 +158,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     y_trains.append(this_y_train)
 
             save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
-                        data_percentage=percentage, data_stats=data_stats)
+                        data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe)
             print_classification_results(
                 y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
             )
@@ -241,6 +244,13 @@ def main():
         help="Training data percentages to test (e.g., 0.01 0.1 0.25 0.5 0.75 1.0). Runs benchmark at each percentage for data efficiency analysis."
     )
 
+    parser.add_argument(
+        "--linear-probe",
+        action="store_true",
+        default=False,
+        help="Freeze encoder and train only the classification head (linear probe evaluation). Applies to all foundation models."
+    )
+
     # LeJEPA configuration
     parser.add_argument(
         "--lejepa-config",
@@ -285,10 +295,19 @@ def main():
 
     args = parser.parse_args()
 
+    # Warn about conflicting flags
+    if args.linear_probe and getattr(args, 'lejepa_no_freeze_encoder', False):
+        logger.warning("--linear-probe and --lejepa-no-freeze-encoder conflict. "
+                       "Model-specific flag takes precedence (encoder will NOT be frozen for LeJEPA).")
+
     # Load and merge LeJEPA configuration
     lejepa_config = merge_lejepa_config_with_cli(
         load_lejepa_config(args.lejepa_config), args
     )
+
+    # Apply --linear-probe to LeJEPA config (model-specific flags already override via merge)
+    if args.linear_probe and not getattr(args, 'lejepa_no_freeze_encoder', False):
+        lejepa_config.freeze_encoder = True
 
     # Factory functions for LeJEPA models (to inject config)
     def make_lejepa_clinical(num_classes=2, num_labels_per_chunk=None):
@@ -300,6 +319,43 @@ def main():
 
     def make_lejepa_bci():
         return LeJEPABci(config=lejepa_config)
+
+    # Factory functions for other models with freeze_encoder support
+    def make_labram_clinical(num_classes=2, num_labels_per_chunk=None):
+        return LaBraMClinical(freeze_encoder=args.linear_probe)
+
+    def make_labram_bci():
+        return LaBraMBci(freeze_encoder=args.linear_probe)
+
+    def make_bendr_clinical(num_classes=2, num_labels_per_chunk=None):
+        return BENDRClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            freeze_encoder=args.linear_probe
+        )
+
+    def make_bendr_bci():
+        return BENDRBci(freeze_encoder=args.linear_probe)
+
+    def make_neurogpt_clinical(num_classes=2, num_labels_per_chunk=None):
+        return NeuroGPTClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            freeze_encoder=args.linear_probe
+        )
+
+    def make_neurogpt_bci():
+        return NeuroGPTBci(freeze_encoder=args.linear_probe)
+
+    def make_reve_clinical(num_classes=2, num_labels_per_chunk=None):
+        return REVEClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            freeze_backbone=args.linear_probe
+        )
+
+    def make_reve_bci():
+        return REVEBci(freeze_backbone=args.linear_probe)
 
     # Mapping command-line strings to task classes
     tasks_map = {
@@ -319,23 +375,23 @@ def main():
         "multiclass_artifact": ArtifactMulticlassClinicalTask,
     }
 
-    # Mapping command-line strings to model classes (or factory functions for LeJEPA)
+    # Mapping command-line strings to model classes (or factory functions)
     clinical_models_map = {
         "lda": BrainfeaturesLDA,
         "svm": BrainfeaturesSVM,
-        "labram": LaBraMClinical,
-        "bendr": BENDRClinical,
-        "neurogpt": NeuroGPTClinical,
+        "labram": make_labram_clinical,
+        "bendr": make_bendr_clinical,
+        "neurogpt": make_neurogpt_clinical,
         "lejepa": make_lejepa_clinical,
-        "reve": REVEClinical,
+        "reve": make_reve_clinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
         "svm": CSPSVM,
-        "labram": LaBraMBci,
-        "bendr": BENDRBci,
-        "neurogpt": NeuroGPTBci,
-        "reve": REVEBci,
+        "labram": make_labram_bci,
+        "bendr": make_bendr_bci,
+        "neurogpt": make_neurogpt_bci,
+        "reve": make_reve_bci,
         "lejepa": make_lejepa_bci
     }
 
@@ -357,6 +413,7 @@ def main():
                 "model": args.model,
                 "all": args.all,
                 "data_percentages": args.data_percentages,
+                "linear_probe": args.linear_probe,
             },
         )
         wandb_utils.set_run(wandb_run)
@@ -374,7 +431,7 @@ def main():
                 task_instance = task_cls()
                 model_classes = list(models_map.values())
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
-                         data_percentages=args.data_percentages)
+                         data_percentages=args.data_percentages, linear_probe=args.linear_probe)
 
         else:
             if not args.task or not args.model:
@@ -406,7 +463,7 @@ def main():
             model_instance = models_map[model_key]
 
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
-                     data_percentages=args.data_percentages)
+                     data_percentages=args.data_percentages, linear_probe=args.linear_probe)
     finally:
         wandb_utils.finish()
 

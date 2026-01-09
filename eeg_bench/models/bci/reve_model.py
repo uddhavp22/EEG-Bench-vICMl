@@ -42,19 +42,19 @@ class REVEWrapper(nn.Module):
     Wraps the HuggingFace REVE model.
     Freezes the backbone and adds a custom classification head.
     """
-    def __init__(self, n_channels, n_timepoints, n_classes, hidden_dim=512):
+    def __init__(self, n_channels, n_timepoints, n_classes, hidden_dim=512, freeze_backbone: bool = True):
         super().__init__()
         # Load the backbone
 
         self.backbone = AutoModel.from_pretrained(
-            "brain-bzh/reve-base", 
-            trust_remote_code=True, 
+            "brain-bzh/reve-base",
+            trust_remote_code=True,
             torch_dtype="auto",
         )
-        
-        # Freeze the backbone
+
+        # Optionally freeze the backbone
         for param in self.backbone.parameters():
-            param.requires_grad = False
+            param.requires_grad = not freeze_backbone
             
         # Define the classification head
         # REVE output is [Batch, Channels, Time, HiddenDim]
@@ -83,14 +83,15 @@ class REVEWrapper(nn.Module):
 
 
 class REVEBenchmarkModel(AbstractModel):
-    def __init__(self):
+    def __init__(self, freeze_backbone: bool = True):
         super().__init__("REVEModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+        self.freeze_backbone = freeze_backbone
+
         # Load the position bank once
         self.pos_bank = AutoModel.from_pretrained(
-            "brain-bzh/reve-positions", 
-            trust_remote_code=True, 
+            "brain-bzh/reve-positions",
+            trust_remote_code=True,
             torch_dtype="auto",
         )
         self.model = None
@@ -148,9 +149,10 @@ class REVEBenchmarkModel(AbstractModel):
 
         # 2. Initialize Model
         self.model = REVEWrapper(
-            n_channels=n_channels, 
-            n_timepoints=n_timepoints, 
-            n_classes=n_classes
+            n_channels=n_channels,
+            n_timepoints=n_timepoints,
+            n_classes=n_classes,
+            freeze_backbone=self.freeze_backbone
         ).to(self.device)
         
         # 3. Prepare DataLoaders
