@@ -39,7 +39,7 @@ from eeg_bench.models.bci import (
     EEGLeJEPABCIModel as LeJEPABci
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
-from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
+from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks, subsample_data_stratified
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
 from eeg_bench.utils import wandb_utils
 from eeg_bench.config import load_lejepa_config, merge_lejepa_config_with_cli
@@ -68,95 +68,98 @@ ALL_TASKS_CLASSES = [
 
 ]
 
-def benchmark(tasks, models, seed, reps=1, wandb_run=None): # Default reps=1
+def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
     print(tasks)
 
-    # for task in tasks:
-    #     # --- ADD THIS DATA CHECK ---
-    #     try:
-    #         X_train, y_train, meta_train = task.get_data(Split.TRAIN)
-    #         X_test, y_test, meta_test = task.get_data(Split.TEST)
-            
-    #         if len(X_train) == 0:
-    #             logger.warning(f"Skipping task {task.name}: No training data found (check if dataset is downloaded).")
-    #             continue
-    #     except Exception as e:
-    #         logger.error(f"Failed to load data for task {task.name}: {e}")
-    #         continue
-    
+    if data_percentages is None:
+        data_percentages = [1.0]
+
     for task in tasks:
         # Logging for Task Clarity
 
-        
         logger.info(f"============================================================")
-        logger.info(f"STARTING BENCHMARK for TASK: {task.name}") 
+        logger.info(f"STARTING BENCHMARK for TASK: {task.name}")
         logger.info(f"============================================================")
-        
-        X_train, y_train, meta_train = task.get_data(Split.TRAIN)
+
+        X_train_full, y_train_full, meta_train = task.get_data(Split.TRAIN)
         X_test, y_test, meta_test = task.get_data(Split.TEST)
 
         metrics = task.get_metrics()
         dataset_names = [m["name"] for m in meta_train]
-        models_names = []
-        results = []
-        y_trues = []
-        y_trains = []
         is_multilabel_task = task.name in get_multilabel_tasks()
-        
-        for model_entry in tqdm(models, desc=f"Models for Task: {task.name}"): # Added tqdm desc
-            # Handle both class types and factory functions
-            is_factory = callable(model_entry) and not isinstance(model_entry, type)
-            model_name = model_entry.__name__ if hasattr(model_entry, '__name__') else str(model_entry)
-            logger.info(f"--- Starting Model: {model_name}")
 
-            for i in range(reps):
-                # Logging for Repetition Clarity
-                logger.info(f"--- REPETITION {i+1}/{reps} (Seed: {seed + i}) ---")
+        for pct_idx, percentage in enumerate(data_percentages):
+            logger.info(f"============================================================")
+            logger.info(f"DATA PERCENTAGE: {int(percentage * 100)}%")
+            logger.info(f"============================================================")
 
-                set_seed(seed + i)  # set seed for reproducibility
+            # Subsample training data (stratified to maintain class proportions)
+            X_train, y_train, data_stats = subsample_data_stratified(
+                X_train_full, y_train_full, percentage, random_state=seed + pct_idx
+            )
+            logger.info(f"Training samples: {data_stats['total_samples']}, per class: {data_stats['samples_per_class']}")
 
-                if is_multilabel_task:
-                    num_classes = len(task.clinical_classes) + 1
-                    if is_factory:
-                        # Factory function - call with args
-                        model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
+            # Reset collectors for this percentage
+            models_names = []
+            results = []
+            y_trues = []
+            y_trains = []
+
+            for model_entry in tqdm(models, desc=f"Models for Task: {task.name} ({int(percentage*100)}%)"):
+                # Handle both class types and factory functions
+                is_factory = callable(model_entry) and not isinstance(model_entry, type)
+                model_name = model_entry.__name__ if hasattr(model_entry, '__name__') else str(model_entry)
+                logger.info(f"--- Starting Model: {model_name}")
+
+                for i in range(reps):
+                    # Logging for Repetition Clarity
+                    logger.info(f"--- REPETITION {i+1}/{reps} (Seed: {seed + i}) ---")
+
+                    set_seed(seed + i)  # set seed for reproducibility
+
+                    if is_multilabel_task:
+                        num_classes = len(task.clinical_classes) + 1
+                        if is_factory:
+                            # Factory function - call with args
+                            model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
+                        else:
+                            # Class - instantiate with args
+                            model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
+                        this_y_train = make_multilabels(X_train, y_train, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
+                        this_y_test = make_multilabels(X_test, y_test, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
                     else:
-                        # Class - instantiate with args
-                        model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
-                    this_y_train = make_multilabels(X_train, y_train, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
-                    this_y_test = make_multilabels(X_test, y_test, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
-                else:
-                    if is_factory:
-                        # Factory function - call without args
-                        model = model_entry()
-                    else:
-                        # Class - instantiate without args
-                        model = model_entry()
-                    this_y_train = y_train
-                    this_y_test = y_test
-                
-                print(model)
+                        if is_factory:
+                            # Factory function - call without args
+                            model = model_entry()
+                        else:
+                            # Class - instantiate without args
+                            model = model_entry()
+                        this_y_train = y_train
+                        this_y_test = y_test
 
-                if hasattr(model, "set_wandb_run"):
-                    model.set_wandb_run(wandb_run)
-                model.fit(X_train, this_y_train, meta_train)
-                y_pred = []
-                for x, m in zip(X_test, meta_test):
-                    y_pred.append(model.predict([x], [m]))
+                    print(model)
 
-                models_names.append(str(model))
-                results.append(y_pred)
-                y_trues.append(this_y_test)
-                y_trains.append(this_y_train)
+                    if hasattr(model, "set_wandb_run"):
+                        model.set_wandb_run(wandb_run)
+                    model.fit(X_train, this_y_train, meta_train)
+                    y_pred = []
+                    for x, m in zip(X_test, meta_test):
+                        y_pred.append(model.predict([x], [m]))
 
-        save_results(y_trains, y_trues, models_names, results, dataset_names, task.name)
-        print_classification_results(
-            y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
-        )
-        generate_classification_plots(y_trains, y_trues, models_names, results, dataset_names, task.name, metrics)
+                    models_names.append(str(model))
+                    results.append(y_pred)
+                    y_trues.append(this_y_test)
+                    y_trains.append(this_y_train)
+
+            save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
+                        data_percentage=percentage, data_stats=data_stats)
+            print_classification_results(
+                y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
+            )
+            generate_classification_plots(y_trains, y_trues, models_names, results, dataset_names, task.name, metrics)
 
 
 def main():
@@ -228,6 +231,14 @@ def main():
         action="store_true",
         default=False,
         help="Run all combinations of tasks and models"
+    )
+
+    parser.add_argument(
+        "--data-percentages",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Training data percentages to test (e.g., 0.01 0.1 0.25 0.5 0.75 1.0). Runs benchmark at each percentage for data efficiency analysis."
     )
 
     # LeJEPA configuration
@@ -345,6 +356,7 @@ def main():
                 "task": args.task,
                 "model": args.model,
                 "all": args.all,
+                "data_percentages": args.data_percentages,
             },
         )
         wandb_utils.set_run(wandb_run)
@@ -361,7 +373,8 @@ def main():
 
                 task_instance = task_cls()
                 model_classes = list(models_map.values())
-                benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run)
+                benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
+                         data_percentages=args.data_percentages)
 
         else:
             if not args.task or not args.model:
@@ -392,7 +405,8 @@ def main():
             
             model_instance = models_map[model_key]
 
-            benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run)
+            benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
+                     data_percentages=args.data_percentages)
     finally:
         wandb_utils.finish()
 
