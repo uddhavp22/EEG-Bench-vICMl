@@ -33,27 +33,45 @@ benchmark_console.py  # CLI interface to run experiments
 The benchmark can be run via the script `benchmark_console.py` with the arguments `--model` and `--task`. 
 
 ```bash
-python benchmark_console.py --model labram --task lr
+python benchmark_console.py --model labram --task left_right
 ```
 
 With the option `--all` instead, it will run all tasks against all models. The number of repetitions can be set via `--reps` (default: 5).
 
+### Data Efficiency Analysis
+Run benchmarks at varying percentages of training data to evaluate sample efficiency:
+```bash
+python benchmark_console.py --model lejepa --task left_right --data-percentages 0.01 0.1 0.25 0.5 0.75 1.0
+```
+This uses stratified sampling to maintain class proportions and saves results with percentage metadata.
+
+### LeJEPA Configuration
+LeJEPA models can be configured via CLI:
+```bash
+# With custom checkpoint
+python benchmark_console.py --model lejepa --task left_right \
+    --lejepa-checkpoint-full-path /path/to/checkpoint.ckpt
+
+# Fine-tune encoder (default is frozen)
+python benchmark_console.py --model lejepa --task epilepsy --lejepa-no-freeze-encoder
+```
+
 ### Available Tasks
 | Task Code | Task Class                     |
 |-----------|--------------------------------|
-| pd        | ParkinsonsClinicalTask         |
-| sz        | SchizophreniaClinicalTask      |
+| parkinsons | ParkinsonsClinicalTask        |
+| schizophrenia | SchizophreniaClinicalTask  |
 | mtbi      | MTBIClinicalTask               |
 | ocd       | OCDClinicalTask                |
-| ep        | EpilepsyClinicalTask           |
-| ab        | AbnormalClinicalTask           |
-| lr        | LeftHandvRightHandMITask       |
-| rf        | RightHandvFeetMITask           |
-| lrft      | LeftHandvRightHandvFeetvTongueMITask |
-| 5f        | FiveFingersMITask              |
-| sleep_stages | SleepStagesClinicalTask    |
-| seizure | SeizureClinicalTask             |
-| binary_artifact | ArtifactBinaryClinicalTask|
+| epilepsy  | EpilepsyClinicalTask           |
+| abnormal  | AbnormalClinicalTask           |
+| left_right | LeftHandvRightHandMITask      |
+| right_feet | RightHandvFeetMITask          |
+| left_right_feet_tongue | LeftHandvRightHandvFeetvTongueMITask |
+| 5_fingers | FiveFingersMITask              |
+| sleep_stages | SleepStagesClinicalTask     |
+| seizure   | SeizureClinicalTask            |
+| binary_artifact | ArtifactBinaryClinicalTask |
 | multiclass_artifact | ArtifactMulticlassClinicalTask |
 
 ### Available Models
@@ -61,9 +79,11 @@ With the option `--all` instead, it will run all tasks against all models. The n
 |------------|-------------------------------|
 | lda        | CSP or Brainfeatures with LDA |
 | svm        | CSP or Brainfeatures with SVM |
-| labram     | LaBra                         |
+| labram     | LaBraM                        |
 | bendr      | BENDR                         |
 | neurogpt   | NeuroGPT                      |
+| reve       | REVE                          |
+| lejepa     | EEGLeJEPA                     |
 
 ## 📋 Results
 The following table reports the balanced accuracy scores achieved by every task against every model.
