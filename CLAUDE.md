@@ -36,6 +36,14 @@ python benchmark_console.py --model labram --task epilepsy --reps 5
 
 # Disable WandB logging
 python benchmark_console.py --model labram --task left_right --no-wandb
+
+# Data efficiency analysis (run at varying % of training data)
+python benchmark_console.py --model lejepa --task left_right --data-percentages 0.01 0.1 0.25 0.5 0.75 1.0
+
+# LeJEPA with custom checkpoint
+python benchmark_console.py --model lejepa --task left_right \
+    --lejepa-checkpoint-full-path /path/to/checkpoint.ckpt \
+    --lejepa-no-freeze-encoder
 ```
 
 ### Task Codes
@@ -74,6 +82,40 @@ BCI (Motor Imagery): `left_right`, `right_feet`, `left_right_feet_tongue`, `5_fi
 ### Configuration
 - `eeg_bench/config.json`: Paths for data, cache, checkpoints, logs, results
 - Dataset-specific paths can be set to `null` to use defaults
+
+### LeJEPA Configuration
+LeJEPA models support configuration via CLI flags or `config.json`:
+
+**CLI flags:**
+- `--lejepa-checkpoint-full-path`: Direct path to checkpoint file
+- `--lejepa-checkpoint-base-path` + `--lejepa-checkpoint-version`: Constructs path as `base_path/version_N/checkpoints/last.ckpt`
+- `--lejepa-freeze-encoder` / `--lejepa-no-freeze-encoder`: Control encoder fine-tuning
+- `--lejepa-pos-bank-path`: Local fallback for REVE position bank (tries HuggingFace first)
+
+**config.json structure:**
+```json
+{
+  "lejepa": {
+    "eegfm_path": null,
+    "pos_bank_path": "./REVE_posbank",
+    "freeze_encoder": true,
+    "checkpoint": {
+      "base_path": null,
+      "version": null,
+      "full_path": null
+    }
+  }
+}
+```
+
+### Data Efficiency Analysis
+The `--data-percentages` flag runs benchmarks at varying percentages of training data:
+```bash
+python benchmark_console.py --task left_right --model lejepa --data-percentages 0.01 0.1 0.25 0.5 0.75 1.0
+```
+- Uses stratified sampling to maintain class proportions
+- Results files include percentage in filename (e.g., `task_model_pct10_timestamp.json`)
+- JSON output includes `data_percentage` and `data_stats` (samples_per_class, total_samples)
 
 ### Multi-label Tasks
 For multi-label tasks (artifacts, sleep stages), add task name to `get_multilabel_tasks()` in `eeg_bench/utils/utils.py` and handle channel requirements in `eeg_bench/models/clinical/brainfeatures/feature_extraction_2.py`.
