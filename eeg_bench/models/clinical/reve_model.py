@@ -29,7 +29,8 @@ class REVEClinicalWrapper(nn.Module):
         num_classes: int,
         num_labels_per_chunk: Optional[int] = None,
         hidden_dim: Optional[int] = None,
-        freeze_backbone: bool = True,
+        freeze_backbone: bool = False,
+        use_paper_head=False,
     ):
         super().__init__()
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -48,6 +49,10 @@ class REVEClinicalWrapper(nn.Module):
             for param in self.backbone.parameters():
                 param.requires_grad = False
             self.backbone.eval()
+        else:
+            for param in self.backbone.parameters():
+                param.requires_grad = True
+            self.backbone.eval()
 
         # Infer hidden dimension from backbone config
         if hidden_dim is None:
@@ -64,12 +69,22 @@ class REVEClinicalWrapper(nn.Module):
         input_dim = n_channels * hidden_dim
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
 
-        self.classifier = nn.Sequential(
+        if use_paper_head:
+            self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.RMSNorm(input_dim),
             nn.Dropout(0.1),
             nn.Linear(input_dim, out_dim),
         )
+        else:
+            self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_dim, out_dim),
+        )
+
+
+
+
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
@@ -119,13 +134,13 @@ class REVEClinicalModel(AbstractModel):
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
         positions = self.pos_bank(clean_names)
 
-        # Handle dict or tensor output
+        
         if isinstance(positions, dict):
             positions = positions.get(
                 "positions", positions.get("coords", positions.get("last_hidden_state"))
             )
 
-        # Squeeze batch dimension if present
+        
         if positions.dim() == 3:
             positions = positions.squeeze(0)
 

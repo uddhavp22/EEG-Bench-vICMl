@@ -28,6 +28,7 @@ from eeg_bench.models.clinical import (
     NeuroGPTModel as NeuroGPTClinical,
     EEGLeJEPAClinicalModel as LeJEPAClinical,
     REVEClinicalModel as REVEClinical,
+    LUNAClinicalModel as LUNAClinical,
 )
 from eeg_bench.models.bci import (
     CSPLDAModel as CSPLDA,
@@ -171,7 +172,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa"
+        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa, luna"
     )
     parser.add_argument(
         "--seed",
@@ -290,6 +291,16 @@ def main():
     def make_lejepa_bci():
         return LeJEPABci(config=lejepa_config)
 
+    # Factory function for LUNA models
+    def make_luna_clinical(num_classes=2, num_labels_per_chunk=None):
+        return LUNAClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
+            biofoundation_path="BioFoundation",
+            freeze_backbone=True
+        )
+
     # Mapping command-line strings to task classes
     tasks_map = {
         "parkinsons": ParkinsonsClinicalTask,
@@ -308,7 +319,7 @@ def main():
         "multiclass_artifact": ArtifactMulticlassClinicalTask,
     }
 
-    # Mapping command-line strings to model classes (or factory functions for LeJEPA)
+    # Mapping command-line strings to model classes (or factory functions for LeJEPA/LUNA)
     clinical_models_map = {
         "lda": BrainfeaturesLDA,
         "svm": BrainfeaturesSVM,
@@ -317,6 +328,7 @@ def main():
         "neurogpt": NeuroGPTClinical,
         "lejepa": make_lejepa_clinical,
         "reve": REVEClinical,
+        "luna": make_luna_clinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
