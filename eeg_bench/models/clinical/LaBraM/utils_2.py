@@ -380,16 +380,16 @@ def process_luna(raw, chs, out_sfreq=250):
     signals = raw.get_data(units="uV")
     return signals
 
-def process_cbramod(raw, chs, out_sfreq=250):
+def process_cbramod(raw, chs, out_sfreq=200):
     """Process raw EEG data for CBraMod model.
 
-    CBraMod uses similar preprocessing to LUNA/LeJEPA but returns data
-    in patch format for the criss-cross transformer.
+    CBraMod uses similar preprocessing to LUNA/LeJEPA but requires 200Hz
+    sampling rate to match the pretrained model's patch size (200 samples = 1 second).
 
     Args:
         raw: MNE Raw object
         chs: List of channel names to use
-        out_sfreq: Output sampling frequency (default 250 Hz)
+        out_sfreq: Output sampling frequency (default 200 Hz)
 
     Returns:
         signals: Processed signals as numpy array [n_channels, n_timepoints]
@@ -451,8 +451,8 @@ def process_one_abnormal(parameters, output_queue):
         t_channels = list(set(standard_1020).intersection(set(t_channels)))
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        signals = process_cbramod(raw, chs, out_sfreq=250)
-        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        signals = process_cbramod(raw, chs, out_sfreq=200)
+        output_queue.put((idx, signals, label, chunk_len_s, 200, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (CBraMod channels={len(t_channels)})")
         return
 
@@ -517,8 +517,8 @@ def process_one_epilepsy(parameters, output_queue):
         else:
             ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        signals = process_cbramod(raw, chs, out_sfreq=250)
-        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        signals = process_cbramod(raw, chs, out_sfreq=200)
+        output_queue.put((idx, signals, label, chunk_len_s, 200, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (CBraMod channels={len(t_channels)})")
         return
     else:
@@ -649,11 +649,11 @@ def process_one_multilabel(parameters, output_queue):
             print("WARN: No channels match CBraMod standard channels. Keeping original")
             t_channels = list(raw.ch_names)
 
-        raw = process_filter(raw, 250)
+        raw = process_filter(raw, 200)
         signals = raw.get_data(units="uV")
         out_channels = list(raw.ch_names)
 
-        output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
+        output_queue.put((idx, signals, label, chunk_len_s, 200, out_channels))
         logging.info(f"Processed recording {idx} with label {label} (CBraMod multilabel)")
         return
     else:
@@ -908,7 +908,7 @@ def process_one_cli_unm(parameters, output_queue):
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
 
-        out_freq = 250
+        out_freq = 200
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))

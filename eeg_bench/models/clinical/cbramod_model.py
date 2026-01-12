@@ -3,6 +3,11 @@
 This module provides a wrapper for CBraMod (Criss-Cross Brain Foundation Model)
 for clinical EEG classification tasks.
 
+codebase:
+https://github.com/wjq-learning/CBraMod
+model weights:
+https://huggingface.co/weighting666/CBraMod
+
 Reference:
     Wang et al. (2025). CBraMod: A Criss-Cross Brain Foundation Model for EEG Decoding. ICLR 2025.
 """
@@ -353,7 +358,7 @@ class CBraModClinicalModel(AbstractModel):
         # Create training dataset
         dataset_train = make_dataset_2(
             X, y, meta, task_name, self.name, self.chunk_len_s,
-            is_train=True, use_cache=True
+            is_train=True, use_cache=False
         )
 
         if len(dataset_train) == 0:
@@ -461,7 +466,7 @@ class CBraModClinicalModel(AbstractModel):
         # Create test dataset
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, self.chunk_len_s,
-            is_train=False, use_cache=True
+            is_train=False, use_cache=False
         )
 
         if len(dataset_test) == 0:
