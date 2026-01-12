@@ -45,10 +45,26 @@ def subsample_data_stratified(
         y_sub: Subsampled y
         stats: Dict with samples_per_class and total_samples
     """
+    def _collect_label_values(labels):
+        if isinstance(labels, np.ndarray):
+            return labels.tolist()
+        values = []
+        for rec_labels in labels:
+            if isinstance(rec_labels, (list, tuple)) and rec_labels and isinstance(rec_labels[0], (list, tuple)):
+                values.extend([event[0] for event in rec_labels])
+            else:
+                values.append(rec_labels)
+        return values
+
+    def _take_indices(items, indices):
+        return items[indices] if isinstance(items, np.ndarray) else [items[i] for i in indices]
+
     if percentage >= 1.0:
-        all_labels = np.concatenate(y)
+        all_labels = []
+        for y_i in y:
+            all_labels.extend(_collect_label_values(y_i))
         stats = {
-            "samples_per_class": dict(Counter(all_labels.tolist())),
+            "samples_per_class": dict(Counter(all_labels)),
             "total_samples": len(all_labels)
         }
         return X, y, stats
@@ -63,7 +79,7 @@ def subsample_data_stratified(
         if n_keep >= n_samples:
             X_sub.append(X_i)
             y_sub.append(y_i)
-            all_labels_sub.extend(y_i.tolist())
+            all_labels_sub.extend(_collect_label_values(y_i))
         else:
             try:
                 X_keep, _, y_keep, _ = train_test_split(
@@ -74,16 +90,16 @@ def subsample_data_stratified(
                 )
                 X_sub.append(X_keep)
                 y_sub.append(y_keep)
-                all_labels_sub.extend(y_keep.tolist())
+                all_labels_sub.extend(_collect_label_values(y_keep))
             except ValueError as e:
                 # Stratification failed (e.g., too few samples per class)
                 logger.warning(f"Stratified split failed, using random sample: {e}")
                 indices = np.random.RandomState(random_state).choice(
                     n_samples, size=n_keep, replace=False
                 )
-                X_sub.append(X_i[indices])
-                y_sub.append(y_i[indices])
-                all_labels_sub.extend(y_i[indices].tolist())
+                X_sub.append(_take_indices(X_i, indices))
+                y_sub.append(_take_indices(y_i, indices))
+                all_labels_sub.extend(_collect_label_values(_take_indices(y_i, indices)))
 
     stats = {
         "samples_per_class": dict(Counter(all_labels_sub)),
