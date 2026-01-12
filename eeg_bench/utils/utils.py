@@ -50,21 +50,14 @@ def subsample_data_stratified(
             return labels.tolist()
         values = []
         for rec_labels in labels:
-            if isinstance(rec_labels, np.ndarray):
-                values.extend(rec_labels.tolist())
-            elif isinstance(rec_labels, (list, tuple)):
-                if rec_labels and isinstance(rec_labels[0], (list, tuple)):
-                    values.extend([event[0] for event in rec_labels])
-                else:
-                    values.append(rec_labels)
+            if isinstance(rec_labels, (list, tuple)) and rec_labels and isinstance(rec_labels[0], (list, tuple)):
+                values.extend([event[0] for event in rec_labels])
             else:
                 values.append(rec_labels)
         return values
 
     def _take_indices(items, indices):
-        if isinstance(items, np.ndarray):
-            return items[indices]
-        return [items[i] for i in indices]
+        return items[indices] if isinstance(items, np.ndarray) else [items[i] for i in indices]
 
     if percentage >= 1.0:
         all_labels = []
