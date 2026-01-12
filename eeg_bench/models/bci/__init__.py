@@ -5,4 +5,6 @@ from .labram_model import LaBraMModel
 from .neurogpt_model import NeuroGPTModel
 from .reve_model import REVEBenchmarkModel
 from .EEGLeJEPA_model import EEGLeJEPABCIModel
+from .luna_model import LUNABCIModel
+from .cbramod_model import CBraModBCIModel
 

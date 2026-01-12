@@ -355,19 +355,19 @@ def process_lejepa(raw, chs, out_sfreq=250):
 
 def process_luna(raw, chs, out_sfreq=250):
     """Process raw EEG data for LUNA model.
-    
-    LUNA uses the same preprocessing as LeJEPA:
+
+    LUNA uses standard preprocessing (similar to REVE):
     - Reorder channels
     - Limit to 30 minutes
     - Filter (0.1-75 Hz) and notch at 50 Hz
     - Resample to target frequency (default 250 Hz)
-    - Apply Defossez scaling
-    
+    - Return signals in microvolts
+
     Args:
         raw: MNE Raw object
         chs: List of channel names to use
         out_sfreq: Output sampling frequency (default 250 Hz)
-    
+
     Returns:
         signals: Processed signals as numpy array [n_channels, n_timepoints]
     """
@@ -378,7 +378,29 @@ def process_luna(raw, chs, out_sfreq=250):
         raw.crop(tmax=max_duration_s)
     raw = process_filter(raw, out_sfreq)
     signals = raw.get_data(units="uV")
-    signals = apply_defossez_scaling(signals)
+    return signals
+
+def process_cbramod(raw, chs, out_sfreq=250):
+    """Process raw EEG data for CBraMod model.
+
+    CBraMod uses similar preprocessing to LUNA/LeJEPA but returns data
+    in patch format for the criss-cross transformer.
+
+    Args:
+        raw: MNE Raw object
+        chs: List of channel names to use
+        out_sfreq: Output sampling frequency (default 250 Hz)
+
+    Returns:
+        signals: Processed signals as numpy array [n_channels, n_timepoints]
+    """
+    raw = raw.reorder_channels(chs)
+    # Limit the raw data to a maximum of 30 minutes
+    max_duration_s = 30 * 60  # 30 minutes in seconds
+    if raw.times[-1] > max_duration_s:
+        raw.crop(tmax=max_duration_s)
+    raw = process_filter(raw, out_sfreq)
+    signals = raw.get_data(units="uV")
     return signals
 
 def process_one_abnormal(parameters, output_queue):
@@ -422,6 +444,16 @@ def process_one_abnormal(parameters, output_queue):
         signals = process_luna(raw, chs, out_sfreq=250)
         output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (LUNA channels={len(t_channels)})")
+        return
+
+    elif model_name == "CBraModModel":
+        t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
+        t_channels = list(set(standard_1020).intersection(set(t_channels)))
+        ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_cbramod(raw, chs, out_sfreq=250)
+        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (CBraMod channels={len(t_channels)})")
         return
 
     else:
@@ -477,6 +509,17 @@ def process_one_epilepsy(parameters, output_queue):
         signals = process_luna(raw, chs, out_sfreq=250)
         output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (LUNA channels={len(t_channels)})")
+        return
+    elif model_name == "CBraModModel":
+        t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
+        if "le" in montage:
+            ch_name_pattern = "EEG {}-LE"
+        else:
+            ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_cbramod(raw, chs, out_sfreq=250)
+        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (CBraMod channels={len(t_channels)})")
         return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
@@ -593,11 +636,25 @@ def process_one_multilabel(parameters, output_queue):
 
         raw = process_filter(raw, 250)
         signals = raw.get_data(units="uV")
-        signals = apply_defossez_scaling(signals)
         out_channels = list(raw.ch_names)
 
         output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
         logging.info(f"Processed recording {idx} with label {label} (LUNA multilabel)")
+        return
+    elif model_name == "CBraModModel":
+        t_channels = sorted(list(set(standard_1020).intersection(set(raw.ch_names))))
+        if len(t_channels) > 0:
+            raw = raw.reorder_channels(t_channels)
+        else:
+            print("WARN: No channels match CBraMod standard channels. Keeping original")
+            t_channels = list(raw.ch_names)
+
+        raw = process_filter(raw, 250)
+        signals = raw.get_data(units="uV")
+        out_channels = list(raw.ch_names)
+
+        output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
+        logging.info(f"Processed recording {idx} with label {label} (CBraMod multilabel)")
         return
     else:
         raise ValueError(f"Invalid model name: {model_name}")
@@ -823,11 +880,39 @@ def process_one_cli_unm(parameters, output_queue):
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
-        # Apply Defossez scaling
-        signals = apply_defossez_scaling(signals)
-
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
         logging.info(f"Processed recording {idx} with label {label} (LUNA channels={len(target_channels)})")
+        return
+
+    elif model_name == "CBraModModel":
+        ch_names = [ch.upper() for ch in o_channels]
+        required_channels = [c.upper() for c in get_channels(task_name)]
+        target_channels = [ch for ch in required_channels if ch in ch_names]
+
+        if len(target_channels) == 0:
+            raise ValueError("No required CBraMod clinical channels found in recording")
+
+        signals = signals[[ch_names.index(ch) for ch in target_channels], :]
+
+        max_duration_s = 30 * 60
+        if signals.shape[1] > int(max_duration_s * sfreq):
+            signals = signals[:, : int(max_duration_s * sfreq)]
+
+        signals = filter_data(
+            signals.astype(np.float64),
+            sfreq=sfreq,
+            l_freq=l_freq,
+            h_freq=h_freq,
+            method="fir",
+            verbose=False,
+        )
+        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+
+        out_freq = 250
+        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+
+        output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
+        logging.info(f"Processed recording {idx} with label {label} (CBraMod channels={len(target_channels)})")
         return
 
     else:

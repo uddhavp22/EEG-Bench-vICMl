@@ -29,6 +29,7 @@ from eeg_bench.models.clinical import (
     EEGLeJEPAClinicalModel as LeJEPAClinical,
     REVEClinicalModel as REVEClinical,
     LUNAClinicalModel as LUNAClinical,
+    CBraModClinicalModel as CBraModClinical,
 )
 from eeg_bench.models.bci import (
     CSPLDAModel as CSPLDA,
@@ -37,7 +38,9 @@ from eeg_bench.models.bci import (
     BENDRModel as BENDRBci,
     NeuroGPTModel as NeuroGPTBci,
     REVEBenchmarkModel as REVEBci,
-    EEGLeJEPABCIModel as LeJEPABci
+    EEGLeJEPABCIModel as LeJEPABci,
+    LUNABCIModel as LUNABci,
+    CBraModBCIModel as CBraModBci,
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
@@ -172,7 +175,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa, luna"
+        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa, luna, cbramod"
     )
     parser.add_argument(
         "--seed",
@@ -291,13 +294,37 @@ def main():
     def make_lejepa_bci():
         return LeJEPABci(config=lejepa_config)
 
-    # Factory function for LUNA models
+    # Factory functions for LUNA models
     def make_luna_clinical(num_classes=2, num_labels_per_chunk=None):
         return LUNAClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
             pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
             biofoundation_path="BioFoundation",
+            freeze_backbone=True
+        )
+
+    def make_luna_bci():
+        return LUNABci(
+            pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
+            biofoundation_path="BioFoundation",
+            freeze_backbone=True
+        )
+
+    # Factory functions for CBraMod models
+    def make_cbramod_clinical(num_classes=2, num_labels_per_chunk=None):
+        return CBraModClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            pretrained_path="/teamspace/studios/this_studio/CBraMod_chkpt/pretrained_weights.pth",
+            cbramod_path="/teamspace/studios/this_studio/CBraMod",
+            freeze_backbone=True
+        )
+
+    def make_cbramod_bci():
+        return CBraModBci(
+            pretrained_path="/teamspace/studios/this_studio/CBraMod_chkpt/pretrained_weights.pth",
+            cbramod_path="/teamspace/studios/this_studio/CBraMod",
             freeze_backbone=True
         )
 
@@ -319,7 +346,7 @@ def main():
         "multiclass_artifact": ArtifactMulticlassClinicalTask,
     }
 
-    # Mapping command-line strings to model classes (or factory functions for LeJEPA/LUNA)
+    # Mapping command-line strings to model classes (or factory functions for LeJEPA/LUNA/CBraMod)
     clinical_models_map = {
         "lda": BrainfeaturesLDA,
         "svm": BrainfeaturesSVM,
@@ -329,6 +356,7 @@ def main():
         "lejepa": make_lejepa_clinical,
         "reve": REVEClinical,
         "luna": make_luna_clinical,
+        "cbramod": make_cbramod_clinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
@@ -337,7 +365,9 @@ def main():
         "bendr": BENDRBci,
         "neurogpt": NeuroGPTBci,
         "reve": REVEBci,
-        "lejepa": make_lejepa_bci
+        "lejepa": make_lejepa_bci,
+        "luna": make_luna_bci,
+        "cbramod": make_cbramod_bci,
     }
 
     wandb_run = None
