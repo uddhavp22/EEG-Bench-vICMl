@@ -29,7 +29,8 @@ import os
 import sys
 import time
 from itertools import product
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager
+from tqdm import tqdm
 from datetime import datetime
 import glob
 import re
@@ -67,10 +68,12 @@ def get_completed_experiments(results_dir="results/raw"):
 
 def run_experiment(args):
     """Run a single experiment in a subprocess."""
-    model, task, pct, gpu_id, log_dir, dry_run = args
+    model, task, pct, log_dir, dry_run, gpu_queue = args
+    gpu_id = gpu_queue.get()
 
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    try:
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     cmd = [
         sys.executable, "benchmark_console.py",
@@ -83,38 +86,40 @@ def run_experiment(args):
 
     log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_gpu{gpu_id}.log")
 
-    if dry_run:
-        print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
-        return (model, task, pct, 0, "dry_run")
+        if dry_run:
+            print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
+            return (model, task, pct, 0, "dry_run")
 
-    start_time = time.time()
-    try:
-        with open(log_file, "w") as f:
-            f.write(f"Command: {' '.join(cmd)}\n")
-            f.write(f"Started: {datetime.now().isoformat()}\n")
-            f.write(f"GPU: {gpu_id}\n")
-            f.write("-" * 50 + "\n")
-            f.flush()
+        start_time = time.time()
+        try:
+            with open(log_file, "w") as f:
+                f.write(f"Command: {' '.join(cmd)}\n")
+                f.write(f"Started: {datetime.now().isoformat()}\n")
+                f.write(f"GPU: {gpu_id}\n")
+                f.write("-" * 50 + "\n")
+                f.flush()
 
-            result = subprocess.run(
-                cmd,
-                env=env,
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                cwd=os.getcwd()
-            )
+                result = subprocess.run(
+                    cmd,
+                    env=env,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    cwd=os.getcwd()
+                )
 
-            elapsed = time.time() - start_time
-            f.write("-" * 50 + "\n")
-            f.write(f"Finished: {datetime.now().isoformat()}\n")
-            f.write(f"Elapsed: {elapsed:.1f}s\n")
-            f.write(f"Return code: {result.returncode}\n")
+                elapsed = time.time() - start_time
+                f.write("-" * 50 + "\n")
+                f.write(f"Finished: {datetime.now().isoformat()}\n")
+                f.write(f"Elapsed: {elapsed:.1f}s\n")
+                f.write(f"Return code: {result.returncode}\n")
 
-        status = "success" if result.returncode == 0 else "failed"
-        return (model, task, pct, result.returncode, status)
+            status = "success" if result.returncode == 0 else "failed"
+            return (model, task, pct, result.returncode, status)
 
-    except Exception as e:
-        return (model, task, pct, -1, str(e))
+        except Exception as e:
+            return (model, task, pct, -1, str(e))
+    finally:
+        gpu_queue.put(gpu_id)
 
 
 def prewarm_cache(tasks, models, log_dir):
@@ -204,18 +209,28 @@ def main():
     if not args.skip_prewarm and not args.dry_run:
         prewarm_cache(args.tasks, args.models, args.log_dir)
 
-    # Assign GPUs round-robin
-    jobs = []
-    for i, (model, task, pct) in enumerate(experiments):
-        gpu_id = i % args.gpus
-        jobs.append((model, task, pct, gpu_id, args.log_dir, args.dry_run))
+    # Run larger percentages first to reduce tail time
+    experiments = sorted(experiments, key=lambda x: x[2], reverse=True)
+
+    gpu_slots = [gpu_id for gpu_id in range(args.gpus) for _ in range(args.workers_per_gpu)]
+    jobs = [(model, task, pct, args.log_dir, args.dry_run) for model, task, pct in experiments]
 
     # Run experiments in parallel
     print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
     start_time = time.time()
 
-    with Pool(total_workers) as pool:
-        results = pool.map(run_experiment, jobs)
+    with Manager() as manager:
+        gpu_queue = manager.Queue()
+        for gpu_id in gpu_slots:
+            gpu_queue.put(gpu_id)
+        with Pool(total_workers) as pool:
+            results = []
+            for result in tqdm(
+                pool.imap_unordered(run_experiment, [job + (gpu_queue,) for job in jobs]),
+                total=len(jobs),
+                desc="Experiments",
+            ):
+                results.append(result)
 
     elapsed = time.time() - start_time
 
