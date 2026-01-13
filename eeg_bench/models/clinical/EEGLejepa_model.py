@@ -190,6 +190,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
+        breakpoint()
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
@@ -325,7 +326,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # Optimizer and Scheduler (matching BCI setup)
         max_epochs = 30
         steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 1e-3
+        max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=0.01)
@@ -338,7 +339,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, 
-            patience = 5,
+            patience = 2,
         )
 
         # Early stopping setup (matching BCI)
