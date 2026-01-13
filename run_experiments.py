@@ -85,12 +85,12 @@ def run_experiment(args):
 
     log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_gpu{gpu_id}.log")
 
-    if dry_run:
-        print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
-        return (model, task, pct, 0, "dry_run")
-
     start_time = time.time()
     try:
+        if dry_run:
+            print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
+            return (model, task, pct, 0, "dry_run")
+
         with open(log_file, "w") as f:
             f.write(f"Command: {' '.join(cmd)}\n")
             f.write(f"Started: {datetime.now().isoformat()}\n")
