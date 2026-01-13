@@ -70,10 +70,11 @@ def get_completed_experiments(results_dir="results/raw"):
     # Pattern: task_model_pctXX_LP_timestamp.json
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
+        filename = filename.replace("_clinical", "")
         # Extract model, task, percentage from filename
-        match = re.match(r"^(?P<task>.+?)_(?P<model>.+?)(?:_pct(?P<pct>\d+))?.*_\d{8}_\d{6}\.json$", filename)
+        match = re.match(r"^(?P<task>.+?)_(?P<model>.+?)(?:_pct(?P<pct>\d+))?(?:_.*)?_\d{8}_\d{6}\.json$", filename)
         if match:
-            task_name, model_name, pct, islp = match.groups()
+            task_name, model_name, pct = match.groups()
             task_name = normalize_task_name(task_name)
             pct = int(pct) / 100 if pct else 1.0
             completed.add((model_name.lower().replace("model", ""), task_name, pct))
