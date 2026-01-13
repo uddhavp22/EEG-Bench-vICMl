@@ -71,9 +71,8 @@ def run_experiment(args):
     model, task, pct, log_dir, dry_run, gpu_queue = args
     gpu_id = gpu_queue.get()
 
-    try:
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     cmd = [
         sys.executable, "benchmark_console.py",
@@ -86,38 +85,37 @@ def run_experiment(args):
 
     log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_gpu{gpu_id}.log")
 
-        if dry_run:
-            print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
-            return (model, task, pct, 0, "dry_run")
+    if dry_run:
+        print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
+        return (model, task, pct, 0, "dry_run")
 
-        start_time = time.time()
-        try:
-            with open(log_file, "w") as f:
-                f.write(f"Command: {' '.join(cmd)}\n")
-                f.write(f"Started: {datetime.now().isoformat()}\n")
-                f.write(f"GPU: {gpu_id}\n")
-                f.write("-" * 50 + "\n")
-                f.flush()
+    start_time = time.time()
+    try:
+        with open(log_file, "w") as f:
+            f.write(f"Command: {' '.join(cmd)}\n")
+            f.write(f"Started: {datetime.now().isoformat()}\n")
+            f.write(f"GPU: {gpu_id}\n")
+            f.write("-" * 50 + "\n")
+            f.flush()
 
-                result = subprocess.run(
-                    cmd,
-                    env=env,
-                    stdout=f,
-                    stderr=subprocess.STDOUT,
-                    cwd=os.getcwd()
-                )
+            result = subprocess.run(
+                cmd,
+                env=env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                cwd=os.getcwd()
+            )
 
-                elapsed = time.time() - start_time
-                f.write("-" * 50 + "\n")
-                f.write(f"Finished: {datetime.now().isoformat()}\n")
-                f.write(f"Elapsed: {elapsed:.1f}s\n")
-                f.write(f"Return code: {result.returncode}\n")
+            elapsed = time.time() - start_time
+            f.write("-" * 50 + "\n")
+            f.write(f"Finished: {datetime.now().isoformat()}\n")
+            f.write(f"Elapsed: {elapsed:.1f}s\n")
+            f.write(f"Return code: {result.returncode}\n")
 
-            status = "success" if result.returncode == 0 else "failed"
-            return (model, task, pct, result.returncode, status)
-
-        except Exception as e:
-            return (model, task, pct, -1, str(e))
+        status = "success" if result.returncode == 0 else "failed"
+        return (model, task, pct, result.returncode, status)
+    except Exception as e:
+        return (model, task, pct, -1, str(e))
     finally:
         gpu_queue.put(gpu_id)
 
