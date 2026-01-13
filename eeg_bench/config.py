@@ -1,10 +1,19 @@
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 _config = None
+
+
+@dataclass
+class LeJEPALoraConfig:
+    enabled: bool = False
+    r: int = 8
+    alpha: int = 16
+    dropout: float = 0.05
+    target_modules: Optional[List[str]] = None
 
 
 @dataclass
@@ -13,6 +22,7 @@ class LeJEPAConfig:
     eegfm_path: Optional[str] = None
     pos_bank_path: str = "./REVE_posbank"
     freeze_encoder: bool = True
+    lora: LeJEPALoraConfig = field(default_factory=lambda: LeJEPALoraConfig())
     # Checkpoint resolution (shared by BCI and Clinical)
     checkpoint_base_path: Optional[str] = None
     checkpoint_version: Optional[int] = None
@@ -93,6 +103,13 @@ def load_lejepa_config(config_file_override: Optional[str] = None) -> dict:
         "eegfm_path": None,
         "pos_bank_path": "./REVE_posbank",
         "freeze_encoder": True,
+        "lora": {
+            "enabled": False,
+            "r": 8,
+            "alpha": 16,
+            "dropout": 0.05,
+            "target_modules": ["to_q", "to_k", "to_v", "to_qkv"],
+        },
         "checkpoint": {
             "base_path": None,
             "version": None,
@@ -127,12 +144,20 @@ def merge_lejepa_config_with_cli(base_config: dict, cli_args) -> LeJEPAConfig:
         LeJEPAConfig dataclass instance
     """
     checkpoint_config = base_config.get("checkpoint", {})
+    lora_config = base_config.get("lora", {})
 
     # Start with JSON config values
     config = LeJEPAConfig(
         eegfm_path=base_config.get("eegfm_path"),
         pos_bank_path=base_config.get("pos_bank_path", "./REVE_posbank"),
         freeze_encoder=base_config.get("freeze_encoder", True),
+        lora=LeJEPALoraConfig(
+            enabled=lora_config.get("enabled", False),
+            r=lora_config.get("r", 8),
+            alpha=lora_config.get("alpha", 16),
+            dropout=lora_config.get("dropout", 0.05),
+            target_modules=lora_config.get("target_modules", ["to_q", "to_k", "to_v", "to_qkv"]),
+        ),
         checkpoint_base_path=checkpoint_config.get("base_path"),
         checkpoint_version=checkpoint_config.get("version"),
         checkpoint_full_path=checkpoint_config.get("full_path"),

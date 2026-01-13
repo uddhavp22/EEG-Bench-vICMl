@@ -219,7 +219,8 @@ dependencies:
       - tornado==6.4.2
       - tqdm==4.66.2
       - traitlets==5.14.3
-      - transformers==4.17.0
+      - transformers==4.38.2
+      - peft==0.10.0
       - trio==0.29.0
       - trio-websocket==0.11.1
       - triton==2.2.0

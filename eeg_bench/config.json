@@ -8,6 +8,13 @@
     "lejepa": {
         "eegfm_path": null,
         "pos_bank_path": "./REVE_posbank",
+        "lora": {
+            "enabled": false,
+            "r": 8,
+            "alpha": 16,
+            "dropout": 0.05,
+            "target_modules": ["to_q", "to_k", "to_v", "to_qkv"]
+        },
         "checkpoint": {
             "base_path": null,
             "version": null,

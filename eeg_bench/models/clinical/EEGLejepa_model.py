@@ -16,7 +16,8 @@ import sys
 import logging
 from pathlib import Path
 from ..abstract_model import AbstractModel
-from ...config import get_config_value, LeJEPAConfig
+from ...config import get_config_value, LeJEPAConfig, LeJEPALoraConfig
+from ..lejepa_lora import apply_lejepa_lora
 
 # LaBraM Clinical Utilities
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
@@ -62,6 +63,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         base_path=None,
         version=None,
         freeze_encoder=True,
+        lora_config: Optional[LeJEPALoraConfig] = None,
         config_path: Optional[Path] = None,
         pretrained_path: Optional[Path] = None,
     ):
@@ -149,10 +151,11 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.load_state_dict(state, strict=False)
             print(f"[LeJEPAClinical] Loaded pretrained weights from {pretrained_path}")
 
-        # ------------------------------------------------------------
-        # Freeze encoder if requested
-        # ------------------------------------------------------------
-        if freeze_encoder:
+        lora_enabled = bool(lora_config and lora_config.enabled)
+        if lora_enabled:
+            self.backbone = apply_lejepa_lora(self.backbone, lora_config)
+            self.backbone.train()
+        elif freeze_encoder:
             for p in self.backbone.parameters():
                 p.requires_grad = False
             self.backbone.eval()
@@ -241,6 +244,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 config_path = None
                 pretrained_path = None
             freeze_encoder = config.freeze_encoder
+            lora_config = config.lora
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
@@ -249,6 +253,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
             config_path = None
             pretrained_path = None
+            lora_config = LeJEPALoraConfig()
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -256,12 +261,16 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # Load position bank with HuggingFace fallback
         self.pos_bank = self._load_position_bank(pos_bank_path)
 
+        if lora_config.enabled and freeze_encoder:
+            raise ValueError("LoRA cannot be enabled while freeze_encoder is True.")
+
         self.model = ConcreteLeJEPAClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
             base_path=base_path,
             version=version,
             freeze_encoder=freeze_encoder,
+            lora_config=lora_config,
             config_path=config_path,
             pretrained_path=pretrained_path,
         ).to(self.device)

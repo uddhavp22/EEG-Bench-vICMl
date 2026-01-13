@@ -15,7 +15,8 @@ from ..abstract_model import AbstractModel
 from .LaBraM.make_dataset import make_dataset_lejepa  # LeJEPA-specific loader with Defossez scaling
 from .LaBraM.utils_2 import calc_class_weights, reverse_map_label, n_unique_labels
 from joblib import Memory
-from ...config import get_config_value, LeJEPAConfig
+from ...config import get_config_value, LeJEPAConfig, LeJEPALoraConfig
+from ..lejepa_lora import apply_lejepa_lora
 from ...utils import wandb_utils
 
 from transformers import AutoModel
@@ -52,7 +53,13 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
     EncoderConfig = _EncoderConfig
 
 class ConcreteLeJEPABCI(nn.Module):
-    def __init__(self, num_classes: int, pretrained_path: str | None = None, freeze_encoder: bool = True):
+    def __init__(
+        self,
+        num_classes: int,
+        pretrained_path: str | None = None,
+        freeze_encoder: bool = True,
+        lora_config: Optional[LeJEPALoraConfig] = None,
+    ):
         super().__init__()
         
         DIM = 384
@@ -78,7 +85,11 @@ class ConcreteLeJEPABCI(nn.Module):
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
 
-        if freeze_encoder:
+        lora_enabled = bool(lora_config and lora_config.enabled)
+        if lora_enabled:
+            self.backbone = apply_lejepa_lora(self.backbone, lora_config)
+            self.backbone.train()
+        elif freeze_encoder:
             for p in self.backbone.parameters():
                 p.requires_grad = False
             self.backbone.eval()
@@ -115,14 +126,19 @@ class EEGLeJEPABCIModel(AbstractModel):
         if config is not None:
             self.pretrained_path = config.get_checkpoint_path()
             self.freeze_encoder = config.freeze_encoder
+            self.lora_config = config.lora
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
             # Legacy mode - use parameters directly
             self.pretrained_path = pretrained_path
             self.freeze_encoder = freeze_encoder
+            self.lora_config = LeJEPALoraConfig()
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
+
+        if self.lora_config.enabled and self.freeze_encoder:
+            raise ValueError("LoRA cannot be enabled while freeze_encoder is True.")
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -211,7 +227,12 @@ class EEGLeJEPABCIModel(AbstractModel):
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         task_name = meta[0]["task_name"]
         num_classes = n_unique_labels(task_name)
-        self.model = ConcreteLeJEPABCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
+        self.model = ConcreteLeJEPABCI(
+            num_classes,
+            self.pretrained_path,
+            freeze_encoder=self.freeze_encoder,
+            lora_config=self.lora_config,
+        ).to(self.device)
 
         datasets = [self.cache.cache(make_dataset_lejepa)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
                     for X_, y_, m_ in zip(X, y, meta)]
