@@ -142,13 +142,18 @@ class ConcreteLeJEPAClinical(nn.Module):
         # ------------------------------------------------------------
         # Load pretrained weights (if available)
         # ------------------------------------------------------------
-        breakpoint()
         if pretrained_path is not None:
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
+<<<<<<< HEAD
             print(f"[LeJEPAClinical] Loaded pretrained weights from {pretrained_path}")
+=======
+            print("[LeJEPAClinical] Loaded pretrained weights")
+        else:
+            raise NotImplementedError 
+>>>>>>> 7669c30 (minor fix to the lr)
 
         # ------------------------------------------------------------
         # Freeze encoder if requested
@@ -323,7 +328,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         max_lr = 1e-3
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+        optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=0.01)
         # scheduler = torch.optim.lr_scheduler.OneCycleLR(
         #     optimizer,
         #     max_lr=max_lr,
