@@ -145,17 +145,28 @@ class LaBraMDataset2(Dataset):
         n = len(self.recording_names)
         indices = list(range(n))
         np.random.shuffle(indices)
-        
+
         split = int(np.floor(val_split * n))
+
+        # Ensure at least 1 sample for training
+        if split >= n:
+            split = max(0, n - 1)
+
         val_indices = indices[:split]
         train_indices = indices[split:]
-        
+
+        # If we somehow end up with 0 training samples, skip validation
+        if len(train_indices) == 0:
+            logging.warning(f"Not enough samples for train/val split (n={n}). Using all for training.")
+            train_indices = indices
+            val_indices = []
+
         train_recordings = [self.recording_names[i] for i in train_indices]
         val_recordings = [self.recording_names[i] for i in val_indices]
-        
+
         train_dataset = LaBraMDataset2(self.h5_path, True, self.ch_names, recording_names=train_recordings)
-        val_dataset = LaBraMDataset2(self.h5_path, True, self.ch_names, recording_names=val_recordings)
-        
+        val_dataset = LaBraMDataset2(self.h5_path, True, self.ch_names, recording_names=val_recordings) if val_recordings else None
+
         return train_dataset, val_dataset
 
 class NeuroGPTDataset2(EEGDataset):
@@ -196,22 +207,33 @@ class NeuroGPTDataset2(EEGDataset):
         Args:
             val_split (float): Fraction of the dataset to use for validation.
         Returns:
-            Tuple[LaBraMDataset2, LaBraMDataset2]: Training and validation dataset instances.
+            Tuple[NeuroGPTDataset2, NeuroGPTDataset2]: Training and validation dataset instances.
         """
         n = len(self.recording_names)
         indices = list(range(n))
         np.random.shuffle(indices)
-        
+
         split = int(np.floor(val_split * n))
+
+        # Ensure at least 1 sample for training
+        if split >= n:
+            split = max(0, n - 1)
+
         val_indices = indices[:split]
         train_indices = indices[split:]
-        
+
+        # If we somehow end up with 0 training samples, skip validation
+        if len(train_indices) == 0:
+            logging.warning(f"Not enough samples for train/val split (n={n}). Using all for training.")
+            train_indices = indices
+            val_indices = []
+
         train_recordings = [self.recording_names[i] for i in train_indices]
         val_recordings = [self.recording_names[i] for i in val_indices]
-        
+
         train_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=train_recordings)
-        val_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=val_recordings)
-        
+        val_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=val_recordings) if val_recordings else None
+
         return train_dataset, val_dataset
     
 
