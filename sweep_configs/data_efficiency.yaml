@@ -14,8 +14,8 @@ models:
     version: 0
 
 checkpoints:
-  epochs: []
-  include_last: true  # Only use final checkpoint
+  steps: []  # No step sweep - only final checkpoint
+  include_last: true
 
 tasks:
   epoch_sweep: []

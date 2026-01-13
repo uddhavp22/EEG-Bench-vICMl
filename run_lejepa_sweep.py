@@ -25,7 +25,8 @@ Example YAML config:
         version: 0
 
     checkpoints:
-      epochs: [0, 10, 50, 100]
+      # Steps to evaluate (epoch is always 0)
+      steps: [1000, 5000, 10000]
       include_last: true
 
     tasks:
@@ -101,7 +102,7 @@ def discover_checkpoints(base_path: str, version: int = 0) -> Dict[str, str]:
 
     Returns:
         Dict mapping checkpoint identifier to full checkpoint path.
-        Keys: "last", "epoch_0", "epoch_10", etc.
+        Keys: "last", "epoch_0_step_1000", etc.
     """
     checkpoints = {}
     ckpt_dir = Path(base_path) / f"version_{version}" / "checkpoints"
@@ -115,19 +116,20 @@ def discover_checkpoints(base_path: str, version: int = 0) -> Dict[str, str]:
         checkpoints["last"] = str(last_ckpt)
 
     # Find epoch checkpoints: epoch=N-step=M.ckpt (PyTorch Lightning format)
-    epoch_pattern = re.compile(r"epoch=(\d+)-step=\d+\.ckpt")
+    epoch_pattern = re.compile(r"epoch=(\d+)-step=(\d+)\.ckpt")
     for ckpt_file in ckpt_dir.glob("epoch=*-step=*.ckpt"):
         match = epoch_pattern.match(ckpt_file.name)
         if match:
             epoch_num = int(match.group(1))
-            checkpoints[f"epoch_{epoch_num}"] = str(ckpt_file)
+            step_num = int(match.group(2))
+            checkpoints[f"epoch_{epoch_num}_step_{step_num}"] = str(ckpt_file)
 
     return checkpoints
 
 
 def filter_checkpoints(
     checkpoints: Dict[str, str],
-    epochs: Optional[List[int]],
+    steps: Optional[List[int]],
     include_last: bool,
     auto_discover: bool = False
 ) -> Dict[str, str]:
@@ -140,14 +142,25 @@ def filter_checkpoints(
         if not include_last and "last" in filtered:
             del filtered["last"]
     else:
-        # Filter to specified epochs
-        if epochs:
-            for epoch in epochs:
-                key = f"epoch_{epoch}"
-                if key in checkpoints:
-                    filtered[key] = checkpoints[key]
-                else:
-                    print(f"  [Warning] Epoch {epoch} not found in available checkpoints")
+        if steps:
+            step_set = set(steps)
+            found_steps = set()
+            for ckpt_id, ckpt_path in checkpoints.items():
+                if ckpt_id == "last":
+                    continue
+                if "_step_" not in ckpt_id or not ckpt_id.startswith("epoch_"):
+                    continue
+                step_str = ckpt_id.split("_step_", 1)[1]
+                try:
+                    step = int(step_str)
+                except ValueError:
+                    continue
+                if step in step_set:
+                    filtered[ckpt_id] = ckpt_path
+                    found_steps.add(step)
+            missing_steps = [s for s in steps if s not in found_steps]
+            for step in missing_steps:
+                print(f"  [Warning] Step {step} not found in available checkpoints")
 
         if include_last and "last" in checkpoints:
             filtered["last"] = checkpoints["last"]
@@ -182,7 +195,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
     # Set defaults
     config.setdefault("checkpoints", {})
-    config["checkpoints"].setdefault("epochs", [])
+    config["checkpoints"].setdefault("steps", [])
     config["checkpoints"].setdefault("include_last", True)
     config["checkpoints"].setdefault("auto_discover", False)
 
@@ -235,7 +248,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
         # Get checkpoints for epoch sweep
         epoch_checkpoints = filter_checkpoints(
             all_checkpoints,
-            epochs=config["checkpoints"]["epochs"],
+            steps=config["checkpoints"]["steps"],
             include_last=config["checkpoints"]["include_last"],
             auto_discover=config["checkpoints"]["auto_discover"]
         )
@@ -289,7 +302,7 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
         # Try to extract components - this pattern may need adjustment
-        # Example: lejepa_small_left_right_LeJEPABCIModel_ckpt_epoch_10_pct100_LP_20240115_123456.json
+    # Example: lejepa_small_left_right_LeJEPABCIModel_ckpt_epoch_0_step_10000_pct100_LP_20240115_123456.json
         match = re.match(
             r"(.+?)_(.+?)_\w+Model_ckpt_(.+?)_pct(\d+)(?:_LP)?_\d+\.json",
             filename
@@ -387,7 +400,7 @@ def main():
     print("LeJEPA Checkpoint Sweep")
     print("=" * 60)
     print(f"Models: {list(config['models'].keys())}")
-    print(f"Checkpoints: epochs={config['checkpoints']['epochs']}, "
+    print(f"Checkpoints: steps={config['checkpoints']['steps']}, "
           f"include_last={config['checkpoints']['include_last']}")
     print(f"Linear probe: {config['training']['linear_probe']}")
     print(f"Data percentages: {config['training']['data_percentages']}")
