@@ -13,7 +13,7 @@ models:
 checkpoints:
   # Steps to evaluate - adjust based on your checkpoint availability
   # steps: [1000, 5000, 10000, 25000, 50000]
-  include_last: true
+  include_last: false
   # Alternatively, auto-discover all available checkpoints:
   auto_discover: true
 

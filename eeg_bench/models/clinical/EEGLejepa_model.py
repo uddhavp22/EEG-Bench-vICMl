@@ -142,6 +142,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         # ------------------------------------------------------------
         # Load pretrained weights (if available)
         # ------------------------------------------------------------
+        breakpoint()
         if pretrained_path is not None:
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
@@ -319,16 +320,20 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # Optimizer and Scheduler (matching BCI setup)
         max_epochs = 30
         steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 4e-4
+        max_lr = 1e-3
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=max_lr,
-            steps_per_epoch=steps_per_epoch,
-            epochs=max_epochs,
-            pct_start=0.2,
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        #     optimizer,
+        #     max_lr=max_lr,
+        #     steps_per_epoch=steps_per_epoch,
+        #     epochs=max_epochs,
+        #     pct_start=0.2,
+        # )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            patience = 5,
         )
 
         # Early stopping setup (matching BCI)
@@ -355,7 +360,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
                 optimizer.step()
-                scheduler.step()
+
 
                 total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)
@@ -396,6 +401,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Compute val metrics
             avg_val_loss = val_loss / val_samples if val_samples else 0.0
             val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+
+            scheduler.step(avg_val_loss)
 
             # Early stopping check
             if avg_val_loss < best_val_loss:
