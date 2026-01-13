@@ -147,13 +147,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
-<<<<<<< HEAD
             print(f"[LeJEPAClinical] Loaded pretrained weights from {pretrained_path}")
-=======
-            print("[LeJEPAClinical] Loaded pretrained weights")
-        else:
-            raise NotImplementedError 
->>>>>>> 7669c30 (minor fix to the lr)
 
         # ------------------------------------------------------------
         # Freeze encoder if requested
