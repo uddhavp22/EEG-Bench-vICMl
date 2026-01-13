@@ -277,13 +277,21 @@ class LaBraMModel(AbstractModel):
         self.model.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
         
         dataset_train  = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=self.use_cache)
-    
+
+        # Check if dataset has any samples
+        if len(dataset_train) == 0:
+            raise ValueError(f"Dataset has 0 samples after processing. Cannot train model.")
+
         val_split = 0.2
         if val_split is not None:
             dataset_train, dataset_val = dataset_train.split_train_val(val_split)
         else:
             dataset_val = None
-        
+
+        # Verify we still have training samples after split
+        if len(dataset_train) == 0:
+            raise ValueError(f"Training set has 0 samples after train/val split. Try using more training data.")
+
         del X, y, meta
         gc.collect()
         torch.cuda.empty_cache()

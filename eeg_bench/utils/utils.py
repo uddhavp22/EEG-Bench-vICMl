@@ -45,6 +45,8 @@ def subsample_data_stratified(
         y_sub: Subsampled y
         stats: Dict with samples_per_class and total_samples
     """
+    MIN_SAMPLES_PER_CLASS = 2  # Hardcoded minimum to ensure class representation
+
     def _collect_label_values(labels):
         if isinstance(labels, np.ndarray):
             return labels.tolist()
@@ -59,6 +61,11 @@ def subsample_data_stratified(
     def _take_indices(items, indices):
         return items[indices] if isinstance(items, np.ndarray) else [items[i] for i in indices]
 
+    def _get_label_array(y_i):
+        """Convert labels to numpy array for class counting."""
+        label_values = _collect_label_values(y_i)
+        return np.array(label_values)
+
     if percentage >= 1.0:
         all_labels = []
         for y_i in y:
@@ -71,32 +78,67 @@ def subsample_data_stratified(
 
     X_sub, y_sub = [], []
     all_labels_sub = []
+    rng = np.random.RandomState(random_state)
 
     for X_i, y_i in zip(X, y):
         n_samples = len(y_i)
-        n_keep = max(2, int(n_samples * percentage))  # Need at least 2 for stratified split
+        label_arr = _get_label_array(y_i)
+        unique_classes, class_counts = np.unique(label_arr, return_counts=True)
+        n_classes = len(unique_classes)
+
+        # Calculate minimum samples needed to maintain class representation
+        min_samples_needed = n_classes * MIN_SAMPLES_PER_CLASS
+        n_keep = max(min_samples_needed, int(n_samples * percentage))
 
         if n_keep >= n_samples:
+            # Use full dataset
             X_sub.append(X_i)
             y_sub.append(y_i)
             all_labels_sub.extend(_collect_label_values(y_i))
+            continue
+
+        # Check if stratification is feasible
+        min_class_count = class_counts.min()
+        samples_per_class_target = int(min_class_count * percentage)
+
+        if samples_per_class_target < MIN_SAMPLES_PER_CLASS:
+            # Percentage too low for this dataset - use minimum samples per class
+            logger.warning(
+                f"Percentage {percentage:.1%} too low for dataset with {n_samples} samples "
+                f"and {n_classes} classes. Using {MIN_SAMPLES_PER_CLASS} samples per class minimum."
+            )
+            # Sample exactly MIN_SAMPLES_PER_CLASS from each class
+            indices = []
+            for cls in unique_classes:
+                cls_indices = np.where(label_arr == cls)[0]
+                n_to_sample = min(MIN_SAMPLES_PER_CLASS, len(cls_indices))
+                indices.extend(rng.choice(cls_indices, size=n_to_sample, replace=False))
+            indices = np.array(indices)
+            X_sub.append(_take_indices(X_i, indices))
+            y_sub.append(_take_indices(y_i, indices))
+            all_labels_sub.extend(_collect_label_values(_take_indices(y_i, indices)))
         else:
+            # Try stratified split
             try:
                 X_keep, _, y_keep, _ = train_test_split(
                     X_i, y_i,
                     train_size=percentage,
-                    stratify=y_i,
+                    stratify=label_arr,
                     random_state=random_state
                 )
                 X_sub.append(X_keep)
                 y_sub.append(y_keep)
                 all_labels_sub.extend(_collect_label_values(y_keep))
             except ValueError as e:
-                # Stratification failed (e.g., too few samples per class)
-                logger.warning(f"Stratified split failed, using random sample: {e}")
-                indices = np.random.RandomState(random_state).choice(
-                    n_samples, size=n_keep, replace=False
-                )
+                # Fallback: sample proportionally from each class
+                logger.warning(f"Stratified split failed: {e}. Using per-class sampling.")
+                indices = []
+                for cls, count in zip(unique_classes, class_counts):
+                    cls_indices = np.where(label_arr == cls)[0]
+                    n_to_sample = max(MIN_SAMPLES_PER_CLASS, int(count * percentage))
+                    n_to_sample = min(n_to_sample, len(cls_indices))
+                    indices.extend(rng.choice(cls_indices, size=n_to_sample, replace=False))
+                indices = np.array(indices)
                 X_sub.append(_take_indices(X_i, indices))
                 y_sub.append(_take_indices(y_i, indices))
                 all_labels_sub.extend(_collect_label_values(_take_indices(y_i, indices)))
@@ -105,6 +147,12 @@ def subsample_data_stratified(
         "samples_per_class": dict(Counter(all_labels_sub)),
         "total_samples": len(all_labels_sub)
     }
+
+    # Warn if any class has very few samples
+    for cls, count in stats["samples_per_class"].items():
+        if count < MIN_SAMPLES_PER_CLASS:
+            logger.warning(f"Class {cls} has only {count} samples after subsampling!")
+
     return X_sub, y_sub, stats
 
 def save_results(
