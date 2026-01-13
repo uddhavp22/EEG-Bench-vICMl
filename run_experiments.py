@@ -42,7 +42,7 @@ CLINICAL_TASKS = [
     "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"
 ]
 ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
-DEFAULT_PERCENTAGES = [0.01, 0.1, 0.25, 0.5, 0.75, 1.0]
+DEFAULT_PERCENTAGES = [0.25, 0.5, 0.75, 1.0] #0.01, 0.1, 
 
 
 def get_completed_experiments(results_dir="results/raw"):
