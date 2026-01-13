@@ -1,0 +1,35 @@
+# Data Efficiency Sweep - Compare models at varying training data percentages
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/data_efficiency.yaml
+#
+# This config runs experiments with varying amounts of training data
+# to analyze data efficiency of different model sizes.
+
+models:
+  lejepa_small:
+    base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
+    version: 0
+  lejepa_base:
+    base_path: /path/to/your/lejepa_base   # UPDATE THIS PATH
+    version: 0
+
+checkpoints:
+  epochs: []
+  include_last: true  # Only use final checkpoint
+
+tasks:
+  epoch_sweep: []
+  final_only:
+    - left_right
+    - parkinsons
+    # Add more tasks as needed
+
+training:
+  linear_probe: true
+  # Test at multiple training data percentages
+  data_percentages: [0.01, 0.1, 0.25, 0.5, 0.75, 1.0]
+
+execution:
+  gpus: 3
+  workers_per_gpu: 2
+  log_dir: logs/lejepa_data_efficiency

@@ -1,0 +1,36 @@
+# Full Benchmark - Compare multiple model sizes across all tasks
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/full_benchmark.yaml
+#
+# This config runs the full benchmark with multiple model sizes,
+# using only the final checkpoint for each model.
+
+models:
+  lejepa_small:
+    base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
+    version: 0
+  lejepa_base:
+    base_path: /path/to/your/lejepa_base   # UPDATE THIS PATH
+    version: 0
+  # Add more model sizes as needed:
+  # lejepa_large:
+  #   base_path: /path/to/your/lejepa_large
+  #   version: 0
+
+checkpoints:
+  epochs: []  # No epoch sweep - only final checkpoints
+  include_last: true
+
+tasks:
+  epoch_sweep: []  # No epoch sweep tasks
+  final_only:
+    - all  # Run all 14 tasks
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+
+execution:
+  gpus: 3
+  workers_per_gpu: 2
+  log_dir: logs/lejepa_full_benchmark

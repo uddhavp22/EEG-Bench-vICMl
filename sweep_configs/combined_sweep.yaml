@@ -1,0 +1,38 @@
+# Combined Sweep - Model sizes + performance over training on select tasks
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/combined_sweep.yaml
+#
+# This config:
+# - Runs epoch sweep (all checkpoints) on a subset of tasks
+# - Runs final checkpoint on all other tasks
+# - Does this for multiple model sizes
+
+models:
+  lejepa_small:
+    base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
+    version: 0
+  lejepa_base:
+    base_path: /path/to/your/lejepa_base   # UPDATE THIS PATH
+    version: 0
+
+checkpoints:
+  epochs: [0, 25, 50, 100]
+  include_last: true
+
+tasks:
+  # Detailed epoch sweep on these tasks
+  epoch_sweep:
+    - left_right
+    - parkinsons
+  # Final checkpoint only for remaining tasks
+  final_only:
+    - all  # Expands to all tasks not in epoch_sweep
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+
+execution:
+  gpus: 3
+  workers_per_gpu: 2
+  log_dir: logs/lejepa_combined
