@@ -24,4 +24,5 @@ wandb/
 *.log
 *.yaml
 REVE_posbank/
+results/
 cache/
