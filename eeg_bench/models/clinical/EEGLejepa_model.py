@@ -184,6 +184,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
+        breakpoint()
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
@@ -267,20 +268,20 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         ).to(self.device)
 
     def _load_position_bank(self, local_fallback_path: str):
-        """Load REVE position bank - try HuggingFace first, fall back to local."""
+        """Load REVE position bank - try local first, fall back to HuggingFace."""
         try:
-            logger.info("Attempting to load position bank from HuggingFace Hub...")
-            pos_bank = AutoModel.from_pretrained(
-                "brain-bzh/reve-positions",
-                trust_remote_code=True
-            ).to(self.device)
-            logger.info("Successfully loaded position bank from HuggingFace Hub")
-            return pos_bank
-        except Exception as e:
-            logger.warning(f"Failed to load from HuggingFace Hub: {e}")
-            logger.info(f"Falling back to local path: {local_fallback_path}")
+            logger.info(f"Attempting to load position bank from local path: {local_fallback_path}")
             pos_bank = AutoModel.from_pretrained(
                 local_fallback_path,
+                trust_remote_code=True
+            ).to(self.device)
+            logger.info("Successfully loaded position bank from local storage.")
+            return pos_bank
+        except Exception as e:
+            logger.warning(f"Failed to load local model: {e}")
+            logger.info("Falling back to HuggingFace Hub (brain-bzh/reve-positions)...")
+            pos_bank = AutoModel.from_pretrained(
+                "brain-bzh/reve-positions",
                 trust_remote_code=True
             ).to(self.device)
             return pos_bank
@@ -319,16 +320,20 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # Optimizer and Scheduler (matching BCI setup)
         max_epochs = 30
         steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 4e-4
+        max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=max_lr,
-            steps_per_epoch=steps_per_epoch,
-            epochs=max_epochs,
-            pct_start=0.2,
+        optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=0.01)
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        #     optimizer,
+        #     max_lr=max_lr,
+        #     steps_per_epoch=steps_per_epoch,
+        #     epochs=max_epochs,
+        #     pct_start=0.2,
+        # )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            patience = 2,
         )
 
         # Early stopping setup (matching BCI)
@@ -355,7 +360,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
                 optimizer.step()
-                scheduler.step()
+
 
                 total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)
@@ -396,6 +401,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Compute val metrics
             avg_val_loss = val_loss / val_samples if val_samples else 0.0
             val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+
+            scheduler.step(avg_val_loss)
 
             # Early stopping check
             if avg_val_loss < best_val_loss:
