@@ -6,12 +6,12 @@
 # using only the final checkpoint for each model.
 
 models:
-  lejepa_small:
-    base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
-    version: 0
+  # lejepa_small:
+  #   base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
+  #   version: 0
   lejepa_base:
-    base_path: /path/to/your/lejepa_base   # UPDATE THIS PATH
-    version: 0
+    base_path: /home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global 
+    version: 4
   # Add more model sizes as needed:
   # lejepa_large:
   #   base_path: /path/to/your/lejepa_large
@@ -31,6 +31,6 @@ training:
   data_percentages: [1.0]
 
 execution:
-  gpus: 3
+  gpus: 1
   workers_per_gpu: 2
   log_dir: logs/lejepa_full_benchmark

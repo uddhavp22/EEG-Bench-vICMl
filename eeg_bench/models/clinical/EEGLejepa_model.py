@@ -162,7 +162,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Linear(DIM, out_dim)
+        self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim)) 
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
 
@@ -184,6 +184,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
+        # cls = outputs["sequence_embeddings"].mean(dim = 1)
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
@@ -322,18 +323,18 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=0.01)
-        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        #     optimizer,
-        #     max_lr=max_lr,
-        #     steps_per_epoch=steps_per_epoch,
-        #     epochs=max_epochs,
-        #     pct_start=0.2,
-        # )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 
-            patience = 2,
+        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr,
+            steps_per_epoch=steps_per_epoch,
+            epochs=max_epochs,
+            pct_start=0.2,
         )
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, 
+        #     patience = 2,
+        # )
 
         # Early stopping setup (matching BCI)
         patience = 10
@@ -359,6 +360,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
 
 
                 total_loss += loss.item() * x.size(0)
@@ -401,7 +403,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             avg_val_loss = val_loss / val_samples if val_samples else 0.0
             val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
 
-            scheduler.step(avg_val_loss)
+            # scheduler.step(avg_val_loss)
 
             # Early stopping check
             if avg_val_loss < best_val_loss:
