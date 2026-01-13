@@ -29,7 +29,8 @@ import os
 import sys
 import time
 from itertools import product
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager
+from tqdm import tqdm
 from datetime import datetime
 import glob
 import re
@@ -44,6 +45,21 @@ CLINICAL_TASKS = [
 ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
 DEFAULT_PERCENTAGES = [0.25, 0.5, 0.75, 1.0] #0.01, 0.1, 
 
+TASK_NAME_MAP = {
+    "Left Hand vs Right Hand MI": "left_right",
+    "Right Hand vs Feet MI": "right_feet",
+    "Left Hand vs Right Hand vs Feet vs Tongue MI": "left_right_feet_tongue",
+    "Five Fingers MI": "5_fingers",
+}
+
+
+def normalize_task_name(task_name):
+    if task_name in TASK_NAME_MAP:
+        return TASK_NAME_MAP[task_name]
+    if task_name.endswith("_clinical"):
+        return task_name.replace("_clinical", "")
+    return task_name
+
 
 def get_completed_experiments(results_dir="results/raw"):
     """Check which experiments have already completed based on result files."""
@@ -54,11 +70,12 @@ def get_completed_experiments(results_dir="results/raw"):
     # Pattern: task_model_pctXX_LP_timestamp.json
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
+        filename = filename.replace("_clinical", "")
         # Extract model, task, percentage from filename
-        # This is a simplified pattern - may need adjustment based on actual filenames
-        match = re.match(r"(.+?)_(\w+Model)(?:_pct(\d+))?(?:_LP)?_\d+\.json", filename)
+        match = re.match(r"^(?P<task>.+?)_(?P<model>.+?)(?:_pct(?P<pct>\d+))?(?:_.*)?_\d{8}_\d{6}\.json$", filename)
         if match:
             task_name, model_name, pct = match.groups()
+            task_name = normalize_task_name(task_name)
             pct = int(pct) / 100 if pct else 1.0
             completed.add((model_name.lower().replace("model", ""), task_name, pct))
 
@@ -67,7 +84,8 @@ def get_completed_experiments(results_dir="results/raw"):
 
 def run_experiment(args):
     """Run a single experiment in a subprocess."""
-    model, task, pct, gpu_id, log_dir, dry_run = args
+    model, task, pct, log_dir, dry_run, gpu_queue = args
+    gpu_id = gpu_queue.get()
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -83,12 +101,12 @@ def run_experiment(args):
 
     log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_gpu{gpu_id}.log")
 
-    if dry_run:
-        print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
-        return (model, task, pct, 0, "dry_run")
-
     start_time = time.time()
     try:
+        if dry_run:
+            print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
+            return (model, task, pct, 0, "dry_run")
+
         with open(log_file, "w") as f:
             f.write(f"Command: {' '.join(cmd)}\n")
             f.write(f"Started: {datetime.now().isoformat()}\n")
@@ -112,9 +130,10 @@ def run_experiment(args):
 
         status = "success" if result.returncode == 0 else "failed"
         return (model, task, pct, result.returncode, status)
-
     except Exception as e:
         return (model, task, pct, -1, str(e))
+    finally:
+        gpu_queue.put(gpu_id)
 
 
 def prewarm_cache(tasks, models, log_dir):
@@ -204,18 +223,28 @@ def main():
     if not args.skip_prewarm and not args.dry_run:
         prewarm_cache(args.tasks, args.models, args.log_dir)
 
-    # Assign GPUs round-robin
-    jobs = []
-    for i, (model, task, pct) in enumerate(experiments):
-        gpu_id = i % args.gpus
-        jobs.append((model, task, pct, gpu_id, args.log_dir, args.dry_run))
+    # Run larger percentages first to reduce tail time
+    experiments = sorted(experiments, key=lambda x: x[2], reverse=True)
+
+    gpu_slots = [gpu_id for gpu_id in range(args.gpus) for _ in range(args.workers_per_gpu)]
+    jobs = [(model, task, pct, args.log_dir, args.dry_run) for model, task, pct in experiments]
 
     # Run experiments in parallel
     print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
     start_time = time.time()
 
-    with Pool(total_workers) as pool:
-        results = pool.map(run_experiment, jobs)
+    with Manager() as manager:
+        gpu_queue = manager.Queue()
+        for gpu_id in gpu_slots:
+            gpu_queue.put(gpu_id)
+        with Pool(total_workers) as pool:
+            results = []
+            for result in tqdm(
+                pool.imap_unordered(run_experiment, [job + (gpu_queue,) for job in jobs]),
+                total=len(jobs),
+                desc="Experiments",
+            ):
+                results.append(result)
 
     elapsed = time.time() - start_time
 

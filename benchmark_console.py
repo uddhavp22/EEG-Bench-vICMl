@@ -68,7 +68,8 @@ ALL_TASKS_CLASSES = [
 
 ]
 
-def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False):
+def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False,
+              result_prefix=None, checkpoint_id=None):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
@@ -158,7 +159,8 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     y_trains.append(this_y_train)
 
             save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
-                        data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe)
+                        data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe,
+                        result_prefix=result_prefix, checkpoint_id=checkpoint_id)
             print_classification_results(
                 y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
             )
@@ -291,6 +293,20 @@ def main():
         "--lejepa-no-freeze-encoder",
         action="store_true",
         help="Do NOT freeze the LeJEPA encoder (allow fine-tuning)"
+    )
+
+    # Result file naming (for sweep scripts)
+    parser.add_argument(
+        "--result-prefix",
+        type=str,
+        default=None,
+        help="Prefix to add to result filename (e.g., model size name)"
+    )
+    parser.add_argument(
+        "--checkpoint-id",
+        type=str,
+        default=None,
+        help="Checkpoint identifier to include in result filename (e.g., 'epoch_10', 'last')"
     )
 
     args = parser.parse_args()
@@ -431,7 +447,8 @@ def main():
                 task_instance = task_cls()
                 model_classes = list(models_map.values())
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
-                         data_percentages=args.data_percentages, linear_probe=args.linear_probe)
+                         data_percentages=args.data_percentages, linear_probe=args.linear_probe,
+                         result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id)
 
         else:
             if not args.task or not args.model:
@@ -463,7 +480,8 @@ def main():
             model_instance = models_map[model_key]
 
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
-                     data_percentages=args.data_percentages, linear_probe=args.linear_probe)
+                     data_percentages=args.data_percentages, linear_probe=args.linear_probe,
+                     result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id)
     finally:
         wandb_utils.finish()
 
