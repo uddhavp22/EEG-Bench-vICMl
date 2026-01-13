@@ -45,6 +45,21 @@ CLINICAL_TASKS = [
 ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
 DEFAULT_PERCENTAGES = [0.25, 0.5, 0.75, 1.0] #0.01, 0.1, 
 
+TASK_NAME_MAP = {
+    "Left Hand vs Right Hand MI": "left_right",
+    "Right Hand vs Feet MI": "right_feet",
+    "Left Hand vs Right Hand vs Feet vs Tongue MI": "left_right_feet_tongue",
+    "Five Fingers MI": "5_fingers",
+}
+
+
+def normalize_task_name(task_name):
+    if task_name in TASK_NAME_MAP:
+        return TASK_NAME_MAP[task_name]
+    if task_name.endswith("_clinical"):
+        return task_name.replace("_clinical", "")
+    return task_name
+
 
 def get_completed_experiments(results_dir="results/raw"):
     """Check which experiments have already completed based on result files."""
@@ -60,6 +75,7 @@ def get_completed_experiments(results_dir="results/raw"):
         match = re.match(r"(.+?)_(\w+Model)(?:_pct(\d+))?(?:_LP)?_\d+\.json", filename)
         if match:
             task_name, model_name, pct = match.groups()
+            task_name = normalize_task_name(task_name)
             pct = int(pct) / 100 if pct else 1.0
             completed.add((model_name.lower().replace("model", ""), task_name, pct))
 
