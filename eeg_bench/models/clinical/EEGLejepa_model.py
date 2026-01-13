@@ -96,6 +96,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+            print("Loaded Config!")
         else:
             cfg = EEGLEJEPAConfig(
                 name="EEGLEJEPA",
