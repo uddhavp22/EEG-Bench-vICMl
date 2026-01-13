@@ -184,7 +184,6 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
-        breakpoint()
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
