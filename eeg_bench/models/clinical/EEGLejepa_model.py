@@ -62,6 +62,8 @@ class ConcreteLeJEPAClinical(nn.Module):
         base_path=None,
         version=None,
         freeze_encoder=True,
+        config_path: Optional[Path] = None,
+        pretrained_path: Optional[Path] = None,
     ):
         super().__init__()
 
@@ -71,23 +73,20 @@ class ConcreteLeJEPAClinical(nn.Module):
         # ------------------------------------------------------------
         # Pretrained config / checkpoint resolution (SAFE)
         # ------------------------------------------------------------
-        config_path = None
-        pretrained_path = None
-
-        if base_path is not None and version is not None:
+        if (config_path is None or pretrained_path is None) and base_path is not None and version is not None:
             base_path = Path(base_path) / f"version_{version}"
 
             candidate_config = base_path / "config" / "config.pkl"
             candidate_ckpt = base_path / "checkpoints" / "last.ckpt"
 
-            if candidate_config.exists():
+            if config_path is None and candidate_config.exists():
                 config_path = candidate_config
-            else:
+            elif config_path is None:
                 print(f"[LeJEPAClinical] No config found at {candidate_config}. Using default config.")
 
-            if candidate_ckpt.exists():
+            if pretrained_path is None and candidate_ckpt.exists():
                 pretrained_path = candidate_ckpt
-            else:
+            elif pretrained_path is None:
                 print(f"[LeJEPAClinical] No checkpoint found at {candidate_ckpt}. Training from scratch.")
 
         # ------------------------------------------------------------
@@ -148,7 +147,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
-            print("[LeJEPAClinical] Loaded pretrained weights")
+            print(f"[LeJEPAClinical] Loaded pretrained weights from {pretrained_path}")
 
         # ------------------------------------------------------------
         # Freeze encoder if requested
@@ -218,16 +217,19 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Use checkpoint path from config (get_checkpoint_path resolves full_path vs base_path+version)
             checkpoint_path = config.get_checkpoint_path()
             if checkpoint_path:
-                # Extract base_path and version from full path for ConcreteLeJEPAClinical
-                # which expects base_path/version_X/checkpoints/last.ckpt structure
+                # Extract base_path and version from full path for config discovery
                 ckpt_path = Path(checkpoint_path)
-                if ckpt_path.name == "last.ckpt" and ckpt_path.parent.name == "checkpoints":
+                pretrained_path = ckpt_path
+                config_path = None
+                if ckpt_path.parent.name == "checkpoints":
                     version_dir = ckpt_path.parent.parent
                     if version_dir.name.startswith("version_"):
                         base_path = str(version_dir.parent)
                         version = int(version_dir.name.replace("version_", ""))
+                        candidate_config = version_dir / "config" / "config.pkl"
+                        if candidate_config.exists():
+                            config_path = candidate_config
                     else:
-                        # full_path mode - pass checkpoint directly
                         base_path = None
                         version = None
                 else:
@@ -236,6 +238,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             else:
                 base_path = config.checkpoint_base_path
                 version = config.checkpoint_version
+                config_path = None
+                pretrained_path = None
             freeze_encoder = config.freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
@@ -243,6 +247,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Legacy mode - use parameters directly (with old defaults if not provided)
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
+            config_path = None
+            pretrained_path = None
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -255,7 +261,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             num_labels_per_chunk=num_labels_per_chunk,
             base_path=base_path,
             version=version,
-            freeze_encoder=freeze_encoder
+            freeze_encoder=freeze_encoder,
+            config_path=config_path,
+            pretrained_path=pretrained_path,
         ).to(self.device)
 
     def _load_position_bank(self, local_fallback_path: str):
