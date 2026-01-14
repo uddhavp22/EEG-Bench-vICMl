@@ -195,7 +195,16 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         B, C, T = x.shape
         n_chunks = T // self.chunk_length
-        chunk_trunc = n_chunks * self.chunk_length if n_chunks else T
+
+        # Handle case where data is shorter than one chunk
+        if n_chunks == 0:
+            # Pad to chunk_length if too short
+            pad_length = self.chunk_length - T
+            x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
+            n_chunks = 1
+            T = self.chunk_length
+
+        chunk_trunc = n_chunks * self.chunk_length
         x = x[:, :, :chunk_trunc]
 
         # Reshape into segments:
@@ -216,13 +225,13 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
         cls = cls.view(B, n_chunks, embedding_dim)
-        
+
         # Simple aggregation: mean pooling over segments
         if cls.dim() == 3:
             cls = cls.mean(dim=1)
         logits = self.head(cls)
         if self.is_multilabel_task:
-            logits = logits.reshape(x.shape[0], self.num_classes, -1)
+            logits = logits.reshape(B, self.num_classes, -1)
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):

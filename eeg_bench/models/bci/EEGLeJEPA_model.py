@@ -259,7 +259,30 @@ class EEGLeJEPABCIModel(AbstractModel):
 
 
 
+    def _get_coords_and_valid_mask(self, ch_names):
+        """
+        Get coordinates and a mask indicating which channels have valid positions.
+        Returns: (coords, valid_indices) where coords only contains valid channels.
+        """
+        clean_names = [c.replace("EEG", "").strip() for c in ch_names]
+        c = self.pos_bank(clean_names)
+        if isinstance(c, dict):
+            c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
+        if c.dim() == 3:
+            c = c.squeeze(0)
+        c = c.float().to(self.device)
+
+        # Detect invalid positions (NaN or all zeros)
+        valid_mask = ~(torch.isnan(c).any(dim=-1) | (c.abs().sum(dim=-1) == 0))
+        valid_indices = torch.where(valid_mask)[0]
+
+        if valid_indices.numel() < len(ch_names):
+            print(f"[LeJEPABCI] Found {valid_indices.numel()} valid positions out of {len(ch_names)} channels")
+
+        return c[valid_indices], valid_indices
+
     def _get_coords(self, ch_names):
+        """Legacy method - returns all coords (may include invalid ones)."""
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
         c = self.pos_bank(clean_names)
         if isinstance(c, dict):
@@ -268,7 +291,7 @@ class EEGLeJEPABCIModel(AbstractModel):
             c = c.squeeze(0)
         return c.float().to(self.device)
 
-    def _train_epoch(self, dataloader, optimizer, scheduler, coords):
+    def _train_epoch(self, dataloader, optimizer, scheduler, coords, valid_indices=None):
         # Only set head to train mode; preserve backbone eval mode if frozen
         self.model.head.train()
         if self.freeze_encoder:
@@ -280,6 +303,11 @@ class EEGLeJEPABCIModel(AbstractModel):
         total_samples = 0
         for x, y_batch in tqdm(dataloader, desc="Training", leave=False):
             x, y_batch = x.to(self.device), y_batch.to(self.device).argmax(dim=1)
+
+            # Filter to only valid channels if needed
+            if valid_indices is not None:
+                x = x[:, valid_indices, :]
+
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
 
             optimizer.zero_grad()
@@ -298,7 +326,7 @@ class EEGLeJEPABCIModel(AbstractModel):
         epoch_acc = running_corrects / total_samples
         return epoch_loss, epoch_acc
 
-    def _validate_epoch(self, dataloader, coords):
+    def _validate_epoch(self, dataloader, coords, valid_indices=None):
         self.model.eval()
         running_loss = 0.0
         running_corrects = 0
@@ -306,6 +334,11 @@ class EEGLeJEPABCIModel(AbstractModel):
         with torch.no_grad():
             for x, y_batch in tqdm(dataloader, desc="Validation", leave=False):
                 x, y_batch = x.to(self.device), y_batch.to(self.device).argmax(dim=1)
+
+                # Filter to only valid channels if needed
+                if valid_indices is not None:
+                    x = x[:, valid_indices, :]
+
                 cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
                 logits = self.model(x, cb)
                 loss = self.model.loss_fn(logits, y_batch)
@@ -385,8 +418,8 @@ class EEGLeJEPABCIModel(AbstractModel):
             random.shuffle(train_pairs)
 
             for train_loader, ch_names in train_pairs:
-                coords = self._get_coords(ch_names)
-                train_loss, train_acc = self._train_epoch(train_loader, optimizer, scheduler, coords)
+                coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+                train_loss, train_acc = self._train_epoch(train_loader, optimizer, scheduler, coords, valid_indices)
                 epoch_train_loss += train_loss
                 epoch_train_acc += train_acc
                 num_train_batches += 1
@@ -399,8 +432,8 @@ class EEGLeJEPABCIModel(AbstractModel):
                 epoch_val_acc = 0.0
                 num_val_batches = 0
                 for valid_loader, ch_names in zip(valid_loader_list, ch_names_list_val):
-                    coords = self._get_coords(ch_names)
-                    val_loss, val_acc = self._validate_epoch(valid_loader, coords)
+                    coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+                    val_loss, val_acc = self._validate_epoch(valid_loader, coords, valid_indices)
                     epoch_val_loss += val_loss
                     epoch_val_acc += val_acc
                     num_val_batches += 1
@@ -470,10 +503,13 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         predictions = []
         for test_loader, ch_names in zip(test_loader_list, ch_names_list):
-            coords = self._get_coords(ch_names)
+            coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
             preds_all = []
             for x in tqdm(test_loader, desc="BCI Predicting", leave=False):
                 x = x.to(self.device)
+                # Filter to only valid channels if needed
+                if valid_indices is not None:
+                    x = x[:, valid_indices, :]
                 cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
                 logits = self.model(x, cb)
                 preds_all.append(torch.argmax(logits, dim=1).cpu())
