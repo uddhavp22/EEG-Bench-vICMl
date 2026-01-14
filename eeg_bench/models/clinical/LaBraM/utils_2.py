@@ -262,8 +262,33 @@ def writer_task(output_queue, h5_path):
     print("[Writer] All recordings have been written.")
 
 def process_filter(raw, sfreq):
+    """Default filter for LUNA and LaBraM (0.1-75 Hz)"""
     l_freq: float = 0.1
     h_freq: float = 75.0
+    raw.load_data()
+    raw.set_eeg_reference("average")
+    raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
+    if 0.5*raw.info['sfreq'] > 50.0:
+        raw.notch_filter(50.0)
+    raw.resample(sfreq)
+    return raw
+
+def process_filter_cbramod(raw, sfreq):
+    """CBraMod-specific filter (0.5-40 Hz)"""
+    l_freq: float = 0.5
+    h_freq: float = 40.0
+    raw.load_data()
+    raw.set_eeg_reference("average")
+    raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
+    if 0.5*raw.info['sfreq'] > 50.0:
+        raw.notch_filter(50.0)
+    raw.resample(sfreq)
+    return raw
+
+def process_filter_reve(raw, sfreq):
+    """REVE-specific filter (0.5-99.5 Hz)"""
+    l_freq: float = 0.5
+    h_freq: float = 99.5
     raw.load_data()
     raw.set_eeg_reference("average")
     raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
@@ -353,20 +378,20 @@ def process_lejepa(raw, chs, out_sfreq=250):
     signals = apply_defossez_scaling(signals)
     return signals
 
-def process_luna(raw, chs, out_sfreq=250):
+def process_luna(raw, chs, out_sfreq=256):
     """Process raw EEG data for LUNA model.
 
-    LUNA uses standard preprocessing (similar to REVE):
+    LUNA uses standard preprocessing for clinical TUH-style datasets:
     - Reorder channels
     - Limit to 30 minutes
     - Filter (0.1-75 Hz) and notch at 50 Hz
-    - Resample to target frequency (default 250 Hz)
+    - Resample to 256 Hz (LUNA paper specification)
     - Return signals in microvolts
 
     Args:
         raw: MNE Raw object
         chs: List of channel names to use
-        out_sfreq: Output sampling frequency (default 250 Hz)
+        out_sfreq: Output sampling frequency (default 256 Hz per LUNA paper)
 
     Returns:
         signals: Processed signals as numpy array [n_channels, n_timepoints]
@@ -383,8 +408,12 @@ def process_luna(raw, chs, out_sfreq=250):
 def process_cbramod(raw, chs, out_sfreq=200):
     """Process raw EEG data for CBraMod model.
 
-    CBraMod uses similar preprocessing to LUNA/LeJEPA but requires 200Hz
-    sampling rate to match the pretrained model's patch size (200 samples = 1 second).
+    CBraMod uses conservative, high-quality preprocessing:
+    - Reorder channels
+    - Limit to 30 minutes
+    - Bandpass filter (0.5-40 Hz) - narrower than others
+    - Notch at 50 Hz
+    - Resample to 200 Hz (required for pretrained patch size)
 
     Args:
         raw: MNE Raw object
@@ -399,8 +428,66 @@ def process_cbramod(raw, chs, out_sfreq=200):
     max_duration_s = 30 * 60  # 30 minutes in seconds
     if raw.times[-1] > max_duration_s:
         raw.crop(tmax=max_duration_s)
-    raw = process_filter(raw, out_sfreq)
+    
+    # CBraMod-specific filtering: 0.5-40 Hz (narrower than LUNA/REVE)
+    raw.load_data()
+    raw.set_eeg_reference("average")
+    l_freq = 0.5
+    h_freq = 40.0
+    raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
+    if 0.5*raw.info['sfreq'] > 50.0:
+        raw.notch_filter(50.0)
+    raw.resample(out_sfreq)
+    
     signals = raw.get_data(units="uV")
+    return signals
+
+def process_reve(raw, chs, out_sfreq=200):
+    """Process raw EEG data for REVE model.
+
+    REVE uses minimal preprocessing to preserve heterogeneity:
+    - Reorder channels
+    - Limit to 30 minutes
+    - Bandpass filter (0.5-99.5 Hz) - DIFFERENT from others!
+    - Notch at 50 Hz
+    - Resample to 200 Hz
+    - Z-score normalize per recording
+    - Clip to ±15 std
+
+    Args:
+        raw: MNE Raw object
+        chs: List of channel names to use
+        out_sfreq: Output sampling frequency (default 200 Hz)
+
+    Returns:
+        signals: Processed signals as numpy array [n_channels, n_timepoints]
+    """
+    raw = raw.reorder_channels(chs)
+    # Limit the raw data to a maximum of 30 minutes
+    max_duration_s = 30 * 60  # 30 minutes in seconds
+    if raw.times[-1] > max_duration_s:
+        raw.crop(tmax=max_duration_s)
+    
+    # REVE-specific filtering: 0.5-99.5 Hz (wider than others)
+    raw.load_data()
+    raw.set_eeg_reference("average")
+    l_freq = 0.5
+    h_freq = 99.5
+    raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
+    if 0.5*raw.info['sfreq'] > 50.0:
+        raw.notch_filter(50.0)
+    raw.resample(out_sfreq)
+    
+    signals = raw.get_data(units="uV")
+    
+    # REVE-specific normalization: z-score per recording + clip to ±15 std
+    # Per-channel mean and std
+    mean = np.mean(signals, axis=1, keepdims=True)
+    std = np.std(signals, axis=1, keepdims=True)
+    std = np.where(std < 1e-6, 1.0, std)  # Avoid division by zero
+    signals = (signals - mean) / std
+    signals = np.clip(signals, -15, 15)
+    
     return signals
 
 def process_one_abnormal(parameters, output_queue):
@@ -441,9 +528,19 @@ def process_one_abnormal(parameters, output_queue):
         t_channels = list(set(standard_1020).intersection(set(t_channels)))
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        signals = process_luna(raw, chs, out_sfreq=250)
-        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        signals = process_luna(raw, chs, out_sfreq=256)
+        output_queue.put((idx, signals, label, chunk_len_s, 256, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (LUNA channels={len(t_channels)})")
+        return
+
+    elif model_name == "REVEModel":
+        t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
+        t_channels = list(set(standard_1020).intersection(set(t_channels)))
+        ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_reve(raw, chs, out_sfreq=200)
+        output_queue.put((idx, signals, label, chunk_len_s, 200, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (REVE channels={len(t_channels)})")
         return
 
     elif model_name == "CBraModModel":
@@ -506,9 +603,20 @@ def process_one_epilepsy(parameters, output_queue):
         else:
             ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        signals = process_luna(raw, chs, out_sfreq=250)
-        output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
+        signals = process_luna(raw, chs, out_sfreq=256)
+        output_queue.put((idx, signals, label, chunk_len_s, 256, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (LUNA channels={len(t_channels)})")
+        return
+    elif model_name == "REVEModel":
+        t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
+        if "le" in montage:
+            ch_name_pattern = "EEG {}-LE"
+        else:
+            ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        signals = process_reve(raw, chs, out_sfreq=200)
+        output_queue.put((idx, signals, label, chunk_len_s, 200, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} (REVE channels={len(t_channels)})")
         return
     elif model_name == "CBraModModel":
         t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
@@ -634,12 +742,35 @@ def process_one_multilabel(parameters, output_queue):
             print("WARN: No channels match LUNA standard channels. Keeping original")
             t_channels = list(raw.ch_names)
 
-        raw = process_filter(raw, 250)
+        raw = process_filter(raw, 256)
         signals = raw.get_data(units="uV")
         out_channels = list(raw.ch_names)
 
-        output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
+        output_queue.put((idx, signals, label, chunk_len_s, 256, out_channels))
         logging.info(f"Processed recording {idx} with label {label} (LUNA multilabel)")
+        return
+    elif model_name == "REVEModel":
+        t_channels = sorted(list(set(standard_1020).intersection(set(raw.ch_names))))
+        if len(t_channels) > 0:
+            raw = raw.reorder_channels(t_channels)
+        else:
+            print("WARN: No channels match REVE standard channels. Keeping original")
+            t_channels = list(raw.ch_names)
+
+        raw = process_filter_reve(raw, 200)
+        signals = raw.get_data(units="uV")
+
+        # REVE-specific normalization: z-score per recording + clip to ±15 std
+        mean = np.mean(signals, axis=1, keepdims=True)
+        std = np.std(signals, axis=1, keepdims=True)
+        std = np.where(std < 1e-6, 1.0, std)
+        signals = (signals - mean) / std
+        signals = np.clip(signals, -15, 15)
+
+        out_channels = list(raw.ch_names)
+
+        output_queue.put((idx, signals, label, chunk_len_s, 200, out_channels))
+        logging.info(f"Processed recording {idx} with label {label} (REVE multilabel)")
         return
     elif model_name == "CBraModModel":
         t_channels = sorted(list(set(standard_1020).intersection(set(raw.ch_names))))
@@ -649,7 +780,7 @@ def process_one_multilabel(parameters, output_queue):
             print("WARN: No channels match CBraMod standard channels. Keeping original")
             t_channels = list(raw.ch_names)
 
-        raw = process_filter(raw, 200)
+        raw = process_filter_cbramod(raw, 200)
         signals = raw.get_data(units="uV")
         out_channels = list(raw.ch_names)
 
@@ -836,11 +967,12 @@ def process_one_cli_unm(parameters, output_queue):
         if signals.shape[1] > int(max_duration_s * sfreq):
             signals = signals[:, : int(max_duration_s * sfreq)]
 
+        # REVE-specific filtering: 0.5-99.5 Hz (wider than others)
         signals = filter_data(
             signals.astype(np.float64),
             sfreq=sfreq,
-            l_freq=l_freq,
-            h_freq=h_freq,
+            l_freq=0.5,
+            h_freq=99.5,
             method="fir",
             verbose=False,
         )
@@ -848,6 +980,13 @@ def process_one_cli_unm(parameters, output_queue):
 
         out_freq = 200
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+
+        # REVE-specific normalization: z-score per recording + clip to ±15 std
+        mean = np.mean(signals, axis=1, keepdims=True)
+        std = np.std(signals, axis=1, keepdims=True)
+        std = np.where(std < 1e-6, 1.0, std)
+        signals = (signals - mean) / std
+        signals = np.clip(signals, -15, 15)
 
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
         logging.info(f"Processed recording {idx} with label {label} (REVE channels={len(target_channels)})")
@@ -867,6 +1006,7 @@ def process_one_cli_unm(parameters, output_queue):
         if signals.shape[1] > int(max_duration_s * sfreq):
             signals = signals[:, : int(max_duration_s * sfreq)]
 
+        # LUNA uses 0.1-75 Hz filtering (same as default)
         signals = filter_data(
             signals.astype(np.float64),
             sfreq=sfreq,
@@ -877,7 +1017,7 @@ def process_one_cli_unm(parameters, output_queue):
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
 
-        out_freq = 250
+        out_freq = 256
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
@@ -898,11 +1038,12 @@ def process_one_cli_unm(parameters, output_queue):
         if signals.shape[1] > int(max_duration_s * sfreq):
             signals = signals[:, : int(max_duration_s * sfreq)]
 
+        # CBraMod-specific filtering: 0.5-40 Hz (narrower than others)
         signals = filter_data(
             signals.astype(np.float64),
             sfreq=sfreq,
-            l_freq=l_freq,
-            h_freq=h_freq,
+            l_freq=0.5,
+            h_freq=40.0,
             method="fir",
             verbose=False,
         )

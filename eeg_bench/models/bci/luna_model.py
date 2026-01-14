@@ -27,6 +27,8 @@ from pathlib import Path
 
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
+from .LaBraM.make_dataset import make_dataset_luna
+from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
 
 logger = logging.getLogger(__name__)
 
@@ -333,17 +335,40 @@ class LUNABCIModel(AbstractModel):
         """
         print("Initializing LUNA BCI Fit...")
 
-        # 1. Determine input shapes and classes
-        sample_X = X[0]
-        sample_y = y[0]
+        # 1. Get metadata
         meta_data = meta[0]
-
-        n_samples, n_channels, n_timepoints = sample_X.shape
-        n_classes = len(np.unique(np.concatenate(y)))
-
+        task_name = meta_data["task_name"]
         channel_names = meta_data["channel_names"]
+        n_classes = n_unique_labels(task_name)
 
-        # 2. Initialize model
+        # 2. Preprocess data using LUNA-specific pipeline (256 Hz, 0.1-75 Hz bandpass)
+        print("[LUNA] Applying LUNA-specific preprocessing...")
+        datasets = [
+            make_dataset_luna(
+                X_, y_, task_name,
+                m_["sampling_frequency"],
+                m_["channel_names"],
+                train=True,
+                split_size=0.15
+            )
+            for X_, y_, m_ in zip(X, y, meta)
+        ]
+
+        # Get train datasets and channel names
+        dataset_train_list = [dataset[0] for dataset in datasets]
+        dataset_val_list = [dataset[1] for dataset in datasets]
+        dataset_train_list = [dataset for dataset in dataset_train_list if len(dataset) > 0]
+
+        # Get processed channel names from first dataset
+        if dataset_train_list:
+            channel_names = dataset_train_list[0].ch_names
+
+        # Get shape from processed data
+        sample_data = dataset_train_list[0].data
+        n_channels = sample_data.shape[1]
+        n_timepoints = sample_data.shape[2]
+
+        # 3. Initialize model with processed dimensions
         if self.model is None:
             self.model = LUNABCIWrapper(
                 n_channels=n_channels,
@@ -358,12 +383,14 @@ class LUNABCIModel(AbstractModel):
                 pretrained_path=self.pretrained_path,
                 freeze_backbone=self.freeze_backbone,
             ).to(self.device)
-            logger.info(f"Initialized LUNA BCI model with {n_channels} channels and {n_timepoints} timepoints")
+            logger.info(f"Initialized LUNA BCI model with {n_channels} channels and {n_timepoints} timepoints (256 Hz)")
 
-        # 3. Prepare DataLoaders
-        # Concatenate all datasets for training
-        X_all = np.concatenate(X, axis=0)
-        y_all = np.concatenate(y, axis=0)
+        # 4. Prepare DataLoaders from preprocessed datasets
+        X_all = np.concatenate([d.data for d in dataset_train_list], axis=0)
+        y_all = np.concatenate([d.labels for d in dataset_train_list], axis=0)
+        # Convert one-hot back to class indices
+        if y_all.ndim > 1:
+            y_all = np.argmax(y_all, axis=1)
 
         train_dataset = SimpleDataset(X_all, y_all)
         collate_fn = self._get_collate_fn(channel_names)
