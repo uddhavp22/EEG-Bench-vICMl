@@ -37,15 +37,19 @@ def _is_multilabel_data(y_i) -> bool:
         return False
     if not isinstance(y_i, list) or len(y_i) == 0:
         return False
+    def _looks_like_event(value) -> bool:
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) >= 3
+            and isinstance(value[1], (int, float, np.integer, np.floating))
+        )
     # Check if first element is a list/tuple with 3 elements (event annotation)
-    first = y_i[0]
-    if isinstance(first, (list, tuple)) and len(first) >= 3:
-        # Check if it looks like [event_type, start, stop]
-        return isinstance(first[1], (int, float, np.integer, np.floating))
-    if isinstance(first, list) and len(first) > 0:
-        first_event = first[0]
-        if isinstance(first_event, (list, tuple)) and len(first_event) >= 3:
-            return isinstance(first_event[1], (int, float, np.integer, np.floating))
+    for entry in y_i:
+        if _looks_like_event(entry):
+            return True
+        if isinstance(entry, list) and entry:
+            if _looks_like_event(entry[0]):
+                return True
     return False
 
 
@@ -73,10 +77,21 @@ def subsample_data_stratified(
 
     def _collect_label_values_multilabel(y_list):
         """Collect all label values from multi-label annotations."""
+        def _looks_like_event(value) -> bool:
+            return (
+                isinstance(value, (list, tuple))
+                and len(value) >= 3
+                and isinstance(value[1], (int, float, np.integer, np.floating))
+            )
         values = []
         for y_i in y_list:
-            for event in y_i:
-                values.append(event[0])  # event = [type, start, stop]
+            for entry in y_i:
+                if _looks_like_event(entry):
+                    values.append(entry[0])  # event = [type, start, stop]
+                elif isinstance(entry, list):
+                    for event in entry:
+                        if _looks_like_event(event):
+                            values.append(event[0])
         return values
 
     def _collect_label_values_singlelabel(labels):
