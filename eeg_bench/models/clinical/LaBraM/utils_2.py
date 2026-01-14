@@ -41,7 +41,8 @@ def apply_defossez_scaling(
 
     if not is_uv:
         signals = signals * 1e6
-    signals = signals - np.median(signals, axis=0, keepdims=True)
+    # Use axis=-1 (time axis) to match BCI implementation
+    signals = signals - np.median(signals, axis=-1, keepdims=True)
     scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
     if scale < min_scale:
         scale = 1.0

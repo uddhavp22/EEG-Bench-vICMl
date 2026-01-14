@@ -147,7 +147,30 @@ class ConcreteLeJEPAClinical(nn.Module):
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
-            self.backbone.load_state_dict(state, strict=False)
+
+            # DEBUG: Verify checkpoint keys match model keys
+            model_keys = set(self.backbone.state_dict().keys())
+            ckpt_keys = set(state.keys())
+            print(f"[LeJEPAClinical] Checkpoint keys (first 5): {list(ckpt_keys)[:5]}")
+            print(f"[LeJEPAClinical] Model keys (first 5): {list(model_keys)[:5]}")
+
+            # Load with strict=False but capture missing/unexpected
+            load_result = self.backbone.load_state_dict(state, strict=False)
+            missing_keys = load_result.missing_keys
+            unexpected_keys = load_result.unexpected_keys
+
+            matched_keys = model_keys & ckpt_keys
+            print(f"[LeJEPAClinical] Matched keys: {len(matched_keys)}/{len(model_keys)}")
+            print(f"[LeJEPAClinical] Missing keys: {len(missing_keys)}")
+            print(f"[LeJEPAClinical] Unexpected keys: {len(unexpected_keys)}")
+
+            if len(missing_keys) > 0:
+                print(f"[LeJEPAClinical] WARNING: Missing keys (first 5): {missing_keys[:5]}")
+            if len(unexpected_keys) > 0:
+                print(f"[LeJEPAClinical] WARNING: Unexpected keys (first 5): {unexpected_keys[:5]}")
+            if len(matched_keys) == 0:
+                print(f"[LeJEPAClinical] CRITICAL: No keys matched! Checkpoint may have wrong format.")
+
             print(f"[LeJEPAClinical] Loaded pretrained weights from {pretrained_path}")
 
         # ------------------------------------------------------------
@@ -182,6 +205,9 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Merge batch and chunk dimensions for efficient processing:
         x = x.reshape(B * n_chunks, C, self.chunk_length)
 
+        # FIX: Expand coords to match chunked batch dimension
+        # coords shape: (B, C, 3) -> (B*n_chunks, C, 3)
+        coords = coords.unsqueeze(1).expand(-1, n_chunks, -1, -1).reshape(B * n_chunks, C, 3)
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
@@ -213,6 +239,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
+        self.freeze_encoder = freeze_encoder  # Store for use in fit()
 
         # Handle config vs legacy parameters
         if config is not None:
@@ -347,7 +374,12 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         coords_val = self._coords(dataset_val.ch_names)
 
         for epoch in range(1, max_epochs + 1):
-            self.model.train()
+            # Only set head to train mode; preserve backbone eval mode if frozen
+            self.model.head.train()
+            if self.freeze_encoder:
+                self.model.backbone.eval()  # Explicitly keep frozen encoder in eval mode
+            else:
+                self.model.backbone.train()
             total_loss = 0.0
             total_samples = 0
             correct = 0
