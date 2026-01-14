@@ -30,6 +30,7 @@ def _is_multilabel_data(y_i) -> bool:
     Detect if y_i contains multi-label annotations (list of event tuples per recording).
 
     Multi-label format: y_i = [[event_type, start, stop], [event_type, start, stop], ...]
+    Recording-level multi-label format: y_i = [[[event_type, start, stop], ...], ...]
     Single-label format: y_i = label (scalar) or y_i = [label1, label2, ...] (1D array)
     """
     # numpy arrays that hold lists/tuples end up with dtype=object, so treat them like lists
@@ -48,6 +49,10 @@ def _is_multilabel_data(y_i) -> bool:
     if isinstance(first, (list, tuple)) and len(first) >= 3:
         # Check if it looks like [event_type, start, stop]
         return isinstance(first[1], (int, float, np.integer, np.floating))
+    if isinstance(first, list) and len(first) > 0:
+        first_event = first[0]
+        if isinstance(first_event, (list, tuple)) and len(first_event) >= 3:
+            return isinstance(first_event[1], (int, float, np.integer, np.floating))
     return False
 
 
