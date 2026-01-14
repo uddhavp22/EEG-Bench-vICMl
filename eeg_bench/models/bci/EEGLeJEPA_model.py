@@ -332,7 +332,7 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         max_epochs = 30
         steps_per_epoch = math.ceil(sum(len(train_loader) for train_loader in train_loader_list))
-        max_lr = 4e-4
+        max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)

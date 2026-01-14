@@ -87,7 +87,7 @@ standard_1020 = [
 ]
 
 class LaBraMDataset2(Dataset):
-    def __init__(self, h5_path, is_train_set, channels, recording_names=None):
+    def __init__(self, h5_path, is_train_set, channels, recording_names=None, sfreq = 200):
         """
         Args:
             h5_path (string): Path to the HDF5 file.
@@ -98,6 +98,7 @@ class LaBraMDataset2(Dataset):
         self.h5_path = h5_path
         self.is_train_set = is_train_set
         self.ch_names = channels
+        self.sfreq = sfreq
 
         if recording_names is None:
             # Get list of all recording names from the HDF5 file
@@ -123,7 +124,7 @@ class LaBraMDataset2(Dataset):
         if self.is_train_set:        
             # If the recording is longer than 128 seconds (24000 samples at 200Hz),
             # select a random contiguous subsample of 320 seconds
-            required_length = 128 * 200  # 24000 samples
+            required_length = 128 * self.sfreq  # 24000 samples
             if data.shape[-1] > required_length:
                 max_start = data.shape[-1] - required_length
                 start = np.random.randint(0, max_start + 1)
@@ -400,7 +401,7 @@ def process_one_abnormal(parameters, output_queue):
         assert raw.info['sfreq'] == 200
     elif model_name == "LeJEPAClinical":
         t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
-        t_channels = list(set(standard_1020).intersection(set(t_channels)))
+        t_channels = [ch for ch in t_channels if ch in standard_1020]
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
         signals = process_lejepa(raw, chs, out_sfreq=250)
@@ -709,6 +710,8 @@ def process_one_cli_unm(parameters, output_queue):
             verbose=False,
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+
+        signals = signals - np.mean(signals, axis=0, keepdims=True) #add CAR
 
         # Resample to 250 Hz (LeJEPA training expectation)
         out_freq = 250
