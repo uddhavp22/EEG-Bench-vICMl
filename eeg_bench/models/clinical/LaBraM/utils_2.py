@@ -11,43 +11,7 @@ import time
 import os
 from ....config import get_config_value
 from ....utils.utils import get_multilabel_tasks
-
-
-def apply_defossez_scaling(
-    signals: np.ndarray,
-    is_uv: bool = None,
-    clip_range: tuple = (-20.0, 20.0),
-    min_scale: float = 1e-6
-) -> np.ndarray:
-    """
-    Apply Defossez-style robust scaling for LeJEPA preprocessing.
-
-    Args:
-        signals: Input EEG signals, shape (n_channels, n_timepoints)
-        is_uv: If True, data is already in microvolts; if False, converts from V to uV.
-               If None (default), auto-detects based on data magnitude.
-        clip_range: Tuple of (min, max) values for clipping after scaling
-        min_scale: Minimum scale value to prevent division by near-zero
-
-    Returns:
-        Scaled signals as float32 array
-    """
-    # Auto-detect if data is in volts or microvolts
-    if is_uv is None:
-        # EEG in volts: typical magnitude ~1e-6 to 1e-4
-        # EEG in microvolts: typical magnitude ~1 to 1000
-        median_magnitude = np.median(np.abs(signals))
-        is_uv = median_magnitude > 1e-3  # If median > 1mV, assume already in µV
-
-    if not is_uv:
-        signals = signals * 1e6
-    # Use axis=-1 (time axis) to match BCI implementation
-    signals = signals - np.median(signals, axis=-1, keepdims=True)
-    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-    if scale < min_scale:
-        scale = 1.0
-    signals = np.clip(signals / scale, clip_range[0], clip_range[1])
-    return signals.astype(np.float32)
+from ...lejepa_preprocessing import apply_defossez_scaling, process_lejepa_raw
 
 
 channel_mapping = { "FP1": ["FP1", "FZ"],
@@ -372,10 +336,7 @@ def process_lejepa(raw, chs, out_sfreq=250):
     max_duration_s = 30 * 60  # 30 minutes in seconds
     if raw.times[-1] > max_duration_s:
         raw.crop(tmax=max_duration_s)
-    raw = process_filter(raw, out_sfreq)
-    signals = raw.get_data(units="uV")
-    signals = apply_defossez_scaling(signals)
-    return signals
+    return process_lejepa_raw(raw, out_sfreq)
 
 def process_one_abnormal(parameters, output_queue):
     """
@@ -681,6 +642,8 @@ def process_one_cli_unm(parameters, output_queue):
         out_freq = 200
 
     elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+        l_freq = 0.5
+        h_freq = 100.0
         # --- pick channels like clinical SVM / LaBraM does ---
         ch_names = [ch.upper() for ch in o_channels]
 
@@ -710,16 +673,14 @@ def process_one_cli_unm(parameters, output_queue):
             method="fir",
             verbose=False,
         )
-        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
-
-        signals = signals - np.mean(signals, axis=0, keepdims=True) #add CAR
+        signals = notch_filter(signals, Fs=sfreq, freqs=[50, 60], verbose=False)
 
         # Resample to 250 Hz (LeJEPA training expectation)
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
         # Apply Defossez scaling - data is NOT in uV yet (raw numpy from dataset)
-        signals = apply_defossez_scaling(signals)
+        signals = apply_defossez_scaling(signals, median_axis=0, scale_axis=None)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
