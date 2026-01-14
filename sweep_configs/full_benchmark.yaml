@@ -9,8 +9,11 @@ models:
   # lejepa_small:
   #   base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
   #   version: 0
-  lejepa_base:
-    base_path: /radraid2/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global 
+  # lejepa_base:
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global 
+  #   version: 4
+  lejepa_base_global_local:
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global_local
     version: 4
   # Add more model sizes as needed:
   # lejepa_large:

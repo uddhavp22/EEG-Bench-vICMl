@@ -32,12 +32,19 @@ def _is_multilabel_data(y_i) -> bool:
     Multi-label format: y_i = [[event_type, start, stop], [event_type, start, stop], ...]
     Single-label format: y_i = label (scalar) or y_i = [label1, label2, ...] (1D array)
     """
+    # numpy arrays that hold lists/tuples end up with dtype=object, so treat them like lists
     if isinstance(y_i, np.ndarray):
+        if y_i.dtype != object:
+            return False
+        y_seq = y_i.tolist()
+    else:
+        y_seq = y_i
+
+    if not isinstance(y_seq, list) or len(y_seq) == 0:
         return False
-    if not isinstance(y_i, list) or len(y_i) == 0:
-        return False
+
     # Check if first element is a list/tuple with 3 elements (event annotation)
-    first = y_i[0]
+    first = y_seq[0]
     if isinstance(first, (list, tuple)) and len(first) >= 3:
         # Check if it looks like [event_type, start, stop]
         return isinstance(first[1], (int, float, np.integer, np.floating))
@@ -86,6 +93,8 @@ def subsample_data_stratified(
     def _get_label_array(y_i):
         """Convert labels to numpy array for class counting (single-label only)."""
         if isinstance(y_i, np.ndarray):
+            if y_i.dtype == object:
+                raise ValueError("Cannot treat multi-label/event annotations as single-label arrays")
             return y_i
         return np.array(y_i)
 
