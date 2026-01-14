@@ -121,7 +121,30 @@ class ConcreteLeJEPABCI(nn.Module):
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
-            self.backbone.load_state_dict(state, strict=False)
+
+            # DEBUG: Verify checkpoint keys match model keys
+            model_keys = set(self.backbone.state_dict().keys())
+            ckpt_keys = set(state.keys())
+            print(f"[LeJEPABCI] Checkpoint keys (first 5): {list(ckpt_keys)[:5]}")
+            print(f"[LeJEPABCI] Model keys (first 5): {list(model_keys)[:5]}")
+
+            # Load with strict=False but capture missing/unexpected
+            load_result = self.backbone.load_state_dict(state, strict=False)
+            missing_keys = load_result.missing_keys
+            unexpected_keys = load_result.unexpected_keys
+
+            matched_keys = model_keys & ckpt_keys
+            print(f"[LeJEPABCI] Matched keys: {len(matched_keys)}/{len(model_keys)}")
+            print(f"[LeJEPABCI] Missing keys: {len(missing_keys)}")
+            print(f"[LeJEPABCI] Unexpected keys: {len(unexpected_keys)}")
+
+            if len(missing_keys) > 0:
+                print(f"[LeJEPABCI] WARNING: Missing keys (first 5): {missing_keys[:5]}")
+            if len(unexpected_keys) > 0:
+                print(f"[LeJEPABCI] WARNING: Unexpected keys (first 5): {unexpected_keys[:5]}")
+            if len(matched_keys) == 0:
+                print(f"[LeJEPABCI] CRITICAL: No keys matched! Checkpoint may have wrong format.")
+
             print(f"[LeJEPABCI] Loaded pretrained weights from {pretrained_path}")
 
         # ------------------------------------------------------------
@@ -246,7 +269,12 @@ class EEGLeJEPABCIModel(AbstractModel):
         return c.float().to(self.device)
 
     def _train_epoch(self, dataloader, optimizer, scheduler, coords):
-        self.model.train()
+        # Only set head to train mode; preserve backbone eval mode if frozen
+        self.model.head.train()
+        if self.freeze_encoder:
+            self.model.backbone.eval()  # Explicitly keep frozen encoder in eval mode
+        else:
+            self.model.backbone.train()
         running_loss = 0.0
         running_corrects = 0
         total_samples = 0
