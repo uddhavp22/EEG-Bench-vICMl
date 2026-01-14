@@ -6,7 +6,7 @@
     "chkpt": "./checkpoints/",
     "results": "./results/",
     "lejepa": {
-        "eegfm_path": "/home/spanchavati",
+        "eegfm_path": "/raid/spanchavati",
         "pos_bank_path": "./REVE_posbank",
         "checkpoint": {
             "base_path": null,
