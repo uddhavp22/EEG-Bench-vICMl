@@ -22,6 +22,7 @@ from transformers import AutoModel
 import random
 import math
 import pickle
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -52,37 +53,89 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
     EncoderConfig = _EncoderConfig
 
 class ConcreteLeJEPABCI(nn.Module):
-    def __init__(self, num_classes: int, pretrained_path: str | None = None, freeze_encoder: bool = True):
+    def __init__(
+        self,
+        num_classes: int,
+        base_path: str | None = None,
+        version: int | None = None,
+        freeze_encoder: bool = True,
+        config_path: Path | None = None,
+        pretrained_path: Path | None = None,
+    ):
         super().__init__()
-        
+
         DIM = 384
-        cfg = EEGLEJEPAConfig(
-            name="EEGLEJEPA",
-            dim=DIM,
-            proj_dim=16,
-            patch_size=25,
-            n_channels=128,
-            max_time=1500,
-            patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
-            channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
-            encoder_config=EncoderConfig(dim=384, depth=12, heads=6, use_flash_attn=True),
-            predictor_config=EncoderConfig(dim=128, depth=4, heads=4, use_flash_attn=True),
-            masking={"mask_ratio": 0.5, "block_size_range": [5, 10], "strategy_probs": [1.0, 0.0, 0.0]},
-            use_scaler=False,
-        )
+
+        # ------------------------------------------------------------
+        # Pretrained config / checkpoint resolution (matching clinical)
+        # ------------------------------------------------------------
+        if (config_path is None or pretrained_path is None) and base_path is not None and version is not None:
+            base_path_resolved = Path(base_path) / f"version_{version}"
+
+            candidate_config = base_path_resolved / "config" / "config.pkl"
+            candidate_ckpt = base_path_resolved / "checkpoints" / "last.ckpt"
+
+            if config_path is None and candidate_config.exists():
+                config_path = candidate_config
+            elif config_path is None:
+                print(f"[LeJEPABCI] No config found at {candidate_config}. Using default config.")
+
+            if pretrained_path is None and candidate_ckpt.exists():
+                pretrained_path = candidate_ckpt
+            elif pretrained_path is None:
+                print(f"[LeJEPABCI] No checkpoint found at {candidate_ckpt}. Training from scratch.")
+
+        # ------------------------------------------------------------
+        # Build model config
+        # ------------------------------------------------------------
+        if config_path is not None:
+            with open(config_path, "rb") as f:
+                pretrain_config = pickle.load(f)
+            cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+            print("[LeJEPABCI] Loaded Config!")
+        else:
+            cfg = EEGLEJEPAConfig(
+                name="EEGLEJEPA",
+                dim=DIM,
+                proj_dim=16,
+                patch_size=25,
+                n_channels=128,
+                max_time=1500,
+                patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
+                channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
+                encoder_config=EncoderConfig(dim=384, depth=12, heads=6, use_flash_attn=True),
+                predictor_config=EncoderConfig(dim=128, depth=4, heads=4, use_flash_attn=True),
+                masking={"mask_ratio": 0.5, "block_size_range": [5, 10], "strategy_probs": [1.0, 0.0, 0.0]},
+                use_scaler=False,
+            )
+
+        # ------------------------------------------------------------
+        # Build backbone
+        # ------------------------------------------------------------
         self.backbone = cfg.build()
 
-        if pretrained_path:
+        # ------------------------------------------------------------
+        # Load pretrained weights (if available)
+        # ------------------------------------------------------------
+        if pretrained_path is not None:
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
             self.backbone.load_state_dict(state, strict=False)
+            print(f"[LeJEPABCI] Loaded pretrained weights from {pretrained_path}")
 
+        # ------------------------------------------------------------
+        # Freeze encoder if requested
+        # ------------------------------------------------------------
         if freeze_encoder:
             for p in self.backbone.parameters():
                 p.requires_grad = False
             self.backbone.eval()
-            
+        else:
+            for p in self.backbone.parameters():
+                p.requires_grad = True
+            self.backbone.train()
+
         self.head = nn.Sequential(
             nn.LayerNorm(DIM),
             nn.Linear(DIM, num_classes)
@@ -105,6 +158,8 @@ class EEGLeJEPABCIModel(AbstractModel):
         self,
         config: Optional[LeJEPAConfig] = None,
         pretrained_path: Optional[str] = None,
+        base_path: Optional[str] = None,
+        version: Optional[int] = None,
         freeze_encoder: bool = True
     ):
         super().__init__("LeJEPABCI")
@@ -113,13 +168,41 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         # Handle config vs legacy parameters
         if config is not None:
-            self.pretrained_path = config.get_checkpoint_path()
+            # Use checkpoint path from config (get_checkpoint_path resolves full_path vs base_path+version)
+            checkpoint_path = config.get_checkpoint_path()
+            if checkpoint_path:
+                # Extract base_path and version from full path for config discovery
+                ckpt_path = Path(checkpoint_path)
+                self.pretrained_path = ckpt_path
+                self.config_path = None
+                if ckpt_path.parent.name == "checkpoints":
+                    version_dir = ckpt_path.parent.parent
+                    if version_dir.name.startswith("version_"):
+                        self.base_path = str(version_dir.parent)
+                        self.version = int(version_dir.name.replace("version_", ""))
+                        candidate_config = version_dir / "config" / "config.pkl"
+                        if candidate_config.exists():
+                            self.config_path = candidate_config
+                    else:
+                        self.base_path = None
+                        self.version = None
+                else:
+                    self.base_path = None
+                    self.version = None
+            else:
+                self.base_path = config.checkpoint_base_path
+                self.version = config.checkpoint_version
+                self.config_path = None
+                self.pretrained_path = None
             self.freeze_encoder = config.freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
             # Legacy mode - use parameters directly
-            self.pretrained_path = pretrained_path
+            self.pretrained_path = Path(pretrained_path) if pretrained_path else None
+            self.base_path = base_path
+            self.version = version
+            self.config_path = None
             self.freeze_encoder = freeze_encoder
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
@@ -133,20 +216,20 @@ class EEGLeJEPABCIModel(AbstractModel):
         self.pos_bank = self._load_position_bank(pos_bank_path)
 
     def _load_position_bank(self, local_fallback_path: str):
-        """Load REVE position bank - try HuggingFace first, fall back to local."""
+        """Load REVE position bank - try local first, fall back to HuggingFace."""
         try:
-            logger.info("Attempting to load position bank from HuggingFace Hub...")
-            pos_bank = AutoModel.from_pretrained(
-                "brain-bzh/reve-positions",
-                trust_remote_code=True
-            ).to(self.device)
-            logger.info("Successfully loaded position bank from HuggingFace Hub")
-            return pos_bank
-        except Exception as e:
-            logger.warning(f"Failed to load from HuggingFace Hub: {e}")
-            logger.info(f"Falling back to local path: {local_fallback_path}")
+            logger.info(f"Attempting to load position bank from local path: {local_fallback_path}")
             pos_bank = AutoModel.from_pretrained(
                 local_fallback_path,
+                trust_remote_code=True
+            ).to(self.device)
+            logger.info("Successfully loaded position bank from local storage.")
+            return pos_bank
+        except Exception as e:
+            logger.warning(f"Failed to load local model: {e}")
+            logger.info("Falling back to HuggingFace Hub (brain-bzh/reve-positions)...")
+            pos_bank = AutoModel.from_pretrained(
+                "brain-bzh/reve-positions",
                 trust_remote_code=True
             ).to(self.device)
             return pos_bank
@@ -211,7 +294,14 @@ class EEGLeJEPABCIModel(AbstractModel):
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         task_name = meta[0]["task_name"]
         num_classes = n_unique_labels(task_name)
-        self.model = ConcreteLeJEPABCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
+        self.model = ConcreteLeJEPABCI(
+            num_classes=num_classes,
+            base_path=self.base_path,
+            version=self.version,
+            freeze_encoder=self.freeze_encoder,
+            config_path=self.config_path,
+            pretrained_path=self.pretrained_path,
+        ).to(self.device)
 
         datasets = [self.cache.cache(make_dataset_lejepa)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
                     for X_, y_, m_ in zip(X, y, meta)]
@@ -242,7 +332,7 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         max_epochs = 30
         steps_per_epoch = math.ceil(sum(len(train_loader) for train_loader in train_loader_list))
-        max_lr = 4e-4
+        max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)

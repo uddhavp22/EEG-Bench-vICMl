@@ -96,6 +96,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+            print("Loaded Config!")
         else:
             cfg = EEGLEJEPAConfig(
                 name="EEGLEJEPA",
@@ -162,7 +163,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Linear(DIM, out_dim)
+        self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim)) 
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
 
@@ -184,7 +185,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
-        breakpoint()
+        # cls = outputs["sequence_embeddings"].mean(dim = 1)
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
@@ -297,12 +298,12 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         # 1. Dataset Loading (matching LaBraM exact args)
-        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True)
+        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True, sfreq = 250)
 
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
-            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False)
+            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False, sfreq = 250)
 
         # 3. Validation Split (aligned with BCI: 15%)
         val_split = 0.15
@@ -323,18 +324,18 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=0.01)
-        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        #     optimizer,
-        #     max_lr=max_lr,
-        #     steps_per_epoch=steps_per_epoch,
-        #     epochs=max_epochs,
-        #     pct_start=0.2,
-        # )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 
-            patience = 2,
+        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr,
+            steps_per_epoch=steps_per_epoch,
+            epochs=max_epochs,
+            pct_start=0.2,
         )
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, 
+        #     patience = 2,
+        # )
 
         # Early stopping setup (matching BCI)
         patience = 10
@@ -360,6 +361,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
 
 
                 total_loss += loss.item() * x.size(0)
@@ -402,7 +404,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             avg_val_loss = val_loss / val_samples if val_samples else 0.0
             val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
 
-            scheduler.step(avg_val_loss)
+            # scheduler.step(avg_val_loss)
 
             # Early stopping check
             if avg_val_loss < best_val_loss:
