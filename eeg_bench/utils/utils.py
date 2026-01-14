@@ -25,6 +25,25 @@ def get_multilabel_tasks():
     return set(["seizure_clinical", "sleep_stages_clinical", "binary_artifact_clinical", "multiclass_artifact_clinical"])
 
 
+def _is_multilabel_data(y_i) -> bool:
+    """
+    Detect if y_i contains multi-label annotations (list of event tuples per recording).
+
+    Multi-label format: y_i = [[event_type, start, stop], [event_type, start, stop], ...]
+    Single-label format: y_i = label (scalar) or y_i = [label1, label2, ...] (1D array)
+    """
+    if isinstance(y_i, np.ndarray):
+        return False
+    if not isinstance(y_i, list) or len(y_i) == 0:
+        return False
+    # Check if first element is a list/tuple with 3 elements (event annotation)
+    first = y_i[0]
+    if isinstance(first, (list, tuple)) and len(first) >= 3:
+        # Check if it looks like [event_type, start, stop]
+        return isinstance(first[1], (int, float, np.integer, np.floating))
+    return False
+
+
 def subsample_data_stratified(
     X: List[np.ndarray],
     y: List[np.ndarray],
@@ -47,38 +66,77 @@ def subsample_data_stratified(
     """
     MIN_SAMPLES_PER_CLASS = 2  # Hardcoded minimum to ensure class representation
 
-    def _collect_label_values(labels):
+    def _collect_label_values_multilabel(y_list):
+        """Collect all label values from multi-label annotations."""
+        values = []
+        for y_i in y_list:
+            for event in y_i:
+                values.append(event[0])  # event = [type, start, stop]
+        return values
+
+    def _collect_label_values_singlelabel(labels):
+        """Collect label values from single-label data."""
         if isinstance(labels, np.ndarray):
             return labels.tolist()
-        values = []
-        for rec_labels in labels:
-            if isinstance(rec_labels, (list, tuple)) and rec_labels and isinstance(rec_labels[0], (list, tuple)):
-                values.extend([event[0] for event in rec_labels])
-            else:
-                values.append(rec_labels)
-        return values
+        return list(labels)
 
     def _take_indices(items, indices):
         return items[indices] if isinstance(items, np.ndarray) else [items[i] for i in indices]
 
     def _get_label_array(y_i):
-        """Convert labels to numpy array for class counting."""
-        label_values = _collect_label_values(y_i)
-        return np.array(label_values)
+        """Convert labels to numpy array for class counting (single-label only)."""
+        if isinstance(y_i, np.ndarray):
+            return y_i
+        return np.array(y_i)
+
+    # Detect if this is multi-label data
+    is_multilabel = any(_is_multilabel_data(y_i) for y_i in y)
 
     if percentage >= 1.0:
-        all_labels = []
-        for y_i in y:
-            all_labels.extend(_collect_label_values(y_i))
+        if is_multilabel:
+            all_labels = _collect_label_values_multilabel(y)
+        else:
+            all_labels = []
+            for y_i in y:
+                all_labels.extend(_collect_label_values_singlelabel(y_i))
+        # Convert labels to hashable form for Counter
+        all_labels_hashable = [str(l) if isinstance(l, list) else l for l in all_labels]
         stats = {
-            "samples_per_class": dict(Counter(all_labels)),
+            "samples_per_class": dict(Counter(all_labels_hashable)),
             "total_samples": len(all_labels)
         }
         return X, y, stats
 
     X_sub, y_sub = [], []
-    all_labels_sub = []
     rng = np.random.RandomState(random_state)
+
+    if is_multilabel:
+        # For multi-label tasks, subsample at the recording level (no stratification)
+        logger.info("Multi-label task detected: subsampling at recording level")
+        for X_i, y_i in zip(X, y):
+            n_recordings = len(X_i)
+            n_keep = max(1, int(n_recordings * percentage))
+
+            if n_keep >= n_recordings:
+                X_sub.append(X_i)
+                y_sub.append(y_i)
+            else:
+                indices = rng.choice(n_recordings, size=n_keep, replace=False)
+                indices = sorted(indices)  # Keep order for reproducibility
+                X_sub.append(_take_indices(X_i, indices))
+                y_sub.append(_take_indices(y_i, indices))
+
+        all_labels = _collect_label_values_multilabel(y_sub)
+        all_labels_hashable = [str(l) if isinstance(l, list) else l for l in all_labels]
+        stats = {
+            "samples_per_class": dict(Counter(all_labels_hashable)),
+            "total_samples": sum(len(y_i) for y_i in y_sub),
+            "total_recordings": sum(len(X_i) for X_i in X_sub)
+        }
+        return X_sub, y_sub, stats
+
+    # Single-label task: use stratified sampling
+    all_labels_sub = []
 
     for X_i, y_i in zip(X, y):
         n_samples = len(y_i)
@@ -94,7 +152,7 @@ def subsample_data_stratified(
             # Use full dataset
             X_sub.append(X_i)
             y_sub.append(y_i)
-            all_labels_sub.extend(_collect_label_values(y_i))
+            all_labels_sub.extend(_collect_label_values_singlelabel(y_i))
             continue
 
         # Check if stratification is feasible
@@ -116,7 +174,7 @@ def subsample_data_stratified(
             indices = np.array(indices)
             X_sub.append(_take_indices(X_i, indices))
             y_sub.append(_take_indices(y_i, indices))
-            all_labels_sub.extend(_collect_label_values(_take_indices(y_i, indices)))
+            all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, indices)))
         else:
             # Try stratified split
             try:
@@ -128,7 +186,7 @@ def subsample_data_stratified(
                 )
                 X_sub.append(X_keep)
                 y_sub.append(y_keep)
-                all_labels_sub.extend(_collect_label_values(y_keep))
+                all_labels_sub.extend(_collect_label_values_singlelabel(y_keep))
             except ValueError as e:
                 # Fallback: sample proportionally from each class
                 logger.warning(f"Stratified split failed: {e}. Using per-class sampling.")
@@ -141,7 +199,7 @@ def subsample_data_stratified(
                 indices = np.array(indices)
                 X_sub.append(_take_indices(X_i, indices))
                 y_sub.append(_take_indices(y_i, indices))
-                all_labels_sub.extend(_collect_label_values(_take_indices(y_i, indices)))
+                all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, indices)))
 
     stats = {
         "samples_per_class": dict(Counter(all_labels_sub)),
