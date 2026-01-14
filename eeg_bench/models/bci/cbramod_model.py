@@ -24,6 +24,8 @@ from tqdm import tqdm
 
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
+from .LaBraM.make_dataset import make_dataset_cbramod
+from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
 
 logger = logging.getLogger(__name__)
 
@@ -251,20 +253,43 @@ class CBraModBCIModel(AbstractModel):
         """Train the CBraMod model on BCI data."""
         logger.info("Initializing CBraMod BCI Fit...")
 
-        # Concatenate all datasets
-        X_all = np.concatenate(X, axis=0)
-        y_all = np.concatenate(y, axis=0)
-
-        # Get metadata
+        # 1. Get metadata
         meta_data = meta[0]
-        sfreq = meta_data["sampling_frequency"]
-        n_classes = len(np.unique(y_all))
+        task_name = meta_data["task_name"]
+        n_classes = n_unique_labels(task_name)
 
-        # Reshape to patches
+        # 2. Preprocess data using CBraMod-specific pipeline (200 Hz, 0.5-40 Hz bandpass, z-score)
+        logger.info("[CBraMod] Applying CBraMod-specific preprocessing...")
+        datasets = [
+            make_dataset_cbramod(
+                X_, y_, task_name,
+                m_["sampling_frequency"],
+                m_["channel_names"],
+                train=True,
+                split_size=0.15
+            )
+            for X_, y_, m_ in zip(X, y, meta)
+        ]
+
+        # Get train datasets
+        dataset_train_list = [dataset[0] for dataset in datasets]
+        dataset_train_list = [dataset for dataset in dataset_train_list if len(dataset) > 0]
+
+        # 3. Prepare preprocessed data
+        X_all = np.concatenate([d.data for d in dataset_train_list], axis=0)
+        y_all = np.concatenate([d.labels for d in dataset_train_list], axis=0)
+        # Convert one-hot back to class indices
+        if y_all.ndim > 1:
+            y_all = np.argmax(y_all, axis=1)
+
+        # Get sampling frequency from preprocessed data (always 200 Hz for CBraMod)
+        sfreq = 200
+
+        # 4. Reshape to patches (now with consistent 200 Hz data)
         X_patched = self._reshape_to_patches(X_all, sfreq)
-        n_samples, n_channels, num_patches, patch_size = X_patched.shape
+        _, n_channels, num_patches, patch_size = X_patched.shape
 
-        # Initialize model if needed
+        # 5. Initialize model if needed
         if self.model is None:
             self.model = CBraModBCIWrapper(
                 n_channels=n_channels,
@@ -278,9 +303,9 @@ class CBraModBCIModel(AbstractModel):
                 pretrained_path=self.pretrained_path,
                 freeze_backbone=self.freeze_backbone,
             ).to(self.device)
-            logger.info(f"Initialized CBraMod BCI with {n_channels} channels, {num_patches} patches of size {patch_size}")
+            logger.info(f"[CBraMod] Initialized with {n_channels} channels, {num_patches} patches of size {patch_size} (200 Hz)")
 
-        # Create dataset and dataloader
+        # 6. Create dataset and dataloader
         train_dataset = SimpleDataset(X_patched, y_all)
         train_loader = DataLoader(
             train_dataset, batch_size=64, shuffle=True, num_workers=0

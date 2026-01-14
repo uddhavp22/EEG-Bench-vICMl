@@ -9,6 +9,8 @@ import logging
 from functools import partial
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
+from .LaBraM.make_dataset import make_dataset_reve
+from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
 
 
 
@@ -132,37 +134,57 @@ class REVEBenchmarkModel(AbstractModel):
 
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         print("Initializing REVE Fit...")
-        
-        # 1. Determine Input Shapes and Classes
-        # We assume all datasets in the list have the same basic shape/channels for the task
-        sample_X = X[0]
-        sample_y = y[0]
-        meta_data = meta[0]
-        
-        n_samples, n_channels, n_timepoints = sample_X.shape
-        # Assuming y contains class indices 0..N-1
-        # You might need np.unique(np.concatenate(y)) if indices are sparse
-        n_classes = len(np.unique(np.concatenate(y)))
-        
-        channel_names = meta_data["channel_names"]
 
-        # 2. Initialize Model
+        # 1. Get metadata
+        meta_data = meta[0]
+        task_name = meta_data["task_name"]
+        channel_names = meta_data["channel_names"]
+        n_classes = n_unique_labels(task_name)
+
+        # 2. Preprocess data using REVE-specific pipeline (200 Hz, 0.5-99.5 Hz bandpass, z-score + clip)
+        print("[REVE] Applying REVE-specific preprocessing...")
+        datasets = [
+            make_dataset_reve(
+                X_, y_, task_name,
+                m_["sampling_frequency"],
+                m_["channel_names"],
+                train=True,
+                split_size=0.15
+            )
+            for X_, y_, m_ in zip(X, y, meta)
+        ]
+
+        # Get train datasets
+        dataset_train_list = [dataset[0] for dataset in datasets]
+        dataset_train_list = [dataset for dataset in dataset_train_list if len(dataset) > 0]
+
+        # Get processed channel names from first dataset
+        if dataset_train_list:
+            channel_names = dataset_train_list[0].ch_names
+
+        # Get shape from processed data
+        sample_data = dataset_train_list[0].data
+        n_channels = sample_data.shape[1]
+        n_timepoints = sample_data.shape[2]
+
+        # 3. Initialize Model with processed dimensions
         self.model = REVEWrapper(
-            n_channels=n_channels, 
-            n_timepoints=n_timepoints, 
+            n_channels=n_channels,
+            n_timepoints=n_timepoints,
             n_classes=n_classes
         ).to(self.device)
-        
-        # 3. Prepare DataLoaders
-        # Concatenate all datasets for training (or keep separate if you prefer epoch-loops)
-        # Here we concatenate for simplicity as done in standard ML, 
-        # but you can loop over list like LaBraM if needed.
-        X_all = np.concatenate(X, axis=0)
-        y_all = np.concatenate(y, axis=0)
-        
+        print(f"[REVE] Initialized model with {n_channels} channels and {n_timepoints} timepoints (200 Hz)")
+
+        # 4. Prepare DataLoaders from preprocessed datasets
+        X_all = np.concatenate([d.data for d in dataset_train_list], axis=0)
+        y_all = np.concatenate([d.labels for d in dataset_train_list], axis=0)
+        # Convert one-hot back to class indices
+        if y_all.ndim > 1:
+            y_all = np.argmax(y_all, axis=1)
+
         train_dataset = SimpleDataset(X_all, y_all)
         collate_fn = self._get_collate_fn(channel_names)
-        
+
         train_loader = DataLoader(
             train_dataset, 
             batch_size=64, 
