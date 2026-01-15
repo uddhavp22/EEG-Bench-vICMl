@@ -44,10 +44,10 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
         logger.info(f"Added eegfm path to sys.path: {eegfm_path}")
 
     # Import eegfm modules
-    from eegfm.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
-    from eegfm.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
-    from eegfm.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
-    from eegfm.models.common import EncoderConfig as _EncoderConfig
+    from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
+    from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
+    from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
+    from eegfmchallenge.models.common import EncoderConfig as _EncoderConfig
 
     EEGLEJEPAConfig = _EEGLEJEPAConfig
     ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig
@@ -67,7 +67,6 @@ class ConcreteLeJEPAClinical(nn.Module):
     ):
         super().__init__()
 
-        DIM = 384
         self.is_multilabel_task = num_labels_per_chunk is not None
 
         # ------------------------------------------------------------
@@ -98,47 +97,50 @@ class ConcreteLeJEPAClinical(nn.Module):
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
             print("Loaded Config!")
         else:
-            cfg = EEGLEJEPAConfig(
-                name="EEGLEJEPA",
-                dim=384,
-                proj_dim=16,
-                patch_size=25,
-                n_channels=128,
-                max_time=1500,
-                patch_embedder=ConvPatchEmbedderConfig(
-                    name="ConvPatchEmbedder",
-                    preserve_channels=False,
-                ),
-                channel_mixer_config=DynamicChannelMixerConfig(
-                    name="DynamicChannelMixer",
-                    coord_dim=3,
-                    output_channels=64,
-                ),
-                encoder_config=EncoderConfig(
-                    dim=384,
-                    depth=12,
-                    heads=6,
-                    use_flash_attn=True,
-                ),
-                predictor_config=EncoderConfig(
-                    dim=128,
-                    depth=4,
-                    heads=4,
-                    use_flash_attn=True,
-                ),
-                masking={
-                    "mask_ratio": 0.5,
-                    "block_size_range": [5, 10],
-                    "strategy_probs": [1.0, 0.0, 0.0],
-                },
+            raise 
+            # cfg = EEGLEJEPAConfig(
+            #     name="EEGLEJEPA",
+            #     dim=384,
+            #     proj_dim=16,
+            #     patch_size=25,
+            #     n_channels=128,
+            #     max_time=1500,
+            #     patch_embedder=ConvPatchEmbedderConfig(
+            #         name="ConvPatchEmbedder",
+            #         preserve_channels=False,
+            #     ),
+            #     channel_mixer_config=DynamicChannelMixerConfig(
+            #         name="DynamicChannelMixer",
+            #         coord_dim=3,
+            #         output_channels=64,
+            #     ),
+            #     encoder_config=EncoderConfig(
+            #         dim=384,
+            #         depth=12,
+            #         heads=6,
+            #         use_flash_attn=True,
+            #     ),
+            #     predictor_config=EncoderConfig(
+            #         dim=128,
+            #         depth=4,
+            #         heads=4,
+            #         use_flash_attn=True,
+            #     ),
+            #     masking={
+            #         "mask_ratio": 0.5,
+            #         "block_size_range": [5, 10],
+            #         "strategy_probs": [1.0, 0.0, 0.0],
+            #     },
             
-            )
+            # )
 
         # ------------------------------------------------------------
         # Build backbone
         # ------------------------------------------------------------
         self.backbone = cfg.build()
         self.chunk_length = 5000 #20s chunks!
+        DIM = self.backbone.dim
+
 
         # ------------------------------------------------------------
         # Load pretrained weights (if available)
@@ -397,13 +399,16 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 x, yb = x.to(self.device), yb.to(self.device)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
 
+
                 optimizer.zero_grad()
                 logits = self.model(x, cb)
                 loss = self.model.loss_fn(logits, yb)
                 loss.backward()
-                optimizer.step()
-                scheduler.step()
 
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                optimizer.step()
+                scheduler.step() 
 
                 total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)

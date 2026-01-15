@@ -42,10 +42,10 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
         logger.info(f"Added eegfm path to sys.path: {eegfm_path}")
 
     # Import eegfm modules
-    from eegfm.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
-    from eegfm.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
-    from eegfm.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
-    from eegfm.models.common import EncoderConfig as _EncoderConfig
+    from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
+    from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
+    from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
+    from eegfmchallenge.models.common import EncoderConfig as _EncoderConfig
 
     EEGLEJEPAConfig = _EEGLEJEPAConfig
     ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig

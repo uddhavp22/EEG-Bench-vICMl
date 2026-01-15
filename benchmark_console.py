@@ -338,7 +338,9 @@ def main():
 
     # Factory functions for other models with freeze_encoder support
     def make_labram_clinical(num_classes=2, num_labels_per_chunk=None):
-        return LaBraMClinical(freeze_encoder=args.linear_probe)
+        return LaBraMClinical(num_classes=num_classes, 
+                              num_labels_per_chunk=num_labels_per_chunk,
+                              freeze_encoder=args.linear_probe)
 
     def make_labram_bci():
         return LaBraMBci(freeze_encoder=args.linear_probe)
