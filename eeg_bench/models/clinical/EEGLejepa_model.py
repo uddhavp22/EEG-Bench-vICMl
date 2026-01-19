@@ -138,8 +138,9 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Build backbone
         # ------------------------------------------------------------
         self.backbone = cfg.build()
-        self.chunk_length = 5000 #20s chunks!
+        self.chunk_length = 4000 #20s chunks!
         DIM = self.backbone.dim
+        # DIM = self.backbone.proj_dim
 
 
         # ------------------------------------------------------------
@@ -222,6 +223,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
+        # cls = outputs['cls_output']
         # cls = outputs["sequence_embeddings"].mean(dim = 1)
 
         # Restore the batch and chunk dimensions:
@@ -359,7 +361,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # Optimizer and Scheduler (matching BCI setup)
         max_epochs = 30
         steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 1e-3
+        max_lr = 1e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)

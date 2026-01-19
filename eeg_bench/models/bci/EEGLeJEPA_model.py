@@ -64,7 +64,6 @@ class ConcreteLeJEPABCI(nn.Module):
     ):
         super().__init__()
 
-        DIM = 384
 
         # ------------------------------------------------------------
         # Pretrained config / checkpoint resolution (matching clinical)
@@ -113,6 +112,7 @@ class ConcreteLeJEPABCI(nn.Module):
         # Build backbone
         # ------------------------------------------------------------
         self.backbone = cfg.build()
+        DIM = self.backbone.dim
 
         # ------------------------------------------------------------
         # Load pretrained weights (if available)
