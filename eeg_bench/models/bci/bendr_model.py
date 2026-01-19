@@ -42,14 +42,14 @@ def check_and_download_encoder():
     return encoder_path
 
 class BENDRBCIModel(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, freeze_encoder: bool = True):
         super().__init__()
         encoder = ConvEncoderBENDR(20, encoder_h=512, dropout=0., projection_head=False)
         encoder.load(check_and_download_encoder())
 
         self.model = encoder
         for param in self.model.parameters():
-            param.requires_grad = True
+            param.requires_grad = not freeze_encoder
         self.scale_param    = torch.nn.Parameter(torch.tensor(1.))
         self.linear_probe   = torch.nn.Linear(4608, num_classes)
         self.drop           = torch.nn.Dropout(p=0.10)
@@ -151,6 +151,7 @@ def inference(model, dataloader, device):
 class BENDRModel(AbstractModel):
     def __init__(
         self,
+        freeze_encoder: bool = True,
     ):
         super().__init__("BENDR Model")
         print("inside init BENDR")
@@ -158,13 +159,14 @@ class BENDRModel(AbstractModel):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
+        self.freeze_encoder = freeze_encoder
 
     def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:
         print("inside fit BENDR")
         task_name = meta[0]["task_name"]
-        
+
         num_classes = n_unique_labels(task_name)
-        self.model = BENDRBCIModel(num_classes=num_classes).to(self.device)
+        self.model = BENDRBCIModel(num_classes=num_classes, freeze_encoder=self.freeze_encoder).to(self.device)
         
         datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=True) for X_, y_, meta_ in zip(cast(List[np.ndarray], X), cast(List[np.ndarray], y), meta)]
         dataset_train_list = [dataset[0] for dataset in datasets]

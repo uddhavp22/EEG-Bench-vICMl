@@ -23,5 +23,7 @@ wandb/
 *.vhdr
 *.log
 *.yaml
+!sweep_configs/*.yaml
 REVE_posbank/
 cache/
+results/

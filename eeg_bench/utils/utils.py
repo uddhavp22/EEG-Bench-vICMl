@@ -3,8 +3,14 @@ import numpy as np
 import torch
 import os
 import json
+import logging
 from datetime import datetime
+from typing import List, Dict, Tuple, Optional
+from collections import Counter
+from sklearn.model_selection import train_test_split
 from ..config import get_config_value
+
+logger = logging.getLogger(__name__)
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -18,6 +24,215 @@ def set_seed(seed=42):
 def get_multilabel_tasks():
     return set(["seizure_clinical", "sleep_stages_clinical", "binary_artifact_clinical", "multiclass_artifact_clinical"])
 
+
+def _is_multilabel_data(y_i) -> bool:
+    """
+    Detect if y_i contains multi-label annotations (list of event tuples per recording).
+
+    Multi-label format: y_i = [[event_type, start, stop], [event_type, start, stop], ...]
+    Recording-level multi-label format: y_i = [[[event_type, start, stop], ...], ...]
+    Single-label format: y_i = label (scalar) or y_i = [label1, label2, ...] (1D array)
+    """
+    if isinstance(y_i, np.ndarray):
+        return False
+    if not isinstance(y_i, list) or len(y_i) == 0:
+        return False
+    def _looks_like_event(value) -> bool:
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) >= 3
+            and isinstance(value[1], (int, float, np.integer, np.floating))
+        )
+    # Check if first element is a list/tuple with 3 elements (event annotation)
+    for entry in y_i:
+        if _looks_like_event(entry):
+            return True
+        if isinstance(entry, list) and entry:
+            if _looks_like_event(entry[0]):
+                return True
+    return False
+
+
+def subsample_data_stratified(
+    X: List[np.ndarray],
+    y: List[np.ndarray],
+    percentage: float,
+    random_state: int = 42
+) -> Tuple[List[np.ndarray], List[np.ndarray], Dict]:
+    """
+    Subsample training data while maintaining class proportions.
+
+    Args:
+        X: List of numpy arrays, one per dataset
+        y: List of label arrays, one per dataset
+        percentage: Fraction of data to keep (0.0 to 1.0)
+        random_state: Random seed for reproducibility
+
+    Returns:
+        X_sub: Subsampled X
+        y_sub: Subsampled y
+        stats: Dict with samples_per_class and total_samples
+    """
+    MIN_SAMPLES_PER_CLASS = 2  # Hardcoded minimum to ensure class representation
+
+    def _collect_label_values_multilabel(y_list):
+        """Collect all label values from multi-label annotations."""
+        def _looks_like_event(value) -> bool:
+            return (
+                isinstance(value, (list, tuple))
+                and len(value) >= 3
+                and isinstance(value[1], (int, float, np.integer, np.floating))
+            )
+        values = []
+        for y_i in y_list:
+            for entry in y_i:
+                if _looks_like_event(entry):
+                    values.append(entry[0])  # event = [type, start, stop]
+                elif isinstance(entry, list):
+                    for event in entry:
+                        if _looks_like_event(event):
+                            values.append(event[0])
+        return values
+
+    def _collect_label_values_singlelabel(labels):
+        """Collect label values from single-label data."""
+        if isinstance(labels, np.ndarray):
+            return labels.tolist()
+        return list(labels)
+
+    def _take_indices(items, indices):
+        return items[indices] if isinstance(items, np.ndarray) else [items[i] for i in indices]
+
+    def _get_label_array(y_i):
+        """Convert labels to numpy array for class counting (single-label only)."""
+        if isinstance(y_i, np.ndarray):
+            return y_i
+        return np.array(y_i)
+
+    # Detect if this is multi-label data
+    is_multilabel = any(_is_multilabel_data(y_i) for y_i in y)
+
+    if percentage >= 1.0:
+        if is_multilabel:
+            all_labels = _collect_label_values_multilabel(y)
+        else:
+            all_labels = []
+            for y_i in y:
+                all_labels.extend(_collect_label_values_singlelabel(y_i))
+        # Convert labels to hashable form for Counter
+        all_labels_hashable = [str(l) if isinstance(l, list) else l for l in all_labels]
+        stats = {
+            "samples_per_class": dict(Counter(all_labels_hashable)),
+            "total_samples": len(all_labels)
+        }
+        return X, y, stats
+
+    X_sub, y_sub = [], []
+    rng = np.random.RandomState(random_state)
+
+    if is_multilabel:
+        # For multi-label tasks, subsample at the recording level (no stratification)
+        logger.info("Multi-label task detected: subsampling at recording level")
+        for X_i, y_i in zip(X, y):
+            n_recordings = len(X_i)
+            n_keep = max(1, int(n_recordings * percentage))
+
+            if n_keep >= n_recordings:
+                X_sub.append(X_i)
+                y_sub.append(y_i)
+            else:
+                indices = rng.choice(n_recordings, size=n_keep, replace=False)
+                indices = sorted(indices)  # Keep order for reproducibility
+                X_sub.append(_take_indices(X_i, indices))
+                y_sub.append(_take_indices(y_i, indices))
+
+        all_labels = _collect_label_values_multilabel(y_sub)
+        all_labels_hashable = [str(l) if isinstance(l, list) else l for l in all_labels]
+        stats = {
+            "samples_per_class": dict(Counter(all_labels_hashable)),
+            "total_samples": sum(len(y_i) for y_i in y_sub),
+            "total_recordings": sum(len(X_i) for X_i in X_sub)
+        }
+        return X_sub, y_sub, stats
+
+    # Single-label task: use stratified sampling
+    all_labels_sub = []
+
+    for X_i, y_i in zip(X, y):
+        n_samples = len(y_i)
+        label_arr = _get_label_array(y_i)
+        unique_classes, class_counts = np.unique(label_arr, return_counts=True)
+        n_classes = len(unique_classes)
+
+        # Calculate minimum samples needed to maintain class representation
+        min_samples_needed = n_classes * MIN_SAMPLES_PER_CLASS
+        n_keep = max(min_samples_needed, int(n_samples * percentage))
+
+        if n_keep >= n_samples:
+            # Use full dataset
+            X_sub.append(X_i)
+            y_sub.append(y_i)
+            all_labels_sub.extend(_collect_label_values_singlelabel(y_i))
+            continue
+
+        # Check if stratification is feasible
+        min_class_count = class_counts.min()
+        samples_per_class_target = int(min_class_count * percentage)
+
+        if samples_per_class_target < MIN_SAMPLES_PER_CLASS:
+            # Percentage too low for this dataset - use minimum samples per class
+            logger.warning(
+                f"Percentage {percentage:.1%} too low for dataset with {n_samples} samples "
+                f"and {n_classes} classes. Using {MIN_SAMPLES_PER_CLASS} samples per class minimum."
+            )
+            # Sample exactly MIN_SAMPLES_PER_CLASS from each class
+            indices = []
+            for cls in unique_classes:
+                cls_indices = np.where(label_arr == cls)[0]
+                n_to_sample = min(MIN_SAMPLES_PER_CLASS, len(cls_indices))
+                indices.extend(rng.choice(cls_indices, size=n_to_sample, replace=False))
+            indices = np.array(indices)
+            X_sub.append(_take_indices(X_i, indices))
+            y_sub.append(_take_indices(y_i, indices))
+            all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, indices)))
+        else:
+            # Try stratified split
+            try:
+                X_keep, _, y_keep, _ = train_test_split(
+                    X_i, y_i,
+                    train_size=percentage,
+                    stratify=label_arr,
+                    random_state=random_state
+                )
+                X_sub.append(X_keep)
+                y_sub.append(y_keep)
+                all_labels_sub.extend(_collect_label_values_singlelabel(y_keep))
+            except ValueError as e:
+                # Fallback: sample proportionally from each class
+                logger.warning(f"Stratified split failed: {e}. Using per-class sampling.")
+                indices = []
+                for cls, count in zip(unique_classes, class_counts):
+                    cls_indices = np.where(label_arr == cls)[0]
+                    n_to_sample = max(MIN_SAMPLES_PER_CLASS, int(count * percentage))
+                    n_to_sample = min(n_to_sample, len(cls_indices))
+                    indices.extend(rng.choice(cls_indices, size=n_to_sample, replace=False))
+                indices = np.array(indices)
+                X_sub.append(_take_indices(X_i, indices))
+                y_sub.append(_take_indices(y_i, indices))
+                all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, indices)))
+
+    stats = {
+        "samples_per_class": dict(Counter(all_labels_sub)),
+        "total_samples": len(all_labels_sub)
+    }
+
+    # Warn if any class has very few samples
+    for cls, count in stats["samples_per_class"].items():
+        if count < MIN_SAMPLES_PER_CLASS:
+            logger.warning(f"Class {cls} has only {count} samples after subsampling!")
+
+    return X_sub, y_sub, stats
+
 def save_results(
     y_trains,
     y_trues,
@@ -25,6 +240,11 @@ def save_results(
     results,
     dataset_names,
     task_name,
+    data_percentage: float = 1.0,
+    data_stats: Optional[Dict] = None,
+    linear_probe: bool = False,
+    result_prefix: Optional[str] = None,
+    checkpoint_id: Optional[str] = None,
 ):
 
     # Get the current timestamp
@@ -32,8 +252,12 @@ def save_results(
     models_names_unique = list(set(models_names))
     models_str = "_".join(models_names_unique) if models_names_unique else "models"
 
-    # Build the filename with task name, models, and timestamp
-    filename = os.path.join(get_config_value("results"), "raw", f"{task_name}_{models_str}_{timestamp}.json")
+    # Build the filename with optional prefix, task name, models, checkpoint ID, percentage, LP indicator, and timestamp
+    prefix_str = f"{result_prefix}_" if result_prefix else ""
+    ckpt_str = f"_ckpt_{checkpoint_id}" if checkpoint_id else ""
+    pct_str = f"_pct{int(data_percentage * 100)}" if data_percentage < 1.0 else ""
+    lp_str = "_LP" if linear_probe else ""
+    filename = os.path.join(get_config_value("results"), "raw", f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}_{timestamp}.json")
 
     if task_name in get_multilabel_tasks():
         y_trains = [[[y_2.tolist() for y_2 in y] for y in y_train] for y_train in y_trains]
@@ -55,7 +279,12 @@ def save_results(
         "results": results,
         "dataset_names": dataset_names,
         "task_name": task_name,
-        "timestamp": timestamp
+        "timestamp": timestamp,
+        "data_percentage": data_percentage,
+        "data_stats": data_stats,
+        "linear_probe": linear_probe,
+        "result_prefix": result_prefix,
+        "checkpoint_id": checkpoint_id,
     }
 
     # Save the results to the file

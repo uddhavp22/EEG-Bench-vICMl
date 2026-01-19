@@ -39,7 +39,7 @@ def check_and_download_encoder():
     return encoder_path
 
 class BENDRBCIModel(nn.Module):
-    def __init__(self, num_classes, num_labels_per_chunk, chunks):
+    def __init__(self, num_classes, num_labels_per_chunk, chunks, freeze_encoder: bool = True):
         super().__init__()
         self.chunks = chunks
         encoder = ConvEncoderBENDR(20, encoder_h=512, dropout=0., projection_head=False)
@@ -47,7 +47,7 @@ class BENDRBCIModel(nn.Module):
 
         self.model = encoder
         for param in self.model.parameters():
-            param.requires_grad = False
+            param.requires_grad = not freeze_encoder
         self.chunk_length = 1600 # for PD it was 800 (with 4608)
         self.scale_param    = torch.nn.Parameter(torch.tensor(1.))
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -185,7 +185,8 @@ class BENDRModel(AbstractModel):
     def __init__(
         self,
         num_classes: int = 2,
-        num_labels_per_chunk: Optional[int] = None
+        num_labels_per_chunk: Optional[int] = None,
+        freeze_encoder: bool = True,
     ):
         super().__init__("BENDRModel")
         print("inside init of BENDRModel")
@@ -195,7 +196,7 @@ class BENDRModel(AbstractModel):
         self.use_cache = True
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.model = BENDRBCIModel(num_classes=num_classes, num_labels_per_chunk=num_labels_per_chunk, chunks=self.chunk_len_s).to(self.device)
+        self.model = BENDRBCIModel(num_classes=num_classes, num_labels_per_chunk=num_labels_per_chunk, chunks=self.chunk_len_s, freeze_encoder=freeze_encoder).to(self.device)
 
     def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:
         print("inside fit")

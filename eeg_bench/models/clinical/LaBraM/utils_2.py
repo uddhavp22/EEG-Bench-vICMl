@@ -11,42 +11,7 @@ import time
 import os
 from ....config import get_config_value
 from ....utils.utils import get_multilabel_tasks
-
-
-def apply_defossez_scaling(
-    signals: np.ndarray,
-    is_uv: bool = None,
-    clip_range: tuple = (-20.0, 20.0),
-    min_scale: float = 1e-6
-) -> np.ndarray:
-    """
-    Apply Defossez-style robust scaling for LeJEPA preprocessing.
-
-    Args:
-        signals: Input EEG signals, shape (n_channels, n_timepoints)
-        is_uv: If True, data is already in microvolts; if False, converts from V to uV.
-               If None (default), auto-detects based on data magnitude.
-        clip_range: Tuple of (min, max) values for clipping after scaling
-        min_scale: Minimum scale value to prevent division by near-zero
-
-    Returns:
-        Scaled signals as float32 array
-    """
-    # Auto-detect if data is in volts or microvolts
-    if is_uv is None:
-        # EEG in volts: typical magnitude ~1e-6 to 1e-4
-        # EEG in microvolts: typical magnitude ~1 to 1000
-        median_magnitude = np.median(np.abs(signals))
-        is_uv = median_magnitude > 1e-3  # If median > 1mV, assume already in µV
-
-    if not is_uv:
-        signals = signals * 1e6
-    signals = signals - np.median(signals, axis=0, keepdims=True)
-    scale = np.percentile(signals, 75, axis=None) - np.percentile(signals, 25, axis=None)
-    if scale < min_scale:
-        scale = 1.0
-    signals = np.clip(signals / scale, clip_range[0], clip_range[1])
-    return signals.astype(np.float32)
+from ...lejepa_preprocessing import apply_defossez_scaling, process_lejepa_raw
 
 
 channel_mapping = { "FP1": ["FP1", "FZ"],
@@ -87,7 +52,7 @@ standard_1020 = [
 ]
 
 class LaBraMDataset2(Dataset):
-    def __init__(self, h5_path, is_train_set, channels, recording_names=None):
+    def __init__(self, h5_path, is_train_set, channels, recording_names=None, sfreq = 200):
         """
         Args:
             h5_path (string): Path to the HDF5 file.
@@ -98,6 +63,7 @@ class LaBraMDataset2(Dataset):
         self.h5_path = h5_path
         self.is_train_set = is_train_set
         self.ch_names = channels
+        self.sfreq = sfreq
 
         if recording_names is None:
             # Get list of all recording names from the HDF5 file
@@ -123,7 +89,7 @@ class LaBraMDataset2(Dataset):
         if self.is_train_set:        
             # If the recording is longer than 128 seconds (24000 samples at 200Hz),
             # select a random contiguous subsample of 320 seconds
-            required_length = 128 * 200  # 24000 samples
+            required_length = 128 * self.sfreq  # 24000 samples
             if data.shape[-1] > required_length:
                 max_start = data.shape[-1] - required_length
                 start = np.random.randint(0, max_start + 1)
@@ -145,17 +111,28 @@ class LaBraMDataset2(Dataset):
         n = len(self.recording_names)
         indices = list(range(n))
         np.random.shuffle(indices)
-        
+
         split = int(np.floor(val_split * n))
+
+        # Ensure at least 1 sample for training
+        if split >= n:
+            split = max(0, n - 1)
+
         val_indices = indices[:split]
         train_indices = indices[split:]
-        
+
+        # If we somehow end up with 0 training samples, skip validation
+        if len(train_indices) == 0:
+            logging.warning(f"Not enough samples for train/val split (n={n}). Using all for training.")
+            train_indices = indices
+            val_indices = []
+
         train_recordings = [self.recording_names[i] for i in train_indices]
         val_recordings = [self.recording_names[i] for i in val_indices]
-        
+
         train_dataset = LaBraMDataset2(self.h5_path, True, self.ch_names, recording_names=train_recordings)
-        val_dataset = LaBraMDataset2(self.h5_path, True, self.ch_names, recording_names=val_recordings)
-        
+        val_dataset = LaBraMDataset2(self.h5_path, True, self.ch_names, recording_names=val_recordings) if val_recordings else None
+
         return train_dataset, val_dataset
 
 class NeuroGPTDataset2(EEGDataset):
@@ -196,22 +173,33 @@ class NeuroGPTDataset2(EEGDataset):
         Args:
             val_split (float): Fraction of the dataset to use for validation.
         Returns:
-            Tuple[LaBraMDataset2, LaBraMDataset2]: Training and validation dataset instances.
+            Tuple[NeuroGPTDataset2, NeuroGPTDataset2]: Training and validation dataset instances.
         """
         n = len(self.recording_names)
         indices = list(range(n))
         np.random.shuffle(indices)
-        
+
         split = int(np.floor(val_split * n))
+
+        # Ensure at least 1 sample for training
+        if split >= n:
+            split = max(0, n - 1)
+
         val_indices = indices[:split]
         train_indices = indices[split:]
-        
+
+        # If we somehow end up with 0 training samples, skip validation
+        if len(train_indices) == 0:
+            logging.warning(f"Not enough samples for train/val split (n={n}). Using all for training.")
+            train_indices = indices
+            val_indices = []
+
         train_recordings = [self.recording_names[i] for i in train_indices]
         val_recordings = [self.recording_names[i] for i in val_indices]
-        
+
         train_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=train_recordings)
-        val_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=val_recordings)
-        
+        val_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=val_recordings) if val_recordings else None
+
         return train_dataset, val_dataset
     
 
@@ -373,10 +361,7 @@ def process_lejepa(raw, chs, out_sfreq=250):
     max_duration_s = 30 * 60  # 30 minutes in seconds
     if raw.times[-1] > max_duration_s:
         raw.crop(tmax=max_duration_s)
-    raw = process_filter(raw, out_sfreq)
-    signals = raw.get_data(units="uV")
-    signals = apply_defossez_scaling(signals)
-    return signals
+    return process_lejepa_raw(raw, out_sfreq)
 
 def process_luna(raw, chs, out_sfreq=256):
     """Process raw EEG data for LUNA model.
@@ -515,7 +500,7 @@ def process_one_abnormal(parameters, output_queue):
         assert raw.info['sfreq'] == 200
     elif model_name == "LeJEPAClinical":
         t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
-        t_channels = list(set(standard_1020).intersection(set(t_channels)))
+        t_channels = [ch for ch in t_channels if ch in standard_1020]
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
         signals = process_lejepa(raw, chs, out_sfreq=250)
@@ -910,6 +895,8 @@ def process_one_cli_unm(parameters, output_queue):
         out_freq = 200
 
     elif model_name == "LeJEPAClinical" or model_name == "LeJEPA-BCI" or model_name == "LeJEPA":
+        l_freq = 0.5
+        h_freq = 100.0
         # --- pick channels like clinical SVM / LaBraM does ---
         ch_names = [ch.upper() for ch in o_channels]
 
@@ -939,14 +926,14 @@ def process_one_cli_unm(parameters, output_queue):
             method="fir",
             verbose=False,
         )
-        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+        signals = notch_filter(signals, Fs=sfreq, freqs=[50, 60], verbose=False)
 
         # Resample to 250 Hz (LeJEPA training expectation)
         out_freq = 250
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
         # Apply Defossez scaling - data is NOT in uV yet (raw numpy from dataset)
-        signals = apply_defossez_scaling(signals)
+        signals = apply_defossez_scaling(signals, median_axis=0, scale_axis=None)
 
         # IMPORTANT: include target_channels so dataset can compute coords later
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
