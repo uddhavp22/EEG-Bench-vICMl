@@ -136,14 +136,12 @@ class NeuroGPTModel(AbstractModel):
         self,
         seed: int = 42,
         num_classes: int = 2,
-        num_labels_per_chunk: Optional[int] = None,
-        freeze_encoder: bool = False,
+        num_labels_per_chunk: Optional[int] = None
     ):
         super().__init__("NeuroGPTModel")
         assert torch.cuda.is_available(), "CUDA is not available"
         logging.info("Initializing NeuroGPTModel")
 
-        self.freeze_encoder = freeze_encoder
         self.use_cache = True
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -187,7 +185,7 @@ class NeuroGPTModel(AbstractModel):
             "hidden_activation": "gelu_new",
             "freeze_decoder": False,
             "freeze_decoder_without_pooler_heads": False,
-            "freeze_encoder": self.freeze_encoder,
+            "freeze_encoder": False,
             "log_dir": os.path.join(get_config_value("log"), "NeuroGPT"),
             "wandb_mode": "disabled",
             "wandb_project_name": "learning-from-brains",

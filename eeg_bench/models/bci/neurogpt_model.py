@@ -142,13 +142,11 @@ class NeuroGPTModel(AbstractModel):
     def __init__(
         self,
         seed: int = 42,
-        freeze_encoder: bool = False,
     ):
         super().__init__("NeuroGPTModel")
         assert torch.cuda.is_available(), "CUDA is not available"
         logging.info("Initializing NeuroGPTModel")
 
-        self.freeze_encoder = freeze_encoder
         self.config = {
             "training_style": "decoding",
             "num_decoding_classes": 2,
@@ -183,7 +181,7 @@ class NeuroGPTModel(AbstractModel):
             "hidden_activation": "gelu_new",
             "freeze_decoder": False,
             "freeze_decoder_without_pooler_heads": False,
-            "freeze_encoder": self.freeze_encoder,
+            "freeze_encoder": False,
             "log_dir": "results/models/upstream",
             "wandb_mode": "disabled",
             "wandb_project_name": "learning-from-brains",

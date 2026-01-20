@@ -41,7 +41,7 @@ def check_and_download_pretrained_model():
     return encoder_path
 
 class LaBraMBCIModel(nn.Module):
-    def __init__(self, num_classes, num_labels_per_chunk, device, chunks, freeze_encoder: bool = True):
+    def __init__(self, num_classes, num_labels_per_chunk, device, chunks):
         super().__init__()
         self.device = device
         self.chunks = chunks
@@ -50,7 +50,7 @@ class LaBraMBCIModel(nn.Module):
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
                 new_checkpoint[k[len('student.'):]] = v
-        model = create_model("labram_base_patch200_200",
+        model = create_model("labram_base_patch200_200", 
                                 # checkpoint_path= ,
                                 qkv_bias=False,
                                 rel_pos_bias=True,
@@ -67,7 +67,7 @@ class LaBraMBCIModel(nn.Module):
         #model.load_state_dict(new_checkpoint, strict=False)
         for blk in model.blocks:
             for p in blk.parameters():
-                p.requires_grad = not freeze_encoder
+                p.requires_grad = False
         self.feature = model
         self.is_multilabel_task = num_labels_per_chunk is not None
         self.head = nn.Linear(200, num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1))
@@ -255,7 +255,6 @@ class LaBraMModel(AbstractModel):
         self,
         num_classes: int = 2,
         num_labels_per_chunk: Optional[int] = None,
-        freeze_encoder: bool = True,
     ):
         super().__init__("LaBraMModel")
         print("inside init LaBraMModel")
@@ -265,7 +264,7 @@ class LaBraMModel(AbstractModel):
         self.use_cache = True
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.model = LaBraMBCIModel(num_classes=num_classes, num_labels_per_chunk=num_labels_per_chunk, device=self.device, chunks=self.chunk_len_s, freeze_encoder=freeze_encoder).to(self.device)
+        self.model = LaBraMBCIModel(num_classes=num_classes, num_labels_per_chunk=num_labels_per_chunk, device=self.device, chunks=self.chunk_len_s).to(self.device)
         self.save = False
 
     def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:  
@@ -277,21 +276,13 @@ class LaBraMModel(AbstractModel):
         self.model.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
         
         dataset_train  = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=self.use_cache)
-
-        # Check if dataset has any samples
-        if len(dataset_train) == 0:
-            raise ValueError(f"Dataset has 0 samples after processing. Cannot train model.")
-
+    
         val_split = 0.2
         if val_split is not None:
             dataset_train, dataset_val = dataset_train.split_train_val(val_split)
         else:
             dataset_val = None
-
-        # Verify we still have training samples after split
-        if len(dataset_train) == 0:
-            raise ValueError(f"Training set has 0 samples after train/val split. Try using more training data.")
-
+        
         del X, y, meta
         gc.collect()
         torch.cuda.empty_cache()
