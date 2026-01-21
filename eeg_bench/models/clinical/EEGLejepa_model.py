@@ -361,7 +361,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # Optimizer and Scheduler (matching BCI setup)
         max_epochs = 30
         steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 1e-4
+        max_lr = 4e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
@@ -370,7 +370,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             max_lr=max_lr,
             steps_per_epoch=steps_per_epoch,
             epochs=max_epochs,
-            pct_start=0.2,
+            pct_start=0.1,
         )
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         #     optimizer, 
