@@ -64,10 +64,11 @@ class LaBraMBCIModel(nn.Module):
                                 use_rel_pos_bias=True,
                                 use_abs_pos_emb=True,
                                 init_values=0.1,)
-        #model.load_state_dict(new_checkpoint, strict=False)
+        model.load_state_dict(new_checkpoint, strict=False)
         for blk in model.blocks:
             for p in blk.parameters():
                 p.requires_grad = not freeze_encoder
+
         self.feature = model
         self.is_multilabel_task = num_labels_per_chunk is not None
         self.head = nn.Linear(200, num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1))
@@ -86,8 +87,9 @@ class LaBraMBCIModel(nn.Module):
             x = x / 100
             
             pred = self.feature.forward_features(x, input_chans=input_chans, return_all_tokens=False)
-
+            breakpoint()
             pred = self.head(pred.flatten(1))
+
             if self.is_multilabel_task:
                 # for multilabel classification, pytorch Cross-Entropy loss expects this prediction shape: [#batch, #classes, #labels]
                 pred = pred.reshape((B, self.num_classes, -1))
@@ -164,6 +166,8 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
         loss.backward()
         optimizer.step()
         scheduler.step()
+
+        breakpoint()
         
         running_loss += loss.item() * x.size(0)
         preds = torch.argmax(logits, dim=1)
