@@ -64,10 +64,14 @@ class LaBraMBCIModel(nn.Module):
                                 use_rel_pos_bias=True,
                                 use_abs_pos_emb=True,
                                 init_values=0.1,)
-        model.load_state_dict(new_checkpoint, strict=False)
-        for blk in model.blocks:
-            for p in blk.parameters():
-                p.requires_grad = not freeze_encoder
+        missing, unexpected = model.load_state_dict(new_checkpoint, strict=False)
+        print("Missing keys", missing)
+        print("Unexpected", unexpected)
+        if freeze_encoder:
+            # 1. Turn off gradients for EVERYTHING
+            for param in model.parameters():
+                param.requires_grad = False
+            model.eval()
 
         self.feature = model
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -148,11 +152,13 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
     model.train()
     running_loss, running_corrects, total_samples = 0.0, 0, 0
 
+    print([n for n, p in model.named_parameters() if p.requires_grad])
+
 
     for batch in tqdm(dataloader, desc="Training", leave=True):
         
         x, y, channels = batch
-        print("x_shape:", x.shape)
+        # print("x_shape:", x.shape)
         # x = x.to(device) will be done in the model
         y = y.to(device)
         
@@ -166,8 +172,6 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
         loss.backward()
         optimizer.step()
         scheduler.step()
-
-        breakpoint()
         
         running_loss += loss.item() * x.size(0)
         preds = torch.argmax(logits, dim=1)
