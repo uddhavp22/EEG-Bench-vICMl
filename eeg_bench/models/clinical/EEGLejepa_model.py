@@ -25,8 +25,12 @@ from .LaBraM import utils
 
 from transformers import AutoModel
 from ...utils import wandb_utils
+from .attentive_probe import AttentivePooler
 
 logger = logging.getLogger(__name__)
+
+# Valid probe types for EEGLeJEPA
+PROBE_TYPES = ["linear", "attentive"]
 
 # eegfm imports are done dynamically in _setup_eegfm_imports()
 EEGLEJEPAConfig = None
@@ -64,11 +68,16 @@ class ConcreteLeJEPAClinical(nn.Module):
         freeze_encoder=True,
         config_path: Optional[Path] = None,
         pretrained_path: Optional[Path] = None,
+        probe_type: str = "linear",
     ):
         super().__init__()
 
         DIM = 384
         self.is_multilabel_task = num_labels_per_chunk is not None
+        self.probe_type = probe_type
+
+        if probe_type not in PROBE_TYPES:
+            raise ValueError(f"Invalid probe_type '{probe_type}'. Must be one of {PROBE_TYPES}")
 
         # ------------------------------------------------------------
         # Pretrained config / checkpoint resolution (SAFE)
@@ -186,9 +195,26 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim)) 
-        self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
+        self.dim = DIM
+
+        # Build probe head based on probe_type
+        if probe_type == "attentive":
+            # Attentive pooler for aggregating chunk embeddings
+            self.attentive_pooler = AttentivePooler(
+                num_queries=1,
+                embed_dim=DIM,
+                num_heads=6,  # Match encoder heads
+                mlp_ratio=4.0,
+                depth=1,
+            )
+            self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim))
+        else:
+            # Default linear probe
+            self.attentive_pooler = None
+            self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim))
+
+        self.loss_fn = nn.CrossEntropyLoss()
 
 
     def forward(self, x, coords):
@@ -220,15 +246,21 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
-        # cls = outputs["sequence_embeddings"].mean(dim = 1)
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
         cls = cls.view(B, n_chunks, embedding_dim)
 
-        # Simple aggregation: mean pooling over segments
-        if cls.dim() == 3:
-            cls = cls.mean(dim=1)
+        # Aggregate chunk embeddings based on probe type
+        if self.attentive_pooler is not None:
+            # Use attentive pooling over chunks: (B, n_chunks, DIM) -> (B, 1, DIM) -> (B, DIM)
+            cls = self.attentive_pooler(cls)
+            cls = cls.squeeze(1)
+        else:
+            # Default: mean pooling over segments
+            if cls.dim() == 3:
+                cls = cls.mean(dim=1)
+
         logits = self.head(cls)
         if self.is_multilabel_task:
             logits = logits.reshape(B, self.num_classes, -1)
@@ -242,13 +274,15 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         num_labels_per_chunk: Optional[int] = None,
         base_path: Optional[str] = None,
         version: Optional[int] = None,
-        freeze_encoder: bool = True
+        freeze_encoder: bool = True,
+        probe_type: str = "linear",
     ):
         super().__init__("LeJEPAClinical")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
         self.freeze_encoder = freeze_encoder  # Store for use in fit()
+        self.probe_type = probe_type
 
         # Handle config vs legacy parameters
         if config is not None:
@@ -281,12 +315,15 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             freeze_encoder = config.freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
+            probe_type = config.probe_type
         else:
             # Legacy mode - use parameters directly (with old defaults if not provided)
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
             config_path = None
             pretrained_path = None
+
+        self.probe_type = probe_type
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -302,6 +339,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             freeze_encoder=freeze_encoder,
             config_path=config_path,
             pretrained_path=pretrained_path,
+            probe_type=self.probe_type,
         ).to(self.device)
 
     def _load_position_bank(self, local_fallback_path: str):

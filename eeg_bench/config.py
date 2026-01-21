@@ -13,6 +13,7 @@ class LeJEPAConfig:
     eegfm_path: Optional[str] = None
     pos_bank_path: str = "./REVE_posbank"
     freeze_encoder: bool = True
+    probe_type: str = "linear"  # "linear" or "attentive"
     # Checkpoint resolution (shared by BCI and Clinical)
     checkpoint_base_path: Optional[str] = None
     checkpoint_version: Optional[int] = None

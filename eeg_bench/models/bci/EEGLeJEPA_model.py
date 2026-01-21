@@ -23,8 +23,12 @@ import random
 import math
 import pickle
 from pathlib import Path
+from ..clinical.attentive_probe import AttentivePooler
 
 logger = logging.getLogger(__name__)
+
+# Valid probe types for EEGLeJEPA
+PROBE_TYPES = ["linear", "attentive"]
 
 # eegfm imports are done dynamically in _setup_eegfm_imports()
 EEGLEJEPAConfig = None
@@ -61,10 +65,15 @@ class ConcreteLeJEPABCI(nn.Module):
         freeze_encoder: bool = True,
         config_path: Path | None = None,
         pretrained_path: Path | None = None,
+        probe_type: str = "linear",
     ):
         super().__init__()
 
         DIM = 384
+        self.probe_type = probe_type
+
+        if probe_type not in PROBE_TYPES:
+            raise ValueError(f"Invalid probe_type '{probe_type}'. Must be one of {PROBE_TYPES}")
 
         # ------------------------------------------------------------
         # Pretrained config / checkpoint resolution (matching clinical)
@@ -159,21 +168,43 @@ class ConcreteLeJEPABCI(nn.Module):
                 p.requires_grad = True
             self.backbone.train()
 
-        self.head = nn.Sequential(
-            nn.LayerNorm(DIM),
-            nn.Linear(DIM, num_classes)
-        )
+        self.dim = DIM
+        self.num_classes = num_classes
+
+        # Build probe head based on probe_type
+        if probe_type == "attentive":
+            # Attentive pooler for aggregating sequence embeddings
+            self.attentive_pooler = AttentivePooler(
+                num_queries=1,
+                embed_dim=DIM,
+                num_heads=6,  # Match encoder heads
+                mlp_ratio=4.0,
+                depth=1,
+            )
+            self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, num_classes))
+        else:
+            # Default linear probe
+            self.attentive_pooler = None
+            self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, num_classes))
+
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x, coords):
-        # Uses your new downstream method
+        # Uses the downstream method
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
-        
-        # Use the 384-dim CLS token
-        cls = outputs["cls_token"]
-        if cls.dim() == 3:
-            cls = cls.mean(dim=1)
-            
+
+        if self.attentive_pooler is not None:
+            # Use attentive pooling over sequence embeddings
+            # sequence_embeddings: (B, seq_len, DIM) -> (B, 1, DIM) -> (B, DIM)
+            seq_emb = outputs["sequence_embeddings"]
+            cls = self.attentive_pooler(seq_emb)
+            cls = cls.squeeze(1)
+        else:
+            # Default: use CLS token
+            cls = outputs["cls_token"]
+            if cls.dim() == 3:
+                cls = cls.mean(dim=1)
+
         return self.head(cls)
 
 class EEGLeJEPABCIModel(AbstractModel):
@@ -183,11 +214,13 @@ class EEGLeJEPABCIModel(AbstractModel):
         pretrained_path: Optional[str] = None,
         base_path: Optional[str] = None,
         version: Optional[int] = None,
-        freeze_encoder: bool = True
+        freeze_encoder: bool = True,
+        probe_type: str = "linear",
     ):
         super().__init__("LeJEPABCI")
         assert torch.cuda.is_available(), "CUDA is not available"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.probe_type = probe_type
 
         # Handle config vs legacy parameters
         if config is not None:
@@ -220,6 +253,7 @@ class EEGLeJEPABCIModel(AbstractModel):
             self.freeze_encoder = config.freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
+            probe_type = config.probe_type
         else:
             # Legacy mode - use parameters directly
             self.pretrained_path = Path(pretrained_path) if pretrained_path else None
@@ -229,6 +263,8 @@ class EEGLeJEPABCIModel(AbstractModel):
             self.freeze_encoder = freeze_encoder
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
+
+        self.probe_type = probe_type
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -362,6 +398,7 @@ class EEGLeJEPABCIModel(AbstractModel):
             freeze_encoder=self.freeze_encoder,
             config_path=self.config_path,
             pretrained_path=self.pretrained_path,
+            probe_type=self.probe_type,
         ).to(self.device)
 
         datasets = [self.cache.cache(make_dataset_lejepa)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
