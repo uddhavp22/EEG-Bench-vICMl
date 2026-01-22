@@ -46,15 +46,15 @@ def check_and_download_pretrained_model():
     return encoder_path
 
 class LaBraMBCIModel(nn.Module):
-    def __init__(self, num_classes, freeze_encoder: bool = True):
+    def __init__(self, num_classes, freeze_encoder = True):
         super().__init__()
-
+        
         checkpoint = torch.load(check_and_download_pretrained_model())
         new_checkpoint = {}
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
                 new_checkpoint[k[len('student.'):]] = v
-        model = create_model("labram_base_patch200_200",
+        model = create_model("labram_base_patch200_200", 
                                 # checkpoint_path= ,
                                 qkv_bias=False,
                                 rel_pos_bias=True,
@@ -170,7 +170,6 @@ def inference(model, dataloader, device, input_chans):
 class LaBraMModel(AbstractModel):
     def __init__(
         self,
-        freeze_encoder: bool = True,
     ):
         super().__init__("LaBraMModel")
         print("inside init of LaBraMModel")
@@ -178,7 +177,6 @@ class LaBraMModel(AbstractModel):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
-        self.freeze_encoder = freeze_encoder
 
     def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:
         print("inside fit of LaBraMModel")
@@ -186,7 +184,8 @@ class LaBraMModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         num_classes = n_unique_labels(task_name)
-        self.model = LaBraMBCIModel(num_classes=num_classes, freeze_encoder=self.freeze_encoder).to(self.device) 
+        # Initialize LaBraMBCIModel (which freezes the backbone)
+        self.model = LaBraMBCIModel(num_classes=num_classes).to(self.device) 
 
         # --- Data Pre-processing and Splitting ---
         datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=True, split_size=0.15)

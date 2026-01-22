@@ -22,7 +22,6 @@ from transformers import AutoModel
 import random
 import math
 import pickle
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +52,7 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
     EncoderConfig = _EncoderConfig
 
 class ConcreteLeJEPABCI(nn.Module):
-    def __init__(
-        self,
-        num_classes: int,
-        base_path: str | None = None,
-        version: int | None = None,
-        freeze_encoder: bool = True,
-        config_path: Path | None = None,
-        pretrained_path: Path | None = None,
-    ):
+    def __init__(self, num_classes: int, pretrained_path: str | None = None, freeze_encoder: bool = True):
         super().__init__()
 
 
@@ -114,51 +105,17 @@ class ConcreteLeJEPABCI(nn.Module):
         self.backbone = cfg.build()
         DIM = self.backbone.dim
 
-        # ------------------------------------------------------------
-        # Load pretrained weights (if available)
-        # ------------------------------------------------------------
-        if pretrained_path is not None:
+        if pretrained_path:
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
+            self.backbone.load_state_dict(state, strict=False)
 
-            # DEBUG: Verify checkpoint keys match model keys
-            model_keys = set(self.backbone.state_dict().keys())
-            ckpt_keys = set(state.keys())
-            print(f"[LeJEPABCI] Checkpoint keys (first 5): {list(ckpt_keys)[:5]}")
-            print(f"[LeJEPABCI] Model keys (first 5): {list(model_keys)[:5]}")
-
-            # Load with strict=False but capture missing/unexpected
-            load_result = self.backbone.load_state_dict(state, strict=False)
-            missing_keys = load_result.missing_keys
-            unexpected_keys = load_result.unexpected_keys
-
-            matched_keys = model_keys & ckpt_keys
-            print(f"[LeJEPABCI] Matched keys: {len(matched_keys)}/{len(model_keys)}")
-            print(f"[LeJEPABCI] Missing keys: {len(missing_keys)}")
-            print(f"[LeJEPABCI] Unexpected keys: {len(unexpected_keys)}")
-
-            if len(missing_keys) > 0:
-                print(f"[LeJEPABCI] WARNING: Missing keys (first 5): {missing_keys[:5]}")
-            if len(unexpected_keys) > 0:
-                print(f"[LeJEPABCI] WARNING: Unexpected keys (first 5): {unexpected_keys[:5]}")
-            if len(matched_keys) == 0:
-                print(f"[LeJEPABCI] CRITICAL: No keys matched! Checkpoint may have wrong format.")
-
-            print(f"[LeJEPABCI] Loaded pretrained weights from {pretrained_path}")
-
-        # ------------------------------------------------------------
-        # Freeze encoder if requested
-        # ------------------------------------------------------------
         if freeze_encoder:
             for p in self.backbone.parameters():
                 p.requires_grad = False
             self.backbone.eval()
-        else:
-            for p in self.backbone.parameters():
-                p.requires_grad = True
-            self.backbone.train()
-
+            
         self.head = nn.Sequential(
             nn.LayerNorm(DIM),
             nn.Linear(DIM, num_classes)
@@ -181,8 +138,6 @@ class EEGLeJEPABCIModel(AbstractModel):
         self,
         config: Optional[LeJEPAConfig] = None,
         pretrained_path: Optional[str] = None,
-        base_path: Optional[str] = None,
-        version: Optional[int] = None,
         freeze_encoder: bool = True
     ):
         super().__init__("LeJEPABCI")
@@ -191,41 +146,13 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         # Handle config vs legacy parameters
         if config is not None:
-            # Use checkpoint path from config (get_checkpoint_path resolves full_path vs base_path+version)
-            checkpoint_path = config.get_checkpoint_path()
-            if checkpoint_path:
-                # Extract base_path and version from full path for config discovery
-                ckpt_path = Path(checkpoint_path)
-                self.pretrained_path = ckpt_path
-                self.config_path = None
-                if ckpt_path.parent.name == "checkpoints":
-                    version_dir = ckpt_path.parent.parent
-                    if version_dir.name.startswith("version_"):
-                        self.base_path = str(version_dir.parent)
-                        self.version = int(version_dir.name.replace("version_", ""))
-                        candidate_config = version_dir / "config" / "config.pkl"
-                        if candidate_config.exists():
-                            self.config_path = candidate_config
-                    else:
-                        self.base_path = None
-                        self.version = None
-                else:
-                    self.base_path = None
-                    self.version = None
-            else:
-                self.base_path = config.checkpoint_base_path
-                self.version = config.checkpoint_version
-                self.config_path = None
-                self.pretrained_path = None
+            self.pretrained_path = config.get_checkpoint_path()
             self.freeze_encoder = config.freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
             # Legacy mode - use parameters directly
-            self.pretrained_path = Path(pretrained_path) if pretrained_path else None
-            self.base_path = base_path
-            self.version = version
-            self.config_path = None
+            self.pretrained_path = pretrained_path
             self.freeze_encoder = freeze_encoder
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
@@ -239,50 +166,27 @@ class EEGLeJEPABCIModel(AbstractModel):
         self.pos_bank = self._load_position_bank(pos_bank_path)
 
     def _load_position_bank(self, local_fallback_path: str):
-        """Load REVE position bank - try local first, fall back to HuggingFace."""
+        """Load REVE position bank - try HuggingFace first, fall back to local."""
         try:
-            logger.info(f"Attempting to load position bank from local path: {local_fallback_path}")
-            pos_bank = AutoModel.from_pretrained(
-                local_fallback_path,
-                trust_remote_code=True
-            ).to(self.device)
-            logger.info("Successfully loaded position bank from local storage.")
-            return pos_bank
-        except Exception as e:
-            logger.warning(f"Failed to load local model: {e}")
-            logger.info("Falling back to HuggingFace Hub (brain-bzh/reve-positions)...")
+            logger.info("Attempting to load position bank from HuggingFace Hub...")
             pos_bank = AutoModel.from_pretrained(
                 "brain-bzh/reve-positions",
                 trust_remote_code=True
             ).to(self.device)
+            logger.info("Successfully loaded position bank from HuggingFace Hub")
+            return pos_bank
+        except Exception as e:
+            logger.warning(f"Failed to load from HuggingFace Hub: {e}")
+            logger.info(f"Falling back to local path: {local_fallback_path}")
+            pos_bank = AutoModel.from_pretrained(
+                local_fallback_path,
+                trust_remote_code=True
+            ).to(self.device)
             return pos_bank
 
 
 
-    def _get_coords_and_valid_mask(self, ch_names):
-        """
-        Get coordinates and a mask indicating which channels have valid positions.
-        Returns: (coords, valid_indices) where coords only contains valid channels.
-        """
-        clean_names = [c.replace("EEG", "").strip() for c in ch_names]
-        c = self.pos_bank(clean_names)
-        if isinstance(c, dict):
-            c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
-        if c.dim() == 3:
-            c = c.squeeze(0)
-        c = c.float().to(self.device)
-
-        # Detect invalid positions (NaN or all zeros)
-        valid_mask = ~(torch.isnan(c).any(dim=-1) | (c.abs().sum(dim=-1) == 0))
-        valid_indices = torch.where(valid_mask)[0]
-
-        if valid_indices.numel() < len(ch_names):
-            print(f"[LeJEPABCI] Found {valid_indices.numel()} valid positions out of {len(ch_names)} channels")
-
-        return c[valid_indices], valid_indices
-
     def _get_coords(self, ch_names):
-        """Legacy method - returns all coords (may include invalid ones)."""
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
         c = self.pos_bank(clean_names)
         if isinstance(c, dict):
@@ -291,23 +195,13 @@ class EEGLeJEPABCIModel(AbstractModel):
             c = c.squeeze(0)
         return c.float().to(self.device)
 
-    def _train_epoch(self, dataloader, optimizer, scheduler, coords, valid_indices=None):
-        # Only set head to train mode; preserve backbone eval mode if frozen
-        self.model.head.train()
-        if self.freeze_encoder:
-            self.model.backbone.eval()  # Explicitly keep frozen encoder in eval mode
-        else:
-            self.model.backbone.train()
+    def _train_epoch(self, dataloader, optimizer, scheduler, coords):
+        self.model.train()
         running_loss = 0.0
         running_corrects = 0
         total_samples = 0
         for x, y_batch in tqdm(dataloader, desc="Training", leave=False):
             x, y_batch = x.to(self.device), y_batch.to(self.device).argmax(dim=1)
-
-            # Filter to only valid channels if needed
-            if valid_indices is not None:
-                x = x[:, valid_indices, :]
-
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
 
             optimizer.zero_grad()
@@ -327,7 +221,7 @@ class EEGLeJEPABCIModel(AbstractModel):
         epoch_acc = running_corrects / total_samples
         return epoch_loss, epoch_acc
 
-    def _validate_epoch(self, dataloader, coords, valid_indices=None):
+    def _validate_epoch(self, dataloader, coords):
         self.model.eval()
         running_loss = 0.0
         running_corrects = 0
@@ -335,11 +229,6 @@ class EEGLeJEPABCIModel(AbstractModel):
         with torch.no_grad():
             for x, y_batch in tqdm(dataloader, desc="Validation", leave=False):
                 x, y_batch = x.to(self.device), y_batch.to(self.device).argmax(dim=1)
-
-                # Filter to only valid channels if needed
-                if valid_indices is not None:
-                    x = x[:, valid_indices, :]
-
                 cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
                 logits = self.model(x, cb)
                 loss = self.model.loss_fn(logits, y_batch)
@@ -356,14 +245,7 @@ class EEGLeJEPABCIModel(AbstractModel):
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         task_name = meta[0]["task_name"]
         num_classes = n_unique_labels(task_name)
-        self.model = ConcreteLeJEPABCI(
-            num_classes=num_classes,
-            base_path=self.base_path,
-            version=self.version,
-            freeze_encoder=self.freeze_encoder,
-            config_path=self.config_path,
-            pretrained_path=self.pretrained_path,
-        ).to(self.device)
+        self.model = ConcreteLeJEPABCI(num_classes, self.pretrained_path, freeze_encoder=self.freeze_encoder).to(self.device)
 
         datasets = [self.cache.cache(make_dataset_lejepa)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
                     for X_, y_, m_ in zip(X, y, meta)]
@@ -394,7 +276,7 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         max_epochs = 30
         steps_per_epoch = math.ceil(sum(len(train_loader) for train_loader in train_loader_list))
-        max_lr = 1e-4
+        max_lr = 4e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
@@ -419,8 +301,8 @@ class EEGLeJEPABCIModel(AbstractModel):
             random.shuffle(train_pairs)
 
             for train_loader, ch_names in train_pairs:
-                coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
-                train_loss, train_acc = self._train_epoch(train_loader, optimizer, scheduler, coords, valid_indices)
+                coords = self._get_coords(ch_names)
+                train_loss, train_acc = self._train_epoch(train_loader, optimizer, scheduler, coords)
                 epoch_train_loss += train_loss
                 epoch_train_acc += train_acc
                 num_train_batches += 1
@@ -433,8 +315,8 @@ class EEGLeJEPABCIModel(AbstractModel):
                 epoch_val_acc = 0.0
                 num_val_batches = 0
                 for valid_loader, ch_names in zip(valid_loader_list, ch_names_list_val):
-                    coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
-                    val_loss, val_acc = self._validate_epoch(valid_loader, coords, valid_indices)
+                    coords = self._get_coords(ch_names)
+                    val_loss, val_acc = self._validate_epoch(valid_loader, coords)
                     epoch_val_loss += val_loss
                     epoch_val_acc += val_acc
                     num_val_batches += 1
@@ -504,13 +386,10 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         predictions = []
         for test_loader, ch_names in zip(test_loader_list, ch_names_list):
-            coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+            coords = self._get_coords(ch_names)
             preds_all = []
             for x in tqdm(test_loader, desc="BCI Predicting", leave=False):
                 x = x.to(self.device)
-                # Filter to only valid channels if needed
-                if valid_indices is not None:
-                    x = x[:, valid_indices, :]
                 cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
                 logits = self.model(x, cb)
                 preds_all.append(torch.argmax(logits, dim=1).cpu())

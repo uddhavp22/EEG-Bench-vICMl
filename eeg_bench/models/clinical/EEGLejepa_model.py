@@ -62,8 +62,6 @@ class ConcreteLeJEPAClinical(nn.Module):
         base_path=None,
         version=None,
         freeze_encoder=True,
-        config_path: Optional[Path] = None,
-        pretrained_path: Optional[Path] = None,
     ):
         super().__init__()
 
@@ -72,20 +70,23 @@ class ConcreteLeJEPAClinical(nn.Module):
         # ------------------------------------------------------------
         # Pretrained config / checkpoint resolution (SAFE)
         # ------------------------------------------------------------
-        if (config_path is None or pretrained_path is None) and base_path is not None and version is not None:
+        config_path = None
+        pretrained_path = None
+
+        if base_path is not None and version is not None:
             base_path = Path(base_path) / f"version_{version}"
 
             candidate_config = base_path / "config" / "config.pkl"
             candidate_ckpt = base_path / "checkpoints" / "last.ckpt"
 
-            if config_path is None and candidate_config.exists():
+            if candidate_config.exists():
                 config_path = candidate_config
-            elif config_path is None:
+            else:
                 print(f"[LeJEPAClinical] No config found at {candidate_config}. Using default config.")
 
-            if pretrained_path is None and candidate_ckpt.exists():
+            if candidate_ckpt.exists():
                 pretrained_path = candidate_ckpt
-            elif pretrained_path is None:
+            else:
                 print(f"[LeJEPAClinical] No checkpoint found at {candidate_ckpt}. Training from scratch.")
 
         # ------------------------------------------------------------
@@ -95,7 +96,6 @@ class ConcreteLeJEPAClinical(nn.Module):
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
-            print("Loaded Config!")
         else:
             raise 
             # cfg = EEGLEJEPAConfig(
@@ -150,31 +150,8 @@ class ConcreteLeJEPAClinical(nn.Module):
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             state = {k.replace("model.", ""): v for k, v in state.items()}
-
-            # DEBUG: Verify checkpoint keys match model keys
-            model_keys = set(self.backbone.state_dict().keys())
-            ckpt_keys = set(state.keys())
-            print(f"[LeJEPAClinical] Checkpoint keys (first 5): {list(ckpt_keys)[:5]}")
-            print(f"[LeJEPAClinical] Model keys (first 5): {list(model_keys)[:5]}")
-
-            # Load with strict=False but capture missing/unexpected
-            load_result = self.backbone.load_state_dict(state, strict=False)
-            missing_keys = load_result.missing_keys
-            unexpected_keys = load_result.unexpected_keys
-
-            matched_keys = model_keys & ckpt_keys
-            print(f"[LeJEPAClinical] Matched keys: {len(matched_keys)}/{len(model_keys)}")
-            print(f"[LeJEPAClinical] Missing keys: {len(missing_keys)}")
-            print(f"[LeJEPAClinical] Unexpected keys: {len(unexpected_keys)}")
-
-            if len(missing_keys) > 0:
-                print(f"[LeJEPAClinical] WARNING: Missing keys (first 5): {missing_keys[:5]}")
-            if len(unexpected_keys) > 0:
-                print(f"[LeJEPAClinical] WARNING: Unexpected keys (first 5): {unexpected_keys[:5]}")
-            if len(matched_keys) == 0:
-                print(f"[LeJEPAClinical] CRITICAL: No keys matched! Checkpoint may have wrong format.")
-
-            print(f"[LeJEPAClinical] Loaded pretrained weights from {pretrained_path}")
+            self.backbone.load_state_dict(state, strict=False)
+            print("[LeJEPAClinical] Loaded pretrained weights")
 
         # ------------------------------------------------------------
         # Freeze encoder if requested
@@ -189,7 +166,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim)) 
+        self.head = nn.Linear(DIM, out_dim)
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
 
@@ -198,16 +175,7 @@ class ConcreteLeJEPAClinical(nn.Module):
 
         B, C, T = x.shape
         n_chunks = T // self.chunk_length
-
-        # Handle case where data is shorter than one chunk
-        if n_chunks == 0:
-            # Pad to chunk_length if too short
-            pad_length = self.chunk_length - T
-            x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
-            n_chunks = 1
-            T = self.chunk_length
-
-        chunk_trunc = n_chunks * self.chunk_length
+        chunk_trunc = n_chunks * self.chunk_length if n_chunks else T
         x = x[:, :, :chunk_trunc]
 
         # Reshape into segments:
@@ -217,25 +185,20 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Merge batch and chunk dimensions for efficient processing:
         x = x.reshape(B * n_chunks, C, self.chunk_length)
 
-        # FIX: Expand coords to match chunked batch dimension
-        # coords shape: (B, C, 3) -> (B*n_chunks, C, 3)
-        coords = coords.unsqueeze(1).expand(-1, n_chunks, -1, -1).reshape(B * n_chunks, C, 3)
 
         outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
         cls = outputs["cls_token"]
-        # cls = outputs['cls_output']
-        # cls = outputs["sequence_embeddings"].mean(dim = 1)
 
         # Restore the batch and chunk dimensions:
         embedding_dim = cls.shape[1]
         cls = cls.view(B, n_chunks, embedding_dim)
-
+        
         # Simple aggregation: mean pooling over segments
         if cls.dim() == 3:
             cls = cls.mean(dim=1)
         logits = self.head(cls)
         if self.is_multilabel_task:
-            logits = logits.reshape(B, self.num_classes, -1)
+            logits = logits.reshape(x.shape[0], self.num_classes, -1)
         return logits
 
 class EEGLeJEPAClinicalModel(AbstractModel):
@@ -252,26 +215,22 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.freeze_encoder = freeze_encoder  # Store for use in fit()
 
         # Handle config vs legacy parameters
         if config is not None:
             # Use checkpoint path from config (get_checkpoint_path resolves full_path vs base_path+version)
             checkpoint_path = config.get_checkpoint_path()
             if checkpoint_path:
-                # Extract base_path and version from full path for config discovery
+                # Extract base_path and version from full path for ConcreteLeJEPAClinical
+                # which expects base_path/version_X/checkpoints/last.ckpt structure
                 ckpt_path = Path(checkpoint_path)
-                pretrained_path = ckpt_path
-                config_path = None
-                if ckpt_path.parent.name == "checkpoints":
+                if ckpt_path.name == "last.ckpt" and ckpt_path.parent.name == "checkpoints":
                     version_dir = ckpt_path.parent.parent
                     if version_dir.name.startswith("version_"):
                         base_path = str(version_dir.parent)
                         version = int(version_dir.name.replace("version_", ""))
-                        candidate_config = version_dir / "config" / "config.pkl"
-                        if candidate_config.exists():
-                            config_path = candidate_config
                     else:
+                        # full_path mode - pass checkpoint directly
                         base_path = None
                         version = None
                 else:
@@ -280,8 +239,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             else:
                 base_path = config.checkpoint_base_path
                 version = config.checkpoint_version
-                config_path = None
-                pretrained_path = None
             freeze_encoder = config.freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
@@ -289,10 +246,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Legacy mode - use parameters directly (with old defaults if not provided)
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
-            config_path = None
-            pretrained_path = None
 
         # Setup eegfm imports
+        #for uddhav set path directly
         _setup_eegfm_imports(eegfm_path)
 
         # Load position bank with HuggingFace fallback
@@ -303,26 +259,24 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             num_labels_per_chunk=num_labels_per_chunk,
             base_path=base_path,
             version=version,
-            freeze_encoder=freeze_encoder,
-            config_path=config_path,
-            pretrained_path=pretrained_path,
+            freeze_encoder=freeze_encoder
         ).to(self.device)
 
     def _load_position_bank(self, local_fallback_path: str):
-        """Load REVE position bank - try local first, fall back to HuggingFace."""
+        """Load REVE position bank - try HuggingFace first, fall back to local."""
         try:
-            logger.info(f"Attempting to load position bank from local path: {local_fallback_path}")
-            pos_bank = AutoModel.from_pretrained(
-                local_fallback_path,
-                trust_remote_code=True
-            ).to(self.device)
-            logger.info("Successfully loaded position bank from local storage.")
-            return pos_bank
-        except Exception as e:
-            logger.warning(f"Failed to load local model: {e}")
-            logger.info("Falling back to HuggingFace Hub (brain-bzh/reve-positions)...")
+            logger.info("Attempting to load position bank from HuggingFace Hub...")
             pos_bank = AutoModel.from_pretrained(
                 "brain-bzh/reve-positions",
+                trust_remote_code=True
+            ).to(self.device)
+            logger.info("Successfully loaded position bank from HuggingFace Hub")
+            return pos_bank
+        except Exception as e:
+            logger.warning(f"Failed to load from HuggingFace Hub: {e}")
+            logger.info(f"Falling back to local path: {local_fallback_path}")
+            pos_bank = AutoModel.from_pretrained(
+                local_fallback_path,
                 trust_remote_code=True
             ).to(self.device)
             return pos_bank
@@ -338,12 +292,12 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         # 1. Dataset Loading (matching LaBraM exact args)
-        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True, sfreq = 250)
+        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True)
 
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
-            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False, sfreq = 250)
+            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False)
 
         # 3. Validation Split (aligned with BCI: 15%)
         val_split = 0.15
@@ -372,10 +326,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             epochs=max_epochs,
             pct_start=0.1,
         )
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer, 
-        #     patience = 2,
-        # )
 
         # Early stopping setup (matching BCI)
         patience = 10
@@ -387,12 +337,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         coords_val = self._coords(dataset_val.ch_names)
 
         for epoch in range(1, max_epochs + 1):
-            # Only set head to train mode; preserve backbone eval mode if frozen
-            self.model.head.train()
-            if self.freeze_encoder:
-                self.model.backbone.eval()  # Explicitly keep frozen encoder in eval mode
-            else:
-                self.model.backbone.train()
+            self.model.train()
             total_loss = 0.0
             total_samples = 0
             correct = 0
@@ -451,8 +396,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Compute val metrics
             avg_val_loss = val_loss / val_samples if val_samples else 0.0
             val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
-
-            # scheduler.step(avg_val_loss)
 
             # Early stopping check
             if avg_val_loss < best_val_loss:
