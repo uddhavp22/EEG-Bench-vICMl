@@ -297,6 +297,24 @@ def main():
     # Factory functions for LUNA models
     def make_luna_clinical(num_classes=2, num_labels_per_chunk=None):
         return LUNAClinical(
+            num_classes = num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
+            biofoundation_path="BioFoundation",
+            freeze_backbone=True
+        )
+
+    # Factory functions for other models with freeze_encoder support
+    def make_labram_clinical(num_classes=2, num_labels_per_chunk=None):
+        return LaBraMClinical(num_classes=num_classes, 
+                              num_labels_per_chunk=num_labels_per_chunk,
+                              freeze_encoder=args.linear_probe)
+
+    def make_labram_bci():
+        return LaBraMBci(freeze_encoder=args.linear_probe)
+
+    def make_bendr_clinical(num_classes=2, num_labels_per_chunk=None):
+        return BENDRClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
             pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
@@ -350,7 +368,7 @@ def main():
     clinical_models_map = {
         "lda": BrainfeaturesLDA,
         "svm": BrainfeaturesSVM,
-        "labram": LaBraMClinical,
+        "labram": make_labram_clinical,
         "bendr": BENDRClinical,
         "neurogpt": NeuroGPTClinical,
         "lejepa": make_lejepa_clinical,
@@ -361,7 +379,7 @@ def main():
     bci_models_map = {
         "lda": CSPLDA,
         "svm": CSPSVM,
-        "labram": LaBraMBci,
+        "labram": make_labram_bci,
         "bendr": BENDRBci,
         "neurogpt": NeuroGPTBci,
         "reve": REVEBci,

@@ -41,10 +41,10 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
         logger.info(f"Added eegfm path to sys.path: {eegfm_path}")
 
     # Import eegfm modules
-    from eegfm.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
-    from eegfm.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
-    from eegfm.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
-    from eegfm.models.common import EncoderConfig as _EncoderConfig
+    from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
+    from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
+    from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
+    from eegfmchallenge.models.common import EncoderConfig as _EncoderConfig
 
     EEGLEJEPAConfig = _EEGLEJEPAConfig
     ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig
@@ -54,23 +54,56 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
 class ConcreteLeJEPABCI(nn.Module):
     def __init__(self, num_classes: int, pretrained_path: str | None = None, freeze_encoder: bool = True):
         super().__init__()
-        
-        DIM = 384
-        cfg = EEGLEJEPAConfig(
-            name="EEGLEJEPA",
-            dim=DIM,
-            proj_dim=16,
-            patch_size=25,
-            n_channels=128,
-            max_time=1500,
-            patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
-            channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
-            encoder_config=EncoderConfig(dim=384, depth=12, heads=6, use_flash_attn=True),
-            predictor_config=EncoderConfig(dim=128, depth=4, heads=4, use_flash_attn=True),
-            masking={"mask_ratio": 0.5, "block_size_range": [5, 10], "strategy_probs": [1.0, 0.0, 0.0]},
-            use_scaler=False,
-        )
+
+
+        # ------------------------------------------------------------
+        # Pretrained config / checkpoint resolution (matching clinical)
+        # ------------------------------------------------------------
+        if (config_path is None or pretrained_path is None) and base_path is not None and version is not None:
+            base_path_resolved = Path(base_path) / f"version_{version}"
+
+            candidate_config = base_path_resolved / "config" / "config.pkl"
+            candidate_ckpt = base_path_resolved / "checkpoints" / "last.ckpt"
+
+            if config_path is None and candidate_config.exists():
+                config_path = candidate_config
+            elif config_path is None:
+                print(f"[LeJEPABCI] No config found at {candidate_config}. Using default config.")
+
+            if pretrained_path is None and candidate_ckpt.exists():
+                pretrained_path = candidate_ckpt
+            elif pretrained_path is None:
+                print(f"[LeJEPABCI] No checkpoint found at {candidate_ckpt}. Training from scratch.")
+
+        # ------------------------------------------------------------
+        # Build model config
+        # ------------------------------------------------------------
+        if config_path is not None:
+            with open(config_path, "rb") as f:
+                pretrain_config = pickle.load(f)
+            cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+            print("[LeJEPABCI] Loaded Config!")
+        else:
+            cfg = EEGLEJEPAConfig(
+                name="EEGLEJEPA",
+                dim=DIM,
+                proj_dim=16,
+                patch_size=25,
+                n_channels=128,
+                max_time=1500,
+                patch_embedder=ConvPatchEmbedderConfig(name="ConvPatchEmbedder", preserve_channels=False),
+                channel_mixer_config=DynamicChannelMixerConfig(name="DynamicChannelMixer", coord_dim=3, output_channels=64),
+                encoder_config=EncoderConfig(dim=384, depth=12, heads=6, use_flash_attn=True),
+                predictor_config=EncoderConfig(dim=128, depth=4, heads=4, use_flash_attn=True),
+                masking={"mask_ratio": 0.5, "block_size_range": [5, 10], "strategy_probs": [1.0, 0.0, 0.0]},
+                use_scaler=False,
+            )
+
+        # ------------------------------------------------------------
+        # Build backbone
+        # ------------------------------------------------------------
         self.backbone = cfg.build()
+        DIM = self.backbone.dim
 
         if pretrained_path:
             ckpt = torch.load(pretrained_path, map_location="cpu")
@@ -175,6 +208,7 @@ class EEGLeJEPABCIModel(AbstractModel):
             logits = self.model(x, cb)
             loss = self.model.loss_fn(logits, y_batch)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
 

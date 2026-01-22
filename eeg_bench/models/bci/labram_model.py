@@ -46,7 +46,7 @@ def check_and_download_pretrained_model():
     return encoder_path
 
 class LaBraMBCIModel(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, freeze_encoder = True):
         super().__init__()
         
         checkpoint = torch.load(check_and_download_pretrained_model())
@@ -69,9 +69,11 @@ class LaBraMBCIModel(nn.Module):
                                 use_abs_pos_emb=True,
                                 init_values=0.1,)
         model.load_state_dict(new_checkpoint, strict=False)
-        for blk in model.blocks:
-            for p in blk.parameters():
-                p.requires_grad = False
+        if freeze_encoder:
+            # 1. Turn off gradients for EVERYTHING
+            for param in model.parameters():
+                param.requires_grad = False
+            model.eval()
         self.feature = model
         self.head = nn.Linear(200, num_classes)
         self.loss_fn = nn.CrossEntropyLoss()
