@@ -91,7 +91,6 @@ class LaBraMBCIModel(nn.Module):
             x = x / 100
             
             pred = self.feature.forward_features(x, input_chans=input_chans, return_all_tokens=False)
-            breakpoint()
             pred = self.head(pred.flatten(1))
 
             if self.is_multilabel_task:
