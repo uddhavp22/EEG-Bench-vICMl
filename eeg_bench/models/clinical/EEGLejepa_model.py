@@ -366,15 +366,19 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         
         if self.freeze_encoder:
-            # LINEAR PROBE: Simple setup, no warmup needed
-            max_lr = 1e-3  # Can use higher LR for linear probe
+            # LINEAR PROBE: ReduceLROnPlateau - adapts to actual convergence
+            max_lr = 1e-3
             optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-4)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                T_max=max_epochs,
-                eta_min=1e-6
+                mode='min',
+                factor=0.5,      # Halve LR when plateau
+                patience=3,      # Wait 3 epochs before reducing
+                min_lr=1e-6,
+                verbose=True
             )
-            use_step_per_batch = False  # Step once per epoch
+            use_step_per_batch = False
+            use_plateau_scheduler = True
         else:
             # FULL FINETUNE: Keep OneCycleLR with warmup
             max_lr = 4e-4
@@ -386,7 +390,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 epochs=max_epochs,
                 pct_start=0.1,
             )
-            use_step_per_batch = True  # Step every batch
+            use_step_per_batch = True
+            use_plateau_scheduler = False
 
         # Early stopping setup
         patience = 10
@@ -432,7 +437,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     correct += (preds == target).sum().item()
                     total_acc_samples += x.size(0)
 
-                # Manual memory cleanup like LaBraM
                 del x, yb, logits; torch.cuda.empty_cache()
 
             # Compute train metrics
@@ -441,7 +445,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
             # Step scheduler once per epoch for linear probe
             if not use_step_per_batch:
-                scheduler.step()
+                if use_plateau_scheduler:
+                    scheduler.step(avg_val_loss)  
+                else:
+                    scheduler.step()
 
             # Validation
             val_loss = 0.0
@@ -479,7 +486,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 patience_counter += 1
 
             # Logging (wandb or console)
-            current_lr = scheduler.get_last_lr()[0]
+            current_lr = optimizer.param_groups[0]['lr']  # More reliable way to get LR
             metrics = {
                 f"{self.name}/train_loss": train_loss,
                 f"{self.name}/train_acc": train_acc,
