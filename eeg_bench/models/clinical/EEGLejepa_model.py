@@ -325,6 +325,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 "brain-bzh/reve-positions",
                 trust_remote_code=True
             ).to(self.device)
+            logger.info("Successfully got hub position bank!")
             return pos_bank
 
     def _coords(self, ch_names):
@@ -358,26 +359,36 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
-        # Optimizer and Scheduler (matching BCI setup)
+        # Optimizer and Scheduler - DIFFERENT SETUP FOR LINEAR PROBE vs FULL FINETUNE
         max_epochs = 30
         steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 4e-4
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=max_lr,
-            steps_per_epoch=steps_per_epoch,
-            epochs=max_epochs,
-            pct_start=0.1,
-        )
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer, 
-        #     patience = 2,
-        # )
+        
+        if self.freeze_encoder:
+            # LINEAR PROBE: Simple setup, no warmup needed
+            max_lr = 1e-3  # Can use higher LR for linear probe
+            optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-4)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max_epochs,
+                eta_min=1e-6
+            )
+            use_step_per_batch = False  # Step once per epoch
+        else:
+            # FULL FINETUNE: Keep OneCycleLR with warmup
+            max_lr = 4e-4
+            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=1e-4)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch,
+                epochs=max_epochs,
+                pct_start=0.1,
+            )
+            use_step_per_batch = True  # Step every batch
 
-        # Early stopping setup (matching BCI)
+        # Early stopping setup
         patience = 10
         patience_counter = 0
         best_val_loss = float("inf")
@@ -410,7 +421,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
                 optimizer.step()
-                scheduler.step() 
+                if use_step_per_batch:
+                    scheduler.step()
 
                 total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)
@@ -426,6 +438,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Compute train metrics
             train_loss = total_loss / total_samples if total_samples else 0.0
             train_acc = correct / total_acc_samples if total_acc_samples else 0.0
+
+            # Step scheduler once per epoch for linear probe
+            if not use_step_per_batch:
+                scheduler.step()
 
             # Validation
             val_loss = 0.0
