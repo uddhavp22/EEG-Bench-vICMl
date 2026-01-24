@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import sys
 import logging
@@ -353,6 +353,88 @@ class EEGLeJEPABCIModel(AbstractModel):
         epoch_acc = running_corrects / total_samples
         return epoch_loss, epoch_acc
 
+    @torch.no_grad()
+    def _extract_embeddings(self, dataloader, coords, valid_indices=None):
+        """Extract CLS token embeddings from frozen encoder in a single pass."""
+        self.model.backbone.eval()
+        embeddings_list = []
+        labels_list = []
+
+        for x, y_batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
+            x = x.to(self.device)
+            y_batch = y_batch.to(self.device).argmax(dim=1)
+
+            # Filter to only valid channels if needed
+            if valid_indices is not None:
+                x = x[:, valid_indices, :]
+
+            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+
+            # Get CLS token from backbone
+            outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
+            cls = outputs["cls_token"]
+            if cls.dim() == 3:
+                cls = cls.mean(dim=1)
+
+            embeddings_list.append(cls.cpu())
+            labels_list.append(y_batch.cpu())
+
+        embeddings = torch.cat(embeddings_list, dim=0)
+        labels = torch.cat(labels_list, dim=0)
+        return embeddings, labels
+
+    def _train_epoch_cached(self, dataloader, optimizer, scheduler):
+        """Train only the head on cached embeddings."""
+        self.model.head.train()
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0
+
+        for embeddings, y_batch in dataloader:
+            embeddings = embeddings.to(self.device)
+            y_batch = y_batch.to(self.device)
+
+            optimizer.zero_grad()
+            logits = self.model.head(embeddings)
+            loss = self.model.loss_fn(logits, y_batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.head.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
+
+            running_loss += loss.item() * embeddings.size(0)
+            preds = torch.argmax(logits, dim=1)
+            running_corrects += (preds == y_batch).sum().item()
+            total_samples += embeddings.size(0)
+
+        epoch_loss = running_loss / total_samples
+        epoch_acc = running_corrects / total_samples
+        return epoch_loss, epoch_acc
+
+    def _validate_epoch_cached(self, dataloader):
+        """Validate on cached embeddings."""
+        self.model.head.eval()
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for embeddings, y_batch in dataloader:
+                embeddings = embeddings.to(self.device)
+                y_batch = y_batch.to(self.device)
+
+                logits = self.model.head(embeddings)
+                loss = self.model.loss_fn(logits, y_batch)
+
+                running_loss += loss.item() * embeddings.size(0)
+                preds = torch.argmax(logits, dim=1)
+                running_corrects += (preds == y_batch).sum().item()
+                total_samples += embeddings.size(0)
+
+        epoch_loss = running_loss / total_samples
+        epoch_acc = running_corrects / total_samples
+        return epoch_loss, epoch_acc
+
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         task_name = meta[0]["task_name"]
         num_classes = n_unique_labels(task_name)
@@ -383,111 +465,210 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         batch_size = 64
         num_workers = 8
-        train_loader_list = [
-            DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True, pin_memory=True)
-            for train_dataset in dataset_train_list
-        ]
-        valid_loader_list = [
-            DataLoader(valid_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
-            for valid_dataset in dataset_val_list
-        ]
-
         max_epochs = 30
-        steps_per_epoch = math.ceil(sum(len(train_loader) for train_loader in train_loader_list))
-        max_lr = 1e-4
-
-        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=max_lr,
-            steps_per_epoch=steps_per_epoch,
-            epochs=max_epochs,
-            pct_start=0.2,
-        )
-
         patience = 10
-        patience_counter = 0
-        best_val_loss = float("inf")
-        best_model_state = None
 
-        for epoch in range(1, max_epochs + 1):
-            epoch_train_loss = 0.0
-            epoch_train_acc = 0.0
-            num_train_batches = 0
-            train_pairs = list(zip(train_loader_list, ch_names_list_train))
-            random.shuffle(train_pairs)
-
-            for train_loader, ch_names in train_pairs:
+        if self.freeze_encoder:
+            # =============================================
+            # CACHED EMBEDDINGS PATH (frozen encoder)
+            # =============================================
+            print("[LeJEPABCI] Using cached embeddings (freeze_encoder=True)")
+            
+            # Extract embeddings from all datasets in a single pass
+            train_embeddings_list = []
+            train_labels_list = []
+            for dataset, ch_names in zip(dataset_train_list, ch_names_list_train):
+                loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
                 coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
-                train_loss, train_acc = self._train_epoch(train_loader, optimizer, scheduler, coords, valid_indices)
-                epoch_train_loss += train_loss
-                epoch_train_acc += train_acc
-                num_train_batches += 1
-
-            avg_train_loss = epoch_train_loss / num_train_batches
-            avg_train_acc = epoch_train_acc / num_train_batches
-
-            if valid_loader_list:
-                epoch_val_loss = 0.0
-                epoch_val_acc = 0.0
-                num_val_batches = 0
-                for valid_loader, ch_names in zip(valid_loader_list, ch_names_list_val):
-                    coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
-                    val_loss, val_acc = self._validate_epoch(valid_loader, coords, valid_indices)
-                    epoch_val_loss += val_loss
-                    epoch_val_acc += val_acc
-                    num_val_batches += 1
-
-                avg_val_loss = epoch_val_loss / num_val_batches
-                avg_val_acc = epoch_val_acc / num_val_batches
-
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
+                emb, lbl = self._extract_embeddings(loader, coords, valid_indices)
+                train_embeddings_list.append(emb)
+                train_labels_list.append(lbl)
+            
+            val_embeddings_list = []
+            val_labels_list = []
+            for dataset, ch_names in zip(dataset_val_list, ch_names_list_val):
+                loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
+                coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+                emb, lbl = self._extract_embeddings(loader, coords, valid_indices)
+                val_embeddings_list.append(emb)
+                val_labels_list.append(lbl)
+            
+            # Combine all embeddings into single TensorDatasets
+            all_train_emb = torch.cat(train_embeddings_list, dim=0)
+            all_train_lbl = torch.cat(train_labels_list, dim=0)
+            cached_train_dataset = TensorDataset(all_train_emb, all_train_lbl)
+            
+            all_val_emb = torch.cat(val_embeddings_list, dim=0)
+            all_val_lbl = torch.cat(val_labels_list, dim=0)
+            cached_val_dataset = TensorDataset(all_val_emb, all_val_lbl)
+            
+            print(f"[LeJEPABCI] Cached {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
+            
+            # Use larger batch size for cached training (no encoder memory needed)
+            cached_batch_size = batch_size * 4  # 256
+            cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True)
+            cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True)
+            
+            # Setup optimizer for head only
+            steps_per_epoch = math.ceil(len(cached_train_loader))
+            max_lr = 1e-4
+            
+            optimizer = optim.AdamW(self.model.head.parameters(), lr=1e-6, weight_decay=0.01)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch,
+                epochs=max_epochs,
+                pct_start=0.2,
+            )
+            
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
+            
+            for epoch in range(1, max_epochs + 1):
+                train_loss, train_acc = self._train_epoch_cached(cached_train_loader, optimizer, scheduler)
+                val_loss, val_acc = self._validate_epoch_cached(cached_val_loader)
+                
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
                     best_model_state = self.model.state_dict()
                     patience_counter = 0
                 else:
                     patience_counter += 1
-
-                # Get current learning rate
+                
                 current_lr = scheduler.get_last_lr()[0]
-
+                
                 if self.wandb_run:
                     wandb_utils.log(
                         {
-                            f"{self.name}/train_loss": avg_train_loss,
-                            f"{self.name}/train_acc": avg_train_acc,
-                            f"{self.name}/val_loss": avg_val_loss,
-                            f"{self.name}/val_acc": avg_val_acc,
+                            f"{self.name}/train_loss": train_loss,
+                            f"{self.name}/train_acc": train_acc,
+                            f"{self.name}/val_loss": val_loss,
+                            f"{self.name}/val_acc": val_acc,
                             f"{self.name}/lr": current_lr,
                         },
                         step=epoch,
                     )
-
-                # Always print to console for visibility
+                
                 print(f"[Epoch {epoch:02d}/{max_epochs}] "
-                      f"train_loss={avg_train_loss:.4f} train_acc={avg_train_acc:.4f} | "
-                      f"val_loss={avg_val_loss:.4f} val_acc={avg_val_acc:.4f} | "
+                      f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                      f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} | "
                       f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
-
+                
                 if patience_counter >= patience:
                     print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
                     break
-            else:
-                if self.wandb_run:
-                    wandb_utils.log(
-                        {
-                            f"{self.name}/train_loss": avg_train_loss,
-                            f"{self.name}/train_acc": avg_train_acc,
-                        },
-                        step=epoch,
-                    )
-                # Console output for no-validation case
-                print(f"[Epoch {epoch:02d}/{max_epochs}] "
-                      f"train_loss={avg_train_loss:.4f} train_acc={avg_train_acc:.4f}")
+            
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
+        
+        else:
+            # =============================================
+            # FULL FORWARD PASS PATH (fine-tuning encoder)
+            # =============================================
+            print("[LeJEPABCI] Using full forward pass (freeze_encoder=False)")
+            
+            train_loader_list = [
+                DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True, pin_memory=True)
+                for train_dataset in dataset_train_list
+            ]
+            valid_loader_list = [
+                DataLoader(valid_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
+                for valid_dataset in dataset_val_list
+            ]
 
-        if best_model_state is not None:
-            self.model.load_state_dict(best_model_state)
+            steps_per_epoch = math.ceil(sum(len(train_loader) for train_loader in train_loader_list))
+            max_lr = 1e-4
+
+            trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch,
+                epochs=max_epochs,
+                pct_start=0.2,
+            )
+
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
+
+            for epoch in range(1, max_epochs + 1):
+                epoch_train_loss = 0.0
+                epoch_train_acc = 0.0
+                num_train_batches = 0
+                train_pairs = list(zip(train_loader_list, ch_names_list_train))
+                random.shuffle(train_pairs)
+
+                for train_loader, ch_names in train_pairs:
+                    coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+                    train_loss, train_acc = self._train_epoch(train_loader, optimizer, scheduler, coords, valid_indices)
+                    epoch_train_loss += train_loss
+                    epoch_train_acc += train_acc
+                    num_train_batches += 1
+
+                avg_train_loss = epoch_train_loss / num_train_batches
+                avg_train_acc = epoch_train_acc / num_train_batches
+
+                if valid_loader_list:
+                    epoch_val_loss = 0.0
+                    epoch_val_acc = 0.0
+                    num_val_batches = 0
+                    for valid_loader, ch_names in zip(valid_loader_list, ch_names_list_val):
+                        coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+                        val_loss, val_acc = self._validate_epoch(valid_loader, coords, valid_indices)
+                        epoch_val_loss += val_loss
+                        epoch_val_acc += val_acc
+                        num_val_batches += 1
+
+                    avg_val_loss = epoch_val_loss / num_val_batches
+                    avg_val_acc = epoch_val_acc / num_val_batches
+
+                    if avg_val_loss < best_val_loss:
+                        best_val_loss = avg_val_loss
+                        best_model_state = self.model.state_dict()
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+
+                    current_lr = scheduler.get_last_lr()[0]
+
+                    if self.wandb_run:
+                        wandb_utils.log(
+                            {
+                                f"{self.name}/train_loss": avg_train_loss,
+                                f"{self.name}/train_acc": avg_train_acc,
+                                f"{self.name}/val_loss": avg_val_loss,
+                                f"{self.name}/val_acc": avg_val_acc,
+                                f"{self.name}/lr": current_lr,
+                            },
+                            step=epoch,
+                        )
+
+                    print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                          f"train_loss={avg_train_loss:.4f} train_acc={avg_train_acc:.4f} | "
+                          f"val_loss={avg_val_loss:.4f} val_acc={avg_val_acc:.4f} | "
+                          f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
+
+                    if patience_counter >= patience:
+                        print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
+                        break
+                else:
+                    if self.wandb_run:
+                        wandb_utils.log(
+                            {
+                                f"{self.name}/train_loss": avg_train_loss,
+                                f"{self.name}/train_acc": avg_train_acc,
+                            },
+                            step=epoch,
+                        )
+                    print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                          f"train_loss={avg_train_loss:.4f} train_acc={avg_train_acc:.4f}")
+
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
 
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
