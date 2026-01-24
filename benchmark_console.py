@@ -28,6 +28,7 @@ from eeg_bench.models.clinical import (
     NeuroGPTModel as NeuroGPTClinical,
     EEGLeJEPAClinicalModel as LeJEPAClinical,
     REVEClinicalModel as REVEClinical,
+    LUNAClinicalModel as LUNAClinical,
 )
 from eeg_bench.models.bci import (
     CSPLDAModel as CSPLDA,
@@ -36,7 +37,8 @@ from eeg_bench.models.bci import (
     BENDRModel as BENDRBci,
     NeuroGPTModel as NeuroGPTBci,
     REVEBenchmarkModel as REVEBci,
-    EEGLeJEPABCIModel as LeJEPABci
+    EEGLeJEPABCIModel as LeJEPABci, 
+    LUNABCIModel as LUNABci,
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks, subsample_data_stratified
@@ -402,6 +404,7 @@ def main():
         "neurogpt": make_neurogpt_clinical,
         "lejepa": make_lejepa_clinical,
         "reve": make_reve_clinical,
+        "luna": LUNAClinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
@@ -410,7 +413,9 @@ def main():
         "bendr": make_bendr_bci,
         "neurogpt": make_neurogpt_bci,
         "reve": make_reve_bci,
-        "lejepa": make_lejepa_bci
+        "lejepa": make_lejepa_bci,
+        "luna": LUNABci,
+
     }
 
     wandb_run = None
