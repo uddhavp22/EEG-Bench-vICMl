@@ -369,6 +369,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
             cb = cb.reshape(B * n_chunks, C, 3)
 
+            # breakpoint()
+
             # Forward through backbone
             outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
             cls = outputs["cls_token"]
@@ -496,7 +498,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             
 
             max_lr = 1e-3
-            optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-4)
+            optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-3)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=max_epochs,
@@ -504,7 +506,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             )
 
             
-
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
             for epoch in range(1, max_epochs + 1):
                 train_loss, train_acc = self._train_epoch_cached(cached_train_loader, optimizer, scheduler)
                 val_loss, val_acc = self._validate_epoch_cached(cached_val_loader)
