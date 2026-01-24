@@ -189,7 +189,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim)) 
+        self.head = nn.Linear(DIM, out_dim) # nn.Sequential(nn.LayerNorm(DIM), 
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
 
@@ -369,7 +369,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
             cb = cb.reshape(B * n_chunks, C, 3)
 
-            # breakpoint()
 
             # Forward through backbone
             outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
@@ -488,7 +487,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             print(f"[LeJEPAClinical] Cached {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
 
             # Use larger batch size for cached training (no encoder memory needed)
-            cached_batch_size = bs * 4  # 256 for chunked, 4 for full recordings
+            cached_batch_size = bs * 8  # 256 for chunked, 4 for full recordings
             cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True)
             cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True)
 
@@ -504,6 +503,13 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 T_max=max_epochs,
                 eta_min=1e-6
             )
+            # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            #     optimizer,
+            #     max_lr=max_lr,
+            #     steps_per_epoch=steps_per_epoch,
+            #     epochs=max_epochs,
+            #     pct_start=0.1,
+            # )
 
             
             patience_counter = 0
