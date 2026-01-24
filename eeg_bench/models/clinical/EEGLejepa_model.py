@@ -375,7 +375,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 factor=0.5,      # Halve LR when plateau
                 patience=3,      # Wait 3 epochs before reducing
                 min_lr=1e-6,
-                verbose=True
+                # verbose=True
             )
             use_step_per_batch = False
             use_plateau_scheduler = True
@@ -443,13 +443,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             train_loss = total_loss / total_samples if total_samples else 0.0
             train_acc = correct / total_acc_samples if total_acc_samples else 0.0
 
-            # Step scheduler once per epoch for linear probe
-            if not use_step_per_batch:
-                if use_plateau_scheduler:
-                    scheduler.step(avg_val_loss)  
-                else:
-                    scheduler.step()
-
             # Validation
             val_loss = 0.0
             val_samples = 0
@@ -474,6 +467,14 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # Compute val metrics
             avg_val_loss = val_loss / val_samples if val_samples else 0.0
             val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+
+
+            # Step scheduler once per epoch for linear probe
+            if not use_step_per_batch:
+                if use_plateau_scheduler:
+                    scheduler.step(avg_val_loss)  
+                else:
+                    scheduler.step()
 
             # scheduler.step(avg_val_loss)
 
