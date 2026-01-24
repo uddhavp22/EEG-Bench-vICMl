@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import pickle
 from collections import Counter
@@ -334,16 +334,124 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
         return c.squeeze(0).to(self.device).float() if c.dim() == 3 else c.to(self.device).float()
 
+    @torch.no_grad()
+    def _extract_embeddings_clinical(self, dataloader, coords):
+        """Extract averaged embeddings from frozen encoder (handles chunking internally)."""
+        self.model.backbone.eval()
+        embeddings_list = []
+        labels_list = []
+        indices_list = []
+
+        chunk_length = self.model.chunk_length  # 4000 samples = 20s at 200Hz
+
+        for batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
+            x, yb, idx = batch
+            x = x.to(self.device)
+            B, C, T = x.shape
+
+            # Handle chunking (same logic as ConcreteLeJEPAClinical.forward)
+            n_chunks = T // chunk_length
+            if n_chunks == 0:
+                pad_length = chunk_length - T
+                x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
+                n_chunks = 1
+                T = chunk_length
+
+            chunk_trunc = n_chunks * chunk_length
+            x = x[:, :, :chunk_trunc]
+
+            # Reshape into chunks
+            x = x.view(B, C, n_chunks, chunk_length)
+            x = x.permute(0, 2, 1, 3)
+            x = x.reshape(B * n_chunks, C, chunk_length)
+
+            # Expand coords for all chunks
+            cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
+            cb = cb.reshape(B * n_chunks, C, 3)
+
+            # Forward through backbone
+            outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
+            cls = outputs["cls_token"]
+
+            # Reshape and average across chunks
+            embedding_dim = cls.shape[1]
+            cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)  # (B, dim)
+
+            embeddings_list.append(cls.cpu())
+            # Handle different label formats
+            if yb.dim() == 2:
+                labels_list.append(yb.argmax(dim=1).cpu())
+            else:
+                labels_list.append(yb.cpu())
+            indices_list.append(idx.cpu())
+
+        embeddings = torch.cat(embeddings_list, dim=0)
+        labels = torch.cat(labels_list, dim=0)
+        indices = torch.cat(indices_list, dim=0)
+        return embeddings, labels, indices
+
+    def _train_epoch_cached(self, dataloader, optimizer, scheduler):
+        """Train only the head on cached embeddings."""
+        self.model.head.train()
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0
+
+        for embeddings, y_batch in dataloader:
+            embeddings = embeddings.to(self.device)
+            y_batch = y_batch.to(self.device)
+
+            optimizer.zero_grad()
+            logits = self.model.head(embeddings)
+            loss = self.model.loss_fn(logits, y_batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.head.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
+
+            running_loss += loss.item() * embeddings.size(0)
+            preds = torch.argmax(logits, dim=1)
+            running_corrects += (preds == y_batch).sum().item()
+            total_samples += embeddings.size(0)
+
+        epoch_loss = running_loss / total_samples
+        epoch_acc = running_corrects / total_samples
+        return epoch_loss, epoch_acc
+
+    def _validate_epoch_cached(self, dataloader):
+        """Validate on cached embeddings."""
+        self.model.head.eval()
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for embeddings, y_batch in dataloader:
+                embeddings = embeddings.to(self.device)
+                y_batch = y_batch.to(self.device)
+
+                logits = self.model.head(embeddings)
+                loss = self.model.loss_fn(logits, y_batch)
+
+                running_loss += loss.item() * embeddings.size(0)
+                preds = torch.argmax(logits, dim=1)
+                running_corrects += (preds == y_batch).sum().item()
+                total_samples += embeddings.size(0)
+
+        epoch_loss = running_loss / total_samples
+        epoch_acc = running_corrects / total_samples
+        return epoch_loss, epoch_acc
+
     def fit(self, X, y, meta) -> None:
         task_name = meta[0]["task_name"]
 
         # 1. Dataset Loading (matching LaBraM exact args)
-        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = True, sfreq = 250)
+        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True, sfreq=250)
 
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
-            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache = False, sfreq = 250)
+            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False, sfreq=250)
 
         # 3. Validation Split (aligned with BCI: 15%)
         val_split = 0.15
@@ -358,137 +466,206 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
-        # Optimizer and Scheduler (matching BCI setup)
         max_epochs = 30
-        steps_per_epoch = math.ceil(len(train_loader))
-        max_lr = 4e-4
-
-        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=max_lr,
-            steps_per_epoch=steps_per_epoch,
-            epochs=max_epochs,
-            pct_start=0.1,
-        )
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer, 
-        #     patience = 2,
-        # )
-
-        # Early stopping setup (matching BCI)
         patience = 10
-        patience_counter = 0
-        best_val_loss = float("inf")
-        best_model_state = None
 
         coords_train = self._coords(dataset_train.ch_names)
         coords_val = self._coords(dataset_val.ch_names)
 
-        for epoch in range(1, max_epochs + 1):
-            # Only set head to train mode; preserve backbone eval mode if frozen
-            self.model.head.train()
-            if self.freeze_encoder:
-                self.model.backbone.eval()  # Explicitly keep frozen encoder in eval mode
-            else:
+        if self.freeze_encoder:
+            # =============================================
+            # CACHED EMBEDDINGS PATH (frozen encoder)
+            # =============================================
+            print("[LeJEPAClinical] Using cached embeddings (freeze_encoder=True)")
+
+            # Extract embeddings in a single pass
+            train_emb, train_lbl, _ = self._extract_embeddings_clinical(train_loader, coords_train)
+            val_emb, val_lbl, _ = self._extract_embeddings_clinical(val_loader, coords_val)
+
+            cached_train_dataset = TensorDataset(train_emb, train_lbl)
+            cached_val_dataset = TensorDataset(val_emb, val_lbl)
+
+            print(f"[LeJEPAClinical] Cached {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
+
+            # Use larger batch size for cached training (no encoder memory needed)
+            cached_batch_size = bs * 4  # 256 for chunked, 4 for full recordings
+            cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True)
+            cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True)
+
+            # Setup optimizer for head only
+            steps_per_epoch = math.ceil(len(cached_train_loader))
+            max_lr = 4e-4
+
+            optimizer = optim.AdamW(self.model.head.parameters(), lr=1e-6, weight_decay=0.01)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch,
+                epochs=max_epochs,
+                pct_start=0.1,
+            )
+
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
+
+            for epoch in range(1, max_epochs + 1):
+                train_loss, train_acc = self._train_epoch_cached(cached_train_loader, optimizer, scheduler)
+                val_loss, val_acc = self._validate_epoch_cached(cached_val_loader)
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                current_lr = scheduler.get_last_lr()[0]
+
+                if self.wandb_run:
+                    wandb_utils.log(
+                        {
+                            f"{self.name}/train_loss": train_loss,
+                            f"{self.name}/train_acc": train_acc,
+                            f"{self.name}/val_loss": val_loss,
+                            f"{self.name}/val_acc": val_acc,
+                            f"{self.name}/lr": current_lr,
+                        },
+                        step=epoch,
+                    )
+
+                print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                      f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                      f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} | "
+                      f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
+
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
+                    break
+
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
+
+        else:
+            # =============================================
+            # FULL FORWARD PASS PATH (fine-tuning encoder)
+            # =============================================
+            print("[LeJEPAClinical] Using full forward pass (freeze_encoder=False)")
+
+            steps_per_epoch = math.ceil(len(train_loader))
+            max_lr = 4e-4
+
+            trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch,
+                epochs=max_epochs,
+                pct_start=0.1,
+            )
+
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
+
+            for epoch in range(1, max_epochs + 1):
+                # Only set head to train mode; preserve backbone eval mode if frozen
+                self.model.head.train()
                 self.model.backbone.train()
-            total_loss = 0.0
-            total_samples = 0
-            correct = 0
-            total_acc_samples = 0
-            for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs}", leave=False):
-                x, yb = x.to(self.device), yb.to(self.device)
-                cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
-
-
-                optimizer.zero_grad()
-                logits = self.model(x, cb)
-                loss = self.model.loss_fn(logits, yb)
-                loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                optimizer.step()
-                scheduler.step() 
-
-                total_loss += loss.item() * x.size(0)
-                total_samples += x.size(0)
-                if logits.dim() == 2:
-                    preds = torch.argmax(logits, dim=1)
-                    target = yb if yb.dim() == 1 else yb.argmax(dim=1)
-                    correct += (preds == target).sum().item()
-                    total_acc_samples += x.size(0)
-
-                # Manual memory cleanup like LaBraM
-                del x, yb, logits; torch.cuda.empty_cache()
-
-            # Compute train metrics
-            train_loss = total_loss / total_samples if total_samples else 0.0
-            train_acc = correct / total_acc_samples if total_acc_samples else 0.0
-
-            # Validation
-            val_loss = 0.0
-            val_samples = 0
-            val_correct = 0
-            val_acc_samples = 0
-            self.model.eval()
-            with torch.no_grad():
-                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}/{max_epochs}", leave=False):
+                total_loss = 0.0
+                total_samples = 0
+                correct = 0
+                total_acc_samples = 0
+                for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs}", leave=False):
                     x, yb = x.to(self.device), yb.to(self.device)
-                    cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
+                    cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
+
+                    optimizer.zero_grad()
                     logits = self.model(x, cb)
                     loss = self.model.loss_fn(logits, yb)
-                    val_loss += loss.item() * x.size(0)
-                    val_samples += x.size(0)
+                    loss.backward()
+
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                    optimizer.step()
+                    scheduler.step()
+
+                    total_loss += loss.item() * x.size(0)
+                    total_samples += x.size(0)
                     if logits.dim() == 2:
                         preds = torch.argmax(logits, dim=1)
                         target = yb if yb.dim() == 1 else yb.argmax(dim=1)
-                        val_correct += (preds == target).sum().item()
-                        val_acc_samples += x.size(0)
+                        correct += (preds == target).sum().item()
+                        total_acc_samples += x.size(0)
+
+                    # Manual memory cleanup like LaBraM
                     del x, yb, logits; torch.cuda.empty_cache()
 
-            # Compute val metrics
-            avg_val_loss = val_loss / val_samples if val_samples else 0.0
-            val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+                # Compute train metrics
+                train_loss = total_loss / total_samples if total_samples else 0.0
+                train_acc = correct / total_acc_samples if total_acc_samples else 0.0
 
-            # scheduler.step(avg_val_loss)
+                # Validation
+                val_loss = 0.0
+                val_samples = 0
+                val_correct = 0
+                val_acc_samples = 0
+                self.model.eval()
+                with torch.no_grad():
+                    for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}/{max_epochs}", leave=False):
+                        x, yb = x.to(self.device), yb.to(self.device)
+                        cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
+                        logits = self.model(x, cb)
+                        loss = self.model.loss_fn(logits, yb)
+                        val_loss += loss.item() * x.size(0)
+                        val_samples += x.size(0)
+                        if logits.dim() == 2:
+                            preds = torch.argmax(logits, dim=1)
+                            target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                            val_correct += (preds == target).sum().item()
+                            val_acc_samples += x.size(0)
+                        del x, yb, logits; torch.cuda.empty_cache()
 
-            # Early stopping check
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-                patience_counter = 0
-            else:
-                patience_counter += 1
+                # Compute val metrics
+                avg_val_loss = val_loss / val_samples if val_samples else 0.0
+                val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
 
-            # Logging (wandb or console)
-            current_lr = scheduler.get_last_lr()[0]
-            metrics = {
-                f"{self.name}/train_loss": train_loss,
-                f"{self.name}/train_acc": train_acc,
-                f"{self.name}/val_loss": avg_val_loss,
-                f"{self.name}/val_acc": val_acc,
-                f"{self.name}/lr": current_lr,
-            }
+                # Early stopping check
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
 
-            if self.wandb_run:
-                wandb_utils.log(metrics, step=epoch)
+                # Logging (wandb or console)
+                current_lr = scheduler.get_last_lr()[0]
+                metrics = {
+                    f"{self.name}/train_loss": train_loss,
+                    f"{self.name}/train_acc": train_acc,
+                    f"{self.name}/val_loss": avg_val_loss,
+                    f"{self.name}/val_acc": val_acc,
+                    f"{self.name}/lr": current_lr,
+                }
 
-            # Always print to console for visibility
-            print(f"[Epoch {epoch:02d}/{max_epochs}] "
-                  f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
-                  f"val_loss={avg_val_loss:.4f} val_acc={val_acc:.4f} | "
-                  f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
+                if self.wandb_run:
+                    wandb_utils.log(metrics, step=epoch)
 
-            # Early stopping trigger
-            if patience_counter >= patience:
-                print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
-                break
+                # Always print to console for visibility
+                print(f"[Epoch {epoch:02d}/{max_epochs}] "
+                      f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                      f"val_loss={avg_val_loss:.4f} val_acc={val_acc:.4f} | "
+                      f"lr={current_lr:.2e} patience={patience_counter}/{patience}")
 
-        # Restore best model
-        if best_model_state is not None:
-            self.model.load_state_dict(best_model_state)
+                # Early stopping trigger
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered at epoch {epoch} (patience={patience})")
+                    break
+
+            # Restore best model
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
             
 
 
