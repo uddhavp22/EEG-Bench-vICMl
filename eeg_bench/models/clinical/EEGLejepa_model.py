@@ -493,22 +493,20 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True)
             cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True)
 
-            # Setup optimizer for head only
-            steps_per_epoch = math.ceil(len(cached_train_loader))
-            max_lr = 4e-4
+            steps_per_epoch = math.ceil(len(train_loader))
 
-            optimizer = optim.AdamW(self.model.head.parameters(), lr=1e-6, weight_decay=0.01)
-            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+            
+
+            max_lr = 1e-3
+            optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-4)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                max_lr=max_lr,
-                steps_per_epoch=steps_per_epoch,
-                epochs=max_epochs,
-                pct_start=0.1,
+                T_max=max_epochs,
+                eta_min=1e-6
             )
 
-            patience_counter = 0
-            best_val_loss = float("inf")
-            best_model_state = None
+            
 
             for epoch in range(1, max_epochs + 1):
                 train_loss, train_acc = self._train_epoch_cached(cached_train_loader, optimizer, scheduler)
