@@ -329,11 +329,44 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             return pos_bank
 
     def _coords(self, ch_names):
+        """
+        Get 3D coordinates for channel names.
+        Handles bipolar channels (e.g., 'C3-P3') by computing midpoint of the two electrodes.
+        """
         names = [c.replace("EEG", "").strip() for c in ch_names]
-        c = self.pos_bank(names)
-        if isinstance(c, dict):
-            c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
-        return c.squeeze(0).to(self.device).float() if c.dim() == 3 else c.to(self.device).float()
+        
+        # Collect all unique electrode names (split bipolar channels)
+        all_electrodes = set()
+        for name in names:
+            if '-' in name:
+                parts = name.split('-')
+                all_electrodes.update(parts)
+            else:
+                all_electrodes.add(name)
+        
+        # Query position bank once for all electrodes
+        all_electrodes = list(all_electrodes)
+        try:
+            c = self.pos_bank(all_electrodes)
+            if isinstance(c, dict):
+                c = c.get("positions", c.get("coords", c.get("last_hidden_state")))
+            if c.dim() == 3:
+                c = c.squeeze(0)
+            coords_dict = {name: c[i] for i, name in enumerate(all_electrodes)}
+        except Exception as e:
+            logger.warning(f"Position bank error: {e}. Using zeros.")
+            return torch.zeros(len(names), 3, device=self.device, dtype=torch.float32)
+        
+        # Build output: single electrodes directly, bipolar as midpoints
+        output = []
+        for name in names:
+            if '-' in name:
+                e1, e2 = name.split('-')[:2]
+                output.append((coords_dict.get(e1, torch.zeros(3)) + coords_dict.get(e2, torch.zeros(3))) / 2)
+            else:
+                output.append(coords_dict.get(name, torch.zeros(3)))
+        
+        return torch.stack(output).to(self.device).float()
 
     @torch.no_grad()
     def _extract_embeddings_clinical(self, dataloader, coords):
@@ -364,6 +397,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             x = x.view(B, C, n_chunks, chunk_length)
             x = x.permute(0, 2, 1, 3)
             x = x.reshape(B * n_chunks, C, chunk_length)
+
+            breakpoint()
 
             # Expand coords for all chunks
             cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
