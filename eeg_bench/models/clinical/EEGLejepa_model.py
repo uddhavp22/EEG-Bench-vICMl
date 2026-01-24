@@ -341,12 +341,11 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.model.backbone.eval()
         embeddings_list = []
         labels_list = []
-        indices_list = []
 
         chunk_length = self.model.chunk_length  # 4000 samples = 20s at 200Hz
 
         for batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
-            x, yb, idx = batch
+            x, yb, _ = batch  # third element is channels, not needed
             x = x.to(self.device)
             B, C, T = x.shape
 
@@ -384,12 +383,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 labels_list.append(yb.argmax(dim=1).cpu())
             else:
                 labels_list.append(yb.cpu())
-            indices_list.append(idx.cpu())
 
         embeddings = torch.cat(embeddings_list, dim=0)
         labels = torch.cat(labels_list, dim=0)
-        indices = torch.cat(indices_list, dim=0)
-        return embeddings, labels, indices
+        return embeddings, labels
 
     def _train_epoch_cached(self, dataloader, optimizer, scheduler):
         """Train only the head on cached embeddings."""
@@ -480,8 +477,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             print("[LeJEPAClinical] Using cached embeddings (freeze_encoder=True)")
 
             # Extract embeddings in a single pass
-            train_emb, train_lbl, _ = self._extract_embeddings_clinical(train_loader, coords_train)
-            val_emb, val_lbl, _ = self._extract_embeddings_clinical(val_loader, coords_val)
+            train_emb, train_lbl = self._extract_embeddings_clinical(train_loader, coords_train)
+            val_emb, val_lbl = self._extract_embeddings_clinical(val_loader, coords_val)
 
             cached_train_dataset = TensorDataset(train_emb, train_lbl)
             cached_val_dataset = TensorDataset(val_emb, val_lbl)
