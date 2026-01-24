@@ -91,16 +91,48 @@ class REVEClinicalWrapper(nn.Module):
         x = x.to(self.device)
         pos = pos.to(self.device)
 
-        # Use autocast for FlashAttention compatibility (requires fp16/bf16)
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            features = self.backbone(x, pos)
+        B, C, T = x.shape
+        chunk_length = 2000  # 10 seconds at 200Hz (matches TUAB evaluation)
 
-        # Average over time dimension: [B, C, T, H] -> [B, C, H]
+        # Handle recordings shorter than chunk_length
+        if T < chunk_length:
+            chunk_length = T
+
+        # Crop to full chunks
+        n_chunks = T // chunk_length
+        T_new = n_chunks * chunk_length
+        x = x[:, :, :T_new]
+
+        # Reshape: (B, C, T) -> (B, n_chunks, C, chunk_length)
+        x = x.reshape(B, C, n_chunks, chunk_length)
+        x = x.permute(0, 2, 1, 3)  # (B, n_chunks, C, chunk_length)
+
+        # Merge batch and chunks: (B * n_chunks, C, chunk_length)
+        x = x.reshape(B * n_chunks, C, chunk_length)
+
+        # Expand positions for all chunks
+        pos = pos.unsqueeze(1).expand(-1, n_chunks, -1, -1)  # (B, n_chunks, C, D)
+        pos = pos.reshape(B * n_chunks, C, -1)
+
+        # Process all chunks through backbone
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            features = self.backbone(x, pos)  # (B*n_chunks, C, T_out, H)
+
+        # Mean over time: (B*n_chunks, C, H)
         features = features.mean(dim=2)
+
+        # Reshape back: (B, n_chunks, C, H)
+        H = features.shape[-1]
+        features = features.view(B, n_chunks, C, H)
+
+        # Aggregate chunks by mean pooling: (B, C, H)
+        features = features.mean(dim=1)
+
+        # Classify
         logits = self.classifier(features)
 
         if self.is_multilabel_task:
-            logits = logits.view(x.shape[0], self.num_classes, -1)
+            logits = logits.view(B, self.num_classes, -1)
 
         return logits
 
