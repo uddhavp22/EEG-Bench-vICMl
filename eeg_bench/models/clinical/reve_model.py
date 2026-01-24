@@ -29,7 +29,7 @@ class REVEClinicalWrapper(nn.Module):
         num_classes: int,
         num_labels_per_chunk: Optional[int] = None,
         hidden_dim: Optional[int] = None,
-        freeze_backbone: bool = False,
+        freeze_backbone: bool = True,
         use_paper_head=False,
     ):
         super().__init__()
@@ -38,11 +38,19 @@ class REVEClinicalWrapper(nn.Module):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load REVE backbone
-        self.backbone = AutoModel.from_pretrained(
-            "brain-bzh/reve-base",
-            trust_remote_code=True,
-            torch_dtype="auto",
-        ).to(self.device)
+        try:
+            self.backbone = AutoModel.from_pretrained(
+                "brain-bzh/reve-base",
+                trust_remote_code=True,
+                torch_dtype="auto",
+            ).to(self.device)
+        except:
+            self.backbone = AutoModel.from_pretrained(
+                "/home/spanchavati/up-branch/reve-base",
+                trust_remote_code=True,
+                torch_dtype="auto",
+            ).to(self.device)
+
 
         # Freeze backbone if requested
         if freeze_backbone:
@@ -52,7 +60,7 @@ class REVEClinicalWrapper(nn.Module):
         else:
             for param in self.backbone.parameters():
                 param.requires_grad = True
-            self.backbone.eval()
+            self.backbone.train()
 
         # Infer hidden dimension from backbone config
         if hidden_dim is None:
@@ -92,7 +100,7 @@ class REVEClinicalWrapper(nn.Module):
         pos = pos.to(self.device)
 
         B, C, T = x.shape
-        chunk_length = 2000  # 10 seconds at 200Hz (matches TUAB evaluation)
+        chunk_length = 200*16  # 16 seconds at 200Hz (matches TUAB evaluation)
 
         # Handle recordings shorter than chunk_length
         if T < chunk_length:
@@ -149,7 +157,7 @@ class REVEClinicalModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_classes = num_classes
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.chunk_len_s = chunk_len_s if chunk_len_s is not None else (16 if num_labels_per_chunk else None)
+        self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.freeze_backbone = freeze_backbone
 
         # Load position bank for channel coordinates
@@ -266,10 +274,12 @@ class REVEClinicalModel(AbstractModel):
         """Train the model."""
         task_name = meta[0]["task_name"]
 
+
         # Create training dataset
         dataset_train = make_dataset_2(
-            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
+            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
         )
+
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
             dataset_train = make_dataset_2(
@@ -336,7 +346,7 @@ class REVEClinicalModel(AbstractModel):
 
         # Create test dataset
         dataset_test = make_dataset_2(
-            X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=False
+            X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=True
         )
         if len(dataset_test) == 0:
             return np.array([])
