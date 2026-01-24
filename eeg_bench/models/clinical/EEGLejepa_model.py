@@ -373,7 +373,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 optimizer,
                 mode='min',
                 factor=0.5,      # Halve LR when plateau
-                patience=3,      # Wait 3 epochs before reducing
+                patience=2,      # Wait 3 epochs before reducing
                 min_lr=1e-6,
                 # verbose=True
             )
