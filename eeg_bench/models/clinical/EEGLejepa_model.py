@@ -138,7 +138,7 @@ class ConcreteLeJEPAClinical(nn.Module):
         # Build backbone
         # ------------------------------------------------------------
         self.backbone = cfg.build()
-        self.chunk_length = 4000 #20s chunks!
+        self.chunk_length = 4000 #16s chunks!
         DIM = self.backbone.dim
         # DIM = self.backbone.proj_dim
 
