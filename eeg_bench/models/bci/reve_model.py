@@ -187,7 +187,7 @@ class REVEBenchmarkModel(AbstractModel):
 
         train_loader = DataLoader(
             train_dataset, 
-            batch_size=64, 
+            batch_size=64 if self.chunk_len_s is None else 64, 
             shuffle=True, 
             collate_fn=collate_fn,
             num_workers=0 # Set >0 if on Linux/Mac

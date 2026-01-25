@@ -46,7 +46,7 @@ class REVEClinicalWrapper(nn.Module):
             ).to(self.device)
         except:
             self.backbone = AutoModel.from_pretrained(
-                "/home/spanchavati/up-branch/reve-base",
+                "/raid/spanchavati/up-branch/reve-base",
                 trust_remote_code=True,
                 torch_dtype="auto",
             ).to(self.device)

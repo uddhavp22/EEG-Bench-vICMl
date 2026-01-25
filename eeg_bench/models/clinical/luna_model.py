@@ -48,6 +48,7 @@ def _setup_luna_imports(biofoundation_path: Optional[str] = None):
     """Setup BioFoundation imports by adding path to sys.path if needed."""
     global LUNA, CrossAttentionBlock, PatchEmbedNetwork
     global RotaryTransformerBlock, FrequencyFeatureEmbedder, ChannelEmbeddings
+    
 
     if biofoundation_path and biofoundation_path not in sys.path:
         sys.path.insert(0, biofoundation_path)
@@ -206,7 +207,7 @@ class LUNAClinicalModel(AbstractModel):
         num_labels_per_chunk: Optional[int] = None,
         chunk_len_s: Optional[int] = None,
         pretrained_path: Optional[str] = None,
-        biofoundation_path: Optional[str] = "/teamspace/studios/this_studio/BioFoundation",
+        biofoundation_path: Optional[str] = "/raid/spanchavati/",
         patch_size: int = 40,
         num_queries: int = 4,
         embed_dim: int = 64,
@@ -247,7 +248,8 @@ class LUNAClinicalModel(AbstractModel):
         self.mlp_ratio = mlp_ratio
 
         # Setup LUNA imports from BioFoundation
-        _setup_luna_imports(biofoundation_path="/teamspace/studios/this_studio/BioFoundation")
+        biofoundation_path = '/raid/spanchavati/BioFoundation/'
+        _setup_luna_imports(biofoundation_path=biofoundation_path)
 
         # Store pretrained path for model initialization
         self.pretrained_path = pretrained_path
