@@ -511,7 +511,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False, sfreq=250)
 
         # 3. Validation Split (aligned with BCI: 15%)
-        val_split = 0.15
+        val_split = 0.2
         dataset_train, dataset_val = dataset_train.split_train_val(val_split)
 
         # 4. DataLoader Setup

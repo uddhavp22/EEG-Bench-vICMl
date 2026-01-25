@@ -34,6 +34,6 @@ training:
   data_percentages: [1.0]
 
 execution:
-  gpus: 2
-  workers_per_gpu: 2
+  gpus: 1
+  workers_per_gpu: 3
   log_dir: logs/lejepa_full_benchmark

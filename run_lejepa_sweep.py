@@ -298,18 +298,46 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     if not os.path.exists(results_dir):
         return completed
 
-    # Pattern: prefix_task_model_ckpt_checkpointid_pctXX_LP_timestamp.json
+    # Pattern: model_task_LeJEPA*_ckpt_checkpointid_LP_timestamp.json
+    # Example: lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_20260124_122416.json
+    # Example: lejepa_base_global_proj_sleep_stages_clinical_LeJEPAClinical_ckpt_last_LP_20260124_184138.json
+    # Note: percentage is not in these filenames, defaulting to 1.0
+    
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
-        # Try to extract components - this pattern may need adjustment
-    # Example: lejepa_small_left_right_LeJEPABCIModel_ckpt_epoch_0_step_10000_pct100_LP_20240115_123456.json
+        
+        # Match pattern: *_LeJEPA*_ckpt_*_LP_timestamp.json or *_LeJEPA*_ckpt_*_timestamp.json
         match = re.match(
-            r"(.+?)_(.+?)_\w+Model_ckpt_(.+?)_pct(\d+)(?:_LP)?_\d+\.json",
+            r"(.+?)_(LeJEPA\w+)_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?_(\d{8}_\d{6})\.json",
             filename
         )
         if match:
-            model_name, task, ckpt_id, pct = match.groups()
-            completed.add((model_name, task, ckpt_id, int(pct) / 100))
+            prefix, model_class, ckpt_id, pct_str, timestamp = match.groups()
+            
+            # Now split prefix into model_name and task
+            # We know the valid tasks, so find which one matches at the end
+            model_name = None
+            task = None
+            
+            for known_task in ALL_TASKS:
+                # Check if prefix ends with the task (accounting for _clinical/_bci suffix in filename)
+                # The task in filename might have _clinical or _bci appended
+                for suffix in ["_clinical", "_bci", ""]:
+                    task_pattern = known_task + suffix
+                    if prefix.endswith("_" + task_pattern):
+                        model_name = prefix[:-(len(task_pattern) + 1)]
+                        task = known_task
+                        break
+                    elif prefix == task_pattern:
+                        model_name = ""
+                        task = known_task
+                        break
+                if task:
+                    break
+            
+            if model_name is not None and task:
+                pct = int(pct_str) / 100 if pct_str else 1.0
+                completed.add((model_name, task, ckpt_id, pct))
 
     return completed
 
