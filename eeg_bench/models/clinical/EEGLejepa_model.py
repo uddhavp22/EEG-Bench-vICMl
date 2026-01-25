@@ -408,7 +408,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
             cb = cb.reshape(B * n_chunks, C, 3)
 
-
             # Forward through backbone
             outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
             cls = outputs["cls_token"]
@@ -418,8 +417,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)  # (B, dim)
 
             embeddings_list.append(cls.cpu())
-            # Handle different label formats
-            if yb.dim() == 2:
+            # Handle different label formats (match LaBraM behavior)
+            if not self.model.is_multilabel_task and yb.dim() > 1:
                 labels_list.append(yb.argmax(dim=1).cpu())
             else:
                 labels_list.append(yb.cpu())
@@ -433,7 +432,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.model.head.train()
         running_loss = 0.0
         running_corrects = 0
-        total_samples = 0
+        total_loss_samples = 0
+        total_acc_samples = 0
 
         for embeddings, y_batch in dataloader:
             embeddings = embeddings.to(self.device)
@@ -441,6 +441,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
             optimizer.zero_grad()
             logits = self.model.head(embeddings)
+            if self.model.is_multilabel_task:
+                logits = logits.view(embeddings.size(0), self.model.num_classes, -1)
+            y_batch = y_batch.long()
             loss = self.model.loss_fn(logits, y_batch)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.head.parameters(), max_norm=1.0)
@@ -448,12 +451,18 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             scheduler.step()
 
             running_loss += loss.item() * embeddings.size(0)
-            preds = torch.argmax(logits, dim=1)
-            running_corrects += (preds == y_batch).sum().item()
-            total_samples += embeddings.size(0)
+            total_loss_samples += embeddings.size(0)
 
-        epoch_loss = running_loss / total_samples
-        epoch_acc = running_corrects / total_samples
+            preds = torch.argmax(logits, dim=1)
+            if self.model.is_multilabel_task:
+                running_corrects += (preds == y_batch).sum().item()
+                total_acc_samples += y_batch.numel()
+            else:
+                running_corrects += (preds == y_batch).sum().item()
+                total_acc_samples += embeddings.size(0)
+
+        epoch_loss = running_loss / total_loss_samples if total_loss_samples else 0.0
+        epoch_acc = running_corrects / total_acc_samples if total_acc_samples else 0.0
         return epoch_loss, epoch_acc
 
     def _validate_epoch_cached(self, dataloader):
@@ -461,7 +470,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.model.head.eval()
         running_loss = 0.0
         running_corrects = 0
-        total_samples = 0
+        total_loss_samples = 0
+        total_acc_samples = 0
 
         with torch.no_grad():
             for embeddings, y_batch in dataloader:
@@ -469,15 +479,24 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 y_batch = y_batch.to(self.device)
 
                 logits = self.model.head(embeddings)
+                if self.model.is_multilabel_task:
+                    logits = logits.view(embeddings.size(0), self.model.num_classes, -1)
+                y_batch = y_batch.long()
                 loss = self.model.loss_fn(logits, y_batch)
 
                 running_loss += loss.item() * embeddings.size(0)
-                preds = torch.argmax(logits, dim=1)
-                running_corrects += (preds == y_batch).sum().item()
-                total_samples += embeddings.size(0)
+                total_loss_samples += embeddings.size(0)
 
-        epoch_loss = running_loss / total_samples
-        epoch_acc = running_corrects / total_samples
+                preds = torch.argmax(logits, dim=1)
+                if self.model.is_multilabel_task:
+                    running_corrects += (preds == y_batch).sum().item()
+                    total_acc_samples += y_batch.numel()
+                else:
+                    running_corrects += (preds == y_batch).sum().item()
+                    total_acc_samples += embeddings.size(0)
+
+        epoch_loss = running_loss / total_loss_samples if total_loss_samples else 0.0
+        epoch_acc = running_corrects / total_acc_samples if total_acc_samples else 0.0
         return epoch_loss, epoch_acc
 
     def fit(self, X, y, meta) -> None:
@@ -742,13 +761,18 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         idx_map_all = []
 
         for batch in tqdm(loader, desc="Predicting"):
-            x, idx, _ = batch
+            x, idx, batch_coords = batch
             x = x.to(self.device)
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
-            
-            logits = self.model(x, cb) #forward insteadhere?    
-            # logits = self.
-            
+            B, C, T = x.shape
+
+            # Handle bipolar/mismatch channels like training path
+            if C != coords.shape[0]:
+                batch_coords = [ch_name[0] for ch_name in batch_coords]
+                coords = self._coords(batch_coords).to(self.device)
+
+            cb = coords.unsqueeze(0).expand(B, -1, -1)
+
+            logits = self.model(x, cb)
             # Get window-level predictions
             pred = torch.argmax(logits, dim=1)
             preds_all.append(pred.cpu().numpy())
@@ -759,12 +783,13 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         preds = np.concatenate(preds_all)
         idx_map = np.concatenate(idx_map_all)
 
-
         # Majority voting: Combine windows back into 1 patient prediction
-        unique_indices = np.unique(idx_map)
-        final_predictions = []
-        for i in unique_indices:
-            patient_votes = preds[idx_map == i]
-            final_predictions.append(Counter(patient_votes).most_common(1)[0][0])
+        if self.chunk_len_s is not None and not self.model.is_multilabel_task:
+            unique_indices = np.unique(idx_map)
+            final_predictions = []
+            for i in unique_indices:
+                patient_votes = preds[idx_map == i]
+                final_predictions.append(Counter(patient_votes).most_common(1)[0][0])
+            return np.array([map_label_reverse(p, task_name) for p in final_predictions])
 
-        return np.array([map_label_reverse(p, task_name) for p in final_predictions])
+        return np.array([map_label_reverse(p, task_name) for p in preds])
