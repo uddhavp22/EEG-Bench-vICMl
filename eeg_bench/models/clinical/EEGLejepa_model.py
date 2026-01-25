@@ -378,7 +378,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         chunk_length = self.model.chunk_length  # 4000 samples = 20s at 200Hz
 
         for batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
-            x, yb, _ = batch  # third element is channels, not needed
+            x, yb, batch_coords = batch  # third element is channels, not needed
             x = x.to(self.device)
             B, C, T = x.shape
 
@@ -398,7 +398,11 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             x = x.permute(0, 2, 1, 3)
             x = x.reshape(B * n_chunks, C, chunk_length)
 
-            breakpoint()
+            #path for bipolar stuff
+            if x.shape[1] != coords.shape[0]: # mismatch due to bipolar channels
+                #stack batch_coords tuple to get batch channel names
+                batch_coords = [ch_name[0] for ch_name in batch_coords]
+                coords = self._coords(batch_coords).to(self.device)
 
             # Expand coords for all chunks
             cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
