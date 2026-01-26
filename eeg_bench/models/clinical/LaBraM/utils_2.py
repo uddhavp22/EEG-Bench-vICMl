@@ -288,7 +288,7 @@ def process_filter_cbramod(raw, sfreq):
 def process_filter_reve(raw, sfreq):
     """REVE-specific filter (0.5-99.5 Hz)"""
     l_freq: float = 0.5
-    h_freq: float = 99.5
+    h_freq: float = 80
     raw.load_data()
     raw.set_eeg_reference("average")
     raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
@@ -472,7 +472,7 @@ def process_reve(raw, chs, out_sfreq=200):
     raw.load_data()
     raw.set_eeg_reference("average")
     l_freq = 0.5
-    h_freq = 99.5
+    h_freq = 80
     raw.filter(l_freq=l_freq, h_freq=h_freq if h_freq < 0.5*raw.info['sfreq'] else None)
     if 0.5*raw.info['sfreq'] > 50.0:
         raw.notch_filter(50.0)
