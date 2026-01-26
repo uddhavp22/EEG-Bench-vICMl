@@ -57,6 +57,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
 import yaml
+from tqdm import tqdm
 
 # Task definitions
 BCI_TASKS = ["left_right", "right_feet", "left_right_feet_tongue", "5_fingers"]
@@ -81,7 +82,7 @@ def normalize_task_name(task_name):
 
 
 
-ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
+ALL_TASKS = CLINICAL_TASKS + BCI_TASKS
 
 
 @dataclass
@@ -101,7 +102,7 @@ class ExperimentConfig:
             "--model", "lejepa",
             "--task", self.task,
             "--lejepa-checkpoint-full-path", self.checkpoint_path,
-            "--data-percentages", str(self.percentage),
+            "--data-percentage", str(self.percentage),  # Changed from --data-percentages
             "--no-wandb",
             "--result-prefix", self.model_name,
             "--checkpoint-id", self.checkpoint_id,
@@ -233,7 +234,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
-    """Generate experiment matrix from configuration."""
+    """Generate experiment matrix from configuration, sorted for cache efficiency."""
     experiments = []
 
     # Expand task lists
@@ -302,6 +303,12 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                         linear_probe=config["training"]["linear_probe"],
                     ))
 
+    # Sort experiments to maximize cache hits:
+    # 1. Group by checkpoint (same embeddings)
+    # 2. Then by task (same data)
+    # 3. Then by percentage (descending - 100% first to populate cache)
+    experiments.sort(key=lambda e: (e.checkpoint_path, e.task, -e.percentage))
+    
     return experiments
 
 
@@ -384,8 +391,8 @@ def run_experiment(args: Tuple) -> Tuple:
     log_file = os.path.join(log_dir, log_name)
 
     if dry_run:
-        print(f"[DRY RUN] GPU {gpu_id}: {experiment.model_name}/{experiment.task}/{experiment.checkpoint_id}")
-        print(f"          {' '.join(cmd)}")
+        # print(f"[DRY RUN] GPU {gpu_id}: {experiment.model_name}/{experiment.task}/{experiment.checkpoint_id}")
+        # print(f"          {' '.join(cmd)}")
         return (experiment, 0, "dry_run")
 
     start_time = time.time()
@@ -420,6 +427,34 @@ def run_experiment(args: Tuple) -> Tuple:
 
     except Exception as e:
         return (experiment, -1, str(e))
+
+
+def prewarm_embedding_cache(experiments: List[ExperimentConfig], gpus: int, dry_run: bool):
+    """
+    Pre-extract embeddings for all unique (checkpoint, task) combinations.
+    This ensures the 100% embeddings are cached before running percentage sweeps.
+    
+    Note: This is informational - actual caching happens on first run of each
+    (checkpoint, task) combination. The sorting in generate_experiments() ensures
+    100% runs happen first.
+    """
+    # Find unique (checkpoint, task) combinations
+    unique_combos = set((e.checkpoint_path, e.task) for e in experiments)
+    
+    # Count how many experiments will benefit from cache reuse
+    cache_reuse_count = len(experiments) - len(unique_combos)
+    
+    print(f"\n=== Embedding Cache Strategy ===")
+    print(f"Unique (checkpoint, task) combinations: {len(unique_combos)}")
+    print(f"Experiments that will reuse cached embeddings: {cache_reuse_count}")
+    print(f"Experiments sorted to run 100% first for each combination.")
+    
+    if dry_run:
+        print(f"[DRY RUN] First run of each combination will populate cache.")
+        return
+    
+    # The actual caching happens automatically during the first experiment
+    # for each (checkpoint, task) combination. The sorting ensures 100% runs first.
 
 
 def main():
@@ -482,6 +517,10 @@ def main():
         print("No experiments to run!")
         return
 
+    # Add prewarm phase before main experiments
+    if not args.skip_prewarm and config["training"]["data_percentages"] != [1.0]:
+        prewarm_embedding_cache(experiments, gpus, args.dry_run)
+    
     # Assign GPUs round-robin
     jobs = []
     for i, exp in enumerate(experiments):
@@ -493,7 +532,12 @@ def main():
     start_time = time.time()
 
     with Pool(total_workers) as pool:
-        results = pool.map(run_experiment, jobs)
+        results = list(tqdm(
+            pool.imap(run_experiment, jobs),
+            total=len(jobs),
+            desc="Running experiments",
+            unit="exp"
+        ))
 
     elapsed = time.time() - start_time
 

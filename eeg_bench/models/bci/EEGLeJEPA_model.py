@@ -23,6 +23,8 @@ import random
 import math
 import pickle
 from pathlib import Path
+import hashlib
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +68,10 @@ class ConcreteLeJEPABCI(nn.Module):
 
 
         # ------------------------------------------------------------
+
         # Pretrained config / checkpoint resolution (matching clinical)
         # ------------------------------------------------------------
+
         if (config_path is None or pretrained_path is None) and base_path is not None and version is not None:
             base_path_resolved = Path(base_path) / f"version_{version}"
 
@@ -85,8 +89,10 @@ class ConcreteLeJEPABCI(nn.Module):
                 print(f"[LeJEPABCI] No checkpoint found at {candidate_ckpt}. Training from scratch.")
 
         # ------------------------------------------------------------
+
         # Build model config
         # ------------------------------------------------------------
+
         if config_path is not None:
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
@@ -109,14 +115,18 @@ class ConcreteLeJEPABCI(nn.Module):
             )
 
         # ------------------------------------------------------------
+
         # Build backbone
         # ------------------------------------------------------------
+
         self.backbone = cfg.build()
         DIM = self.backbone.dim
 
         # ------------------------------------------------------------
+
         # Load pretrained weights (if available)
         # ------------------------------------------------------------
+
         if pretrained_path is not None:
             ckpt = torch.load(pretrained_path, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
@@ -148,8 +158,10 @@ class ConcreteLeJEPABCI(nn.Module):
             print(f"[LeJEPABCI] Loaded pretrained weights from {pretrained_path}")
 
         # ------------------------------------------------------------
+
         # Freeze encoder if requested
         # ------------------------------------------------------------
+
         if freeze_encoder:
             for p in self.backbone.parameters():
                 p.requires_grad = False
@@ -435,7 +447,59 @@ class EEGLeJEPABCIModel(AbstractModel):
         epoch_acc = running_corrects / total_samples
         return epoch_loss, epoch_acc
 
-    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
+    def _get_embedding_cache_path(self, checkpoint_path: str, task_name: str, dataset_hash: str, split: str) -> Path:
+        """Generate cache path for embeddings."""
+        cache_dir = Path(get_config_value("cache", ".cache")) / "lejepa_embeddings"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:12]
+        return cache_dir / f"bci_{task_name}_{ckpt_hash}_{dataset_hash}_{split}.npz"
+
+    def _compute_dataset_hash(self, datasets: list, ch_names_list: list) -> str:
+        """Compute a hash to identify the combined datasets."""
+        hash_data = {
+            "n_datasets": len(datasets),
+            "lengths": [len(d) for d in datasets],
+            "channels": [ch[:5] for ch in ch_names_list],
+        }
+        return hashlib.md5(json.dumps(hash_data, sort_keys=True).encode()).hexdigest()[:12]
+
+    def _load_or_extract_embeddings_bci(self, datasets, ch_names_list, checkpoint_path: str, 
+                                         task_name: str, dataset_hash: str, split: str) -> tuple:
+        """Load cached embeddings or extract and cache them."""
+        cache_path = self._get_embedding_cache_path(checkpoint_path, task_name, dataset_hash, split)
+        
+        if cache_path.exists():
+            print(f"[LeJEPABCI] Loading cached embeddings from {cache_path}")
+            data = np.load(cache_path)
+            return torch.from_numpy(data["embeddings"]), torch.from_numpy(data["labels"])
+        
+        print(f"[LeJEPABCI] Extracting embeddings (will cache to {cache_path})")
+        batch_size = 64
+        num_workers = 8
+        
+        emb_list, lbl_list = [], []
+        for dataset, ch_names in zip(datasets, ch_names_list):
+            loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, 
+                              shuffle=False, pin_memory=True)
+            coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
+            emb, lbl = self._extract_embeddings(loader, coords, valid_indices)
+            emb_list.append(emb)
+            lbl_list.append(lbl)
+        
+        embeddings = torch.cat(emb_list, dim=0)
+        labels = torch.cat(lbl_list, dim=0)
+        
+        np.savez_compressed(cache_path, embeddings=embeddings.numpy(), labels=labels.numpy())
+        return embeddings, labels
+
+    def _subsample_indices(self, n_samples: int, percentage: float, seed: int = 42) -> np.ndarray:
+        """Get deterministic subsample indices for data percentage sweeps."""
+        rng = np.random.RandomState(seed)
+        n_select = max(1, int(n_samples * percentage))
+        return np.sort(rng.permutation(n_samples)[:n_select])
+
+    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict], 
+            data_percentage: float = 1.0) -> None:
         task_name = meta[0]["task_name"]
         num_classes = n_unique_labels(task_name)
         self.model = ConcreteLeJEPABCI(
@@ -469,40 +533,33 @@ class EEGLeJEPABCIModel(AbstractModel):
         patience = 10
 
         if self.freeze_encoder:
-            # =============================================
-            # CACHED EMBEDDINGS PATH (frozen encoder)
-            # =============================================
             print("[LeJEPABCI] Using cached embeddings (freeze_encoder=True)")
             
-            # Extract embeddings from all datasets in a single pass
-            train_embeddings_list = []
-            train_labels_list = []
-            for dataset, ch_names in zip(dataset_train_list, ch_names_list_train):
-                loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
-                coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
-                emb, lbl = self._extract_embeddings(loader, coords, valid_indices)
-                train_embeddings_list.append(emb)
-                train_labels_list.append(lbl)
+            # Get checkpoint path for cache key
+            checkpoint_path = str(self.pretrained_path) if self.pretrained_path else "default"
+            dataset_hash = self._compute_dataset_hash(dataset_train_list, ch_names_list_train)
             
-            val_embeddings_list = []
-            val_labels_list = []
-            for dataset, ch_names in zip(dataset_val_list, ch_names_list_val):
-                loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
-                coords, valid_indices = self._get_coords_and_valid_mask(ch_names)
-                emb, lbl = self._extract_embeddings(loader, coords, valid_indices)
-                val_embeddings_list.append(emb)
-                val_labels_list.append(lbl)
+            # Load or extract embeddings (cached to disk)
+            all_train_emb, all_train_lbl = self._load_or_extract_embeddings_bci(
+                dataset_train_list, ch_names_list_train, checkpoint_path, task_name, dataset_hash, "train"
+            )
             
-            # Combine all embeddings into single TensorDatasets
-            all_train_emb = torch.cat(train_embeddings_list, dim=0)
-            all_train_lbl = torch.cat(train_labels_list, dim=0)
+            dataset_hash_val = self._compute_dataset_hash(dataset_val_list, ch_names_list_val)
+            all_val_emb, all_val_lbl = self._load_or_extract_embeddings_bci(
+                dataset_val_list, ch_names_list_val, checkpoint_path, task_name, dataset_hash_val, "val"
+            )
+            
+            # Apply data percentage subsampling (deterministic)
+            if data_percentage < 1.0:
+                train_indices = self._subsample_indices(len(all_train_emb), data_percentage)
+                all_train_emb = all_train_emb[train_indices]
+                all_train_lbl = all_train_lbl[train_indices]
+                print(f"[LeJEPABCI] Subsampled to {len(all_train_emb)} samples ({data_percentage*100:.0f}%)")
+
             cached_train_dataset = TensorDataset(all_train_emb, all_train_lbl)
-            
-            all_val_emb = torch.cat(val_embeddings_list, dim=0)
-            all_val_lbl = torch.cat(val_labels_list, dim=0)
             cached_val_dataset = TensorDataset(all_val_emb, all_val_lbl)
             
-            print(f"[LeJEPABCI] Cached {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
+            print(f"[LeJEPABCI] Using {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
             
             # Use larger batch size for cached training (no encoder memory needed)
             cached_batch_size = batch_size * 4  # 256

@@ -14,6 +14,8 @@ import gc
 import math
 import sys
 import logging
+import hashlib
+import json
 from pathlib import Path
 from ..abstract_model import AbstractModel
 from ...config import get_config_value, LeJEPAConfig
@@ -261,7 +263,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             if checkpoint_path:
                 # Extract base_path and version from full path for config discovery
                 ckpt_path = Path(checkpoint_path)
-                pretrained_path = ckpt_path
+                self.pretrained_path = ckpt_path  # Store as instance variable
                 config_path = None
                 if ckpt_path.parent.name == "checkpoints":
                     version_dir = ckpt_path.parent.parent
@@ -281,8 +283,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 base_path = config.checkpoint_base_path
                 version = config.checkpoint_version
                 config_path = None
-                pretrained_path = None
+                self.pretrained_path = None  # Store as instance variable
             freeze_encoder = config.freeze_encoder
+            self.freeze_encoder = freeze_encoder
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
@@ -290,7 +293,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
             eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
             config_path = None
-            pretrained_path = None
+            self.pretrained_path = None  # Store as instance variable
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -427,7 +430,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         labels = torch.cat(labels_list, dim=0)
         return embeddings, labels
 
-    def _train_epoch_cached(self, dataloader, optimizer, scheduler):
+    def _train_epoch_cached(self, dataloader, optimizer):
         """Train only the head on cached embeddings."""
         self.model.head.train()
         running_loss = 0.0
@@ -448,7 +451,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.head.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
+            # NOTE: Don't step scheduler here - CosineAnnealingLR is epoch-based
 
             running_loss += loss.item() * embeddings.size(0)
             total_loss_samples += embeddings.size(0)
@@ -499,7 +502,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         epoch_acc = running_corrects / total_acc_samples if total_acc_samples else 0.0
         return epoch_loss, epoch_acc
 
-    def fit(self, X, y, meta) -> None:
+    def fit(self, X, y, meta, data_percentage: float = 1.0) -> None:
         task_name = meta[0]["task_name"]
 
         # 1. Dataset Loading (matching LaBraM exact args)
@@ -516,7 +519,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
         # 4. DataLoader Setup
         bs = 64 if self.chunk_len_s else 1
-        train_loader = DataLoader(dataset_train, batch_size=bs, shuffle=True, num_workers=8, pin_memory=True)
+        train_loader = DataLoader(dataset_train, batch_size=bs, shuffle=False, num_workers=8, pin_memory=True)  # shuffle=False for caching
         val_loader = DataLoader(dataset_val, batch_size=bs, shuffle=False)
 
         # 5. Training Setup (aligned with BCI)
@@ -535,17 +538,34 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             # =============================================
             print("[LeJEPAClinical] Using cached embeddings (freeze_encoder=True)")
 
-            # Extract embeddings in a single pass
-            train_emb, train_lbl = self._extract_embeddings_clinical(train_loader, coords_train)
-            val_emb, val_lbl = self._extract_embeddings_clinical(val_loader, coords_val)
+            # Compute dataset hash for caching
+            dataset_hash = self._compute_dataset_hash(X, meta)
+            checkpoint_path = str(self.model.backbone) if hasattr(self, 'pretrained_path') else "default"
+            if hasattr(self, 'pretrained_path') and self.pretrained_path:
+                checkpoint_path = str(self.pretrained_path)
+
+            # Load or extract embeddings (cached to disk)
+            train_emb, train_lbl = self._load_or_extract_embeddings(
+                train_loader, coords_train, checkpoint_path, task_name, dataset_hash, "train"
+            )
+            val_emb, val_lbl = self._load_or_extract_embeddings(
+                val_loader, coords_val, checkpoint_path, task_name, dataset_hash, "val"
+            )
+
+            # Apply data percentage subsampling (deterministic)
+            if data_percentage < 1.0:
+                train_indices = self._subsample_indices(len(train_emb), data_percentage)
+                train_emb = train_emb[train_indices]
+                train_lbl = train_lbl[train_indices]
+                print(f"[LeJEPAClinical] Subsampled to {len(train_emb)} samples ({data_percentage*100:.0f}%)")
 
             cached_train_dataset = TensorDataset(train_emb, train_lbl)
             cached_val_dataset = TensorDataset(val_emb, val_lbl)
 
-            print(f"[LeJEPAClinical] Cached {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
+            print(f"[LeJEPAClinical] Using {len(cached_train_dataset)} train and {len(cached_val_dataset)} val embeddings")
 
             # Use larger batch size for cached training (no encoder memory needed)
-            cached_batch_size = bs * 8  # 256 for chunked, 4 for full recordings
+            cached_batch_size = bs * 32  # 256 for chunked, 4 for full recordings
             cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True)
             cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True)
 
@@ -574,8 +594,11 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             best_val_loss = float("inf")
             best_model_state = None
             for epoch in range(1, max_epochs + 1):
-                train_loss, train_acc = self._train_epoch_cached(cached_train_loader, optimizer, scheduler)
+                train_loss, train_acc = self._train_epoch_cached(cached_train_loader, optimizer)
                 val_loss, val_acc = self._validate_epoch_cached(cached_val_loader)
+                
+                # Step scheduler once per epoch (CosineAnnealingLR is epoch-based)
+                scheduler.step()
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -793,3 +816,53 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             return np.array([map_label_reverse(p, task_name) for p in final_predictions])
 
         return np.array([map_label_reverse(p, task_name) for p in preds])
+
+    def _get_embedding_cache_path(self, checkpoint_path: str, task_name: str, dataset_hash: str, split: str) -> Path:
+        """Generate cache path for embeddings."""
+        cache_dir = Path(get_config_value("cache", ".cache")) / "lejepa_embeddings"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Hash the checkpoint path to handle long paths
+        ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:12]
+        return cache_dir / f"{task_name}_{ckpt_hash}_{dataset_hash}_{split}.npz"
+
+    def _compute_dataset_hash(self, X: list, meta: list) -> str:
+        """Compute a hash to identify the dataset."""
+        # Use shape info and metadata for hashing (fast, doesn't load all data)
+        hash_data = {
+            "n_samples": len(X),
+            "shapes": [x.shape for x in X[:5]],  # First 5 shapes
+            "task": meta[0].get("task_name", ""),
+            "channels": meta[0].get("channel_names", [])[:5],
+        }
+        return hashlib.md5(json.dumps(hash_data, sort_keys=True).encode()).hexdigest()[:12]
+
+    def _load_or_extract_embeddings(self, dataloader, coords, checkpoint_path: str, task_name: str, 
+                                     dataset_hash: str, split: str) -> tuple:
+        """Load cached embeddings or extract and cache them."""
+        cache_path = self._get_embedding_cache_path(checkpoint_path, task_name, dataset_hash, split)
+        
+        if cache_path.exists():
+            print(f"[LeJEPAClinical] Loading cached embeddings from {cache_path}")
+            data = np.load(cache_path)
+            embeddings = torch.from_numpy(data["embeddings"])
+            labels = torch.from_numpy(data["labels"])
+            return embeddings, labels
+        
+        print(f"[LeJEPAClinical] Extracting embeddings (will cache to {cache_path})")
+        embeddings, labels = self._extract_embeddings_clinical(dataloader, coords)
+        
+        # Save to disk
+        np.savez_compressed(
+            cache_path,
+            embeddings=embeddings.numpy(),
+            labels=labels.numpy()
+        )
+        return embeddings, labels
+
+    def _subsample_indices(self, n_samples: int, percentage: float, seed: int = 42) -> np.ndarray:
+        """Get deterministic subsample indices for data percentage sweeps."""
+        rng = np.random.RandomState(seed)
+        n_select = max(1, int(n_samples * percentage))
+        indices = rng.permutation(n_samples)[:n_select]
+        return np.sort(indices)
