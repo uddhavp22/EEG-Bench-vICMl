@@ -254,8 +254,14 @@ def main():
     parser.add_argument(
         "--linear-probe",
         action="store_true",
-        default=False,
+        default=True,
         help="Freeze encoder and train only the classification head (linear probe evaluation). Applies to all foundation models."
+    )
+    parser.add_argument(
+        "--no-linear-probe",
+        action="store_true",
+        default=False,
+        help="Disable linear probe (allow fine-tuning)."
     )
 
     # LeJEPA configuration
@@ -317,6 +323,9 @@ def main():
     args = parser.parse_args()
 
     # Warn about conflicting flags
+    if args.no_linear_probe:
+        args.linear_probe = False
+
     if args.linear_probe and getattr(args, 'lejepa_no_freeze_encoder', False):
         logger.warning("--linear-probe and --lejepa-no-freeze-encoder conflict. "
                        "Model-specific flag takes precedence (encoder will NOT be frozen for LeJEPA).")
@@ -344,7 +353,8 @@ def main():
             num_labels_per_chunk=num_labels_per_chunk,
             pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
             biofoundation_path="BioFoundation",
-            freeze_backbone=True
+            freeze_backbone=True,
+            linear_probe=args.linear_probe
         )
 
     # Factory functions for other models with freeze_encoder support
@@ -369,7 +379,8 @@ def main():
         return LUNABci(
             pretrained_path="LUNA_base_chkpt/LUNA_base.safetensors",
             biofoundation_path="BioFoundation",
-            freeze_backbone=True
+            freeze_backbone=True,
+            linear_probe=args.linear_probe
         )
 
     # Factory functions for CBraMod models

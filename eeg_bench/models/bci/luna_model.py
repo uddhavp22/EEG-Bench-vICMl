@@ -115,9 +115,12 @@ class LUNABCIWrapper(nn.Module):
         mlp_ratio: float = 4.0,
         pretrained_path: Optional[str] = None,
         freeze_backbone: bool = True,
+        linear_probe: bool = False,
     ):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.linear_probe = linear_probe
+        self.feature_dim = embed_dim * num_queries
 
         # Build LUNA model with classification head
         self.backbone = LUNA(
@@ -136,9 +139,12 @@ class LUNABCIWrapper(nn.Module):
         if pretrained_path is not None:
             self._load_pretrained_weights(pretrained_path)
 
-        # Freeze backbone if requested
-        if freeze_backbone:
-            self._freeze_backbone()
+        self.linear_probe_head = None
+        if linear_probe:
+            self.linear_probe_head = nn.Linear(self.feature_dim, n_classes).to(self.device)
+            self._freeze_backbone(keep_classifier=False)
+        elif freeze_backbone:
+            self._freeze_backbone(keep_classifier=True)
 
     def _load_pretrained_weights(self, pretrained_path: str):
         """Load pretrained weights from safetensors file."""
@@ -172,19 +178,33 @@ class LUNABCIWrapper(nn.Module):
             logger.error(f"Error loading pretrained weights: {e}")
             raise
 
-    def _freeze_backbone(self):
-        """Freeze all backbone parameters except classification head."""
+    def _freeze_backbone(self, keep_classifier: bool = True):
+        """Freeze backbone parameters, optionally keeping classifier trainable."""
         for name, param in self.backbone.named_parameters():
-            if not name.startswith('classifier.'):
-                param.requires_grad = False
+            if keep_classifier and name.startswith('classifier.'):
+                continue
+            param.requires_grad = False
 
-        # Set backbone to eval mode
         self.backbone.eval()
-        # But keep classifier in train mode
-        if hasattr(self.backbone, 'classifier'):
+        if keep_classifier and hasattr(self.backbone, 'classifier'):
             self.backbone.classifier.train()
 
-        logger.info("Froze backbone parameters, keeping classification head trainable")
+        if keep_classifier:
+            logger.info("Froze backbone parameters, keeping classification head trainable")
+        else:
+            logger.info("Froze backbone parameters for linear probe")
+
+    def _extract_features(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
+        """Run backbone up to latent tokens and return pooled features."""
+        B = x.shape[0]
+        x_tokens, _ = self.backbone.prepare_tokens(x, channel_locations, mask=None)
+        x_tokens, _ = self.backbone.cross_attn(x_tokens)
+        num_patches = x_tokens.shape[0] // B
+        x_tokens = x_tokens.reshape(B, num_patches, -1)
+        for blk in self.backbone.blocks:
+            x_tokens = blk(x_tokens)
+        x_latent = self.backbone.norm(x_tokens)
+        return x_latent.mean(dim=1)
 
     def forward(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Forward pass through LUNA model.
@@ -199,14 +219,16 @@ class LUNABCIWrapper(nn.Module):
         x = x.to(self.device)
         channel_locations = channel_locations.to(self.device)
 
-        # LUNA expects mask=None for classification
-        # Forward returns (x_classified, x_original) for classification mode
-        logits, _ = self.backbone(
-            x_signal=x,
-            mask=None,
-            channel_locations=channel_locations,
-            channel_names=None  # Not used in classification mode
-        )
+        if self.linear_probe:
+            features = self._extract_features(x, channel_locations)
+            logits = self.linear_probe_head(features)
+        else:
+            logits, _ = self.backbone(
+                x_signal=x,
+                mask=None,
+                channel_locations=channel_locations,
+                channel_names=None
+            )
 
         return logits
 
@@ -225,6 +247,7 @@ class LUNABCIModel(AbstractModel):
         num_heads: int = 2,
         mlp_ratio: float = 4.0,
         freeze_backbone: bool = True,
+        linear_probe: bool = False,
     ):
         """Initialize LUNA BCI model.
 
@@ -241,7 +264,8 @@ class LUNABCIModel(AbstractModel):
         """
         super().__init__("LUNAModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.freeze_backbone = freeze_backbone
+        self.linear_probe = linear_probe
+        self.freeze_backbone = freeze_backbone or linear_probe
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
 
         # Model architecture parameters
@@ -517,6 +541,7 @@ class LUNABCIModel(AbstractModel):
                 mlp_ratio=self.mlp_ratio,
                 pretrained_path=self.pretrained_path,
                 freeze_backbone=self.freeze_backbone,
+                linear_probe=self.linear_probe,
             ).to(self.device)
             logger.info(f"Initialized LUNA BCI model with {n_channels} channels and {n_timepoints} timepoints (256 Hz)")
 
