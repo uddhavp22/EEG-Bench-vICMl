@@ -202,7 +202,8 @@ def make_dataset_lejepa(data: np.ndarray, labels: np.ndarray|None, task_name: st
 
 def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int,
                       ch_names: List[str], target_rate: int = 256, target_channels: Optional[List[str]] = None,
-                      l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1):
+                      l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1,
+                      patch_size: int = 40):
     """
     LUNA-specific dataset creation with 256 Hz resampling and 0.1-75 Hz filtering.
 
@@ -248,6 +249,12 @@ def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str,
         data = np.pad(data, ((0, 0), (0, 0), (0, padding)), mode='constant', constant_values=0)
     elif new_n_samples < n_samples:
         data = data[:, :, :new_n_samples]
+
+    # Ensure compatibility with LUNA patching
+    remainder = data.shape[2] % patch_size
+    if remainder != 0:
+        pad = patch_size - remainder
+        data = np.pad(data, ((0, 0), (0, 0), (0, pad)), mode='constant', constant_values=0)
 
     # One hot encode labels
     if labels is not None:

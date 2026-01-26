@@ -43,6 +43,10 @@ RotaryTransformerBlock = None
 FrequencyFeatureEmbedder = None
 ChannelEmbeddings = None
 
+DEFAULT_SINGLE_LABEL_CHUNK_LEN_S = 10
+DEFAULT_MULTILABEL_CHUNK_LEN_S = 16
+TARGET_SAMPLING_FREQ = 256
+
 
 def _setup_luna_imports(biofoundation_path: Optional[str] = None):
     """Setup BioFoundation imports by adding path to sys.path if needed."""
@@ -236,8 +240,22 @@ class LUNAClinicalModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_classes = num_classes
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.chunk_len_s = chunk_len_s if chunk_len_s is not None else (16 if num_labels_per_chunk else None)
         self.freeze_backbone = freeze_backbone
+        self.target_sampling_freq = TARGET_SAMPLING_FREQ
+
+        if self.num_labels_per_chunk is not None:
+            self.chunk_len_s = chunk_len_s if chunk_len_s is not None else DEFAULT_MULTILABEL_CHUNK_LEN_S
+            self.internal_chunk_len_s = None
+            self.use_internal_chunking = False
+        else:
+            # Handle chunking inside the model so we don't depend on dataset-side chunking.
+            self.chunk_len_s = None
+            self.internal_chunk_len_s = chunk_len_s if chunk_len_s is not None else DEFAULT_SINGLE_LABEL_CHUNK_LEN_S
+            self.use_internal_chunking = True
+            logger.info(
+                "Single-label task detected. Using internal chunking with %s-second windows.",
+                self.internal_chunk_len_s,
+            )
 
         # Model architecture parameters
         self.patch_size = patch_size
@@ -321,6 +339,86 @@ class LUNAClinicalModel(AbstractModel):
 
         logger.info(f"Initialized LUNA model with {n_channels} channels and {n_timepoints} timepoints")
 
+    def _internal_chunk_len_samples(self) -> Optional[int]:
+        if not self.use_internal_chunking or self.internal_chunk_len_s is None:
+            return None
+        chunk_len = int(round(self.internal_chunk_len_s * self.target_sampling_freq))
+        chunk_len = max(self.patch_size, (chunk_len // self.patch_size) * self.patch_size)
+        return chunk_len
+
+    def _split_signal_into_chunks(self, signal: torch.Tensor, chunk_len: int) -> torch.Tensor:
+        """Split a single recording (C, T) into chunks of length chunk_len."""
+        assert signal.dim() == 2, "Signal must have shape [C, T]"
+        total_len = (signal.shape[-1] // self.patch_size) * self.patch_size
+        if total_len == 0:
+            total_len = signal.shape[-1]
+        signal = signal[..., :total_len].contiguous()
+        chunk_len = min(chunk_len, signal.shape[-1])
+        chunk_len = max(self.patch_size, (chunk_len // self.patch_size) * self.patch_size)
+        n_chunks = max(1, signal.shape[-1] // chunk_len)
+        trimmed = n_chunks * chunk_len
+        signal = signal[..., :trimmed]
+        chunks = signal.view(signal.shape[0], n_chunks, chunk_len).permute(1, 0, 2).contiguous()
+        return chunks
+
+    def _expand_label_for_chunks(self, label: torch.Tensor, num_chunks: int) -> torch.Tensor:
+        if label.dim() == 0:
+            return label.repeat(num_chunks)
+        repeat_dims = [num_chunks] + [1] * label.dim()
+        return label.unsqueeze(0).repeat(*repeat_dims)
+
+    def _prepare_train_batch(
+        self,
+        x: torch.Tensor,
+        yb: torch.Tensor,
+        coords: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.use_internal_chunking:
+            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            return x, yb, cb
+
+        chunk_len = self._internal_chunk_len_samples()
+        assert chunk_len is not None
+
+        chunked_x, chunked_y, chunked_cb = [], [], []
+        for i in range(x.size(0)):
+            sample_chunks = self._split_signal_into_chunks(x[i], chunk_len)
+            chunked_x.append(sample_chunks)
+            chunked_y.append(self._expand_label_for_chunks(yb[i], sample_chunks.size(0)))
+            chunked_cb.append(coords.unsqueeze(0).expand(sample_chunks.size(0), -1, -1))
+
+        return (
+            torch.cat(chunked_x, dim=0),
+            torch.cat(chunked_y, dim=0),
+            torch.cat(chunked_cb, dim=0),
+        )
+
+    def _prepare_inference_batch(
+        self,
+        x: torch.Tensor,
+        indices: torch.Tensor,
+        coords: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.use_internal_chunking:
+            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            return x, indices, cb
+
+        chunk_len = self._internal_chunk_len_samples()
+        assert chunk_len is not None
+
+        chunked_x, chunked_idx, chunked_cb = [], [], []
+        for i in range(x.size(0)):
+            sample_chunks = self._split_signal_into_chunks(x[i], chunk_len)
+            chunked_x.append(sample_chunks)
+            chunked_idx.append(indices[i].repeat(sample_chunks.size(0)))
+            chunked_cb.append(coords.unsqueeze(0).expand(sample_chunks.size(0), -1, -1))
+
+        return (
+            torch.cat(chunked_x, dim=0),
+            torch.cat(chunked_idx, dim=0),
+            torch.cat(chunked_cb, dim=0),
+        )
+
     def _train_epoch(
         self,
         train_loader: DataLoader,
@@ -356,29 +454,29 @@ class LUNAClinicalModel(AbstractModel):
             if not self.model.is_multilabel_task and yb.dim() > 1:
                 yb = yb.argmax(dim=1)
 
-            # Expand coords for batch
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            x_chunks, y_chunks, cb = self._prepare_train_batch(x, yb, coords)
 
             optimizer.zero_grad()
-            logits = self.model(x, cb)
-            loss = self.model.loss_fn(logits, yb)
+            logits = self.model(x_chunks, cb)
+            loss = self.model.loss_fn(logits, y_chunks)
             loss.backward()
             optimizer.step()
 
             if scheduler is not None:
                 scheduler.step()
 
-            total_loss += loss.item() * x.size(0)
-            total_samples += x.size(0)
+            batch_samples = x_chunks.size(0)
+            total_loss += loss.item() * batch_samples
+            total_samples += batch_samples
 
             if logits.dim() == 2:
                 preds = torch.argmax(logits, dim=1)
-                target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                target = y_chunks if y_chunks.dim() == 1 else y_chunks.argmax(dim=1)
                 correct += (preds == target).sum().item()
-                total_acc_samples += x.size(0)
+                total_acc_samples += batch_samples
 
             # Memory cleanup
-            del x, yb, logits, loss
+            del x, yb, x_chunks, y_chunks, cb, logits, loss
             torch.cuda.empty_cache()
 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
@@ -416,21 +514,22 @@ class LUNAClinicalModel(AbstractModel):
             if not self.model.is_multilabel_task and yb.dim() > 1:
                 yb = yb.argmax(dim=1)
 
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            x_chunks, y_chunks, cb = self._prepare_train_batch(x, yb, coords)
 
-            logits = self.model(x, cb)
-            loss = self.model.loss_fn(logits, yb)
-            val_loss += loss.item() * x.size(0)
-            val_samples += x.size(0)
+            logits = self.model(x_chunks, cb)
+            loss = self.model.loss_fn(logits, y_chunks)
+            batch_samples = x_chunks.size(0)
+            val_loss += loss.item() * batch_samples
+            val_samples += batch_samples
 
             if logits.dim() == 2:
                 preds = torch.argmax(logits, dim=1)
-                target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                target = y_chunks if y_chunks.dim() == 1 else y_chunks.argmax(dim=1)
                 val_correct += (preds == target).sum().item()
-                val_acc_samples += x.size(0)
+                val_acc_samples += batch_samples
 
             # Memory cleanup
-            del x, yb, logits, loss
+            del x, yb, x_chunks, y_chunks, cb, logits, loss
             torch.cuda.empty_cache()
 
         avg_loss = val_loss / val_samples if val_samples > 0 else 0.0
@@ -613,18 +712,30 @@ class LUNAClinicalModel(AbstractModel):
 
         for x, idx, _ in tqdm(test_loader, desc="Predicting"):
             x = x.to(self.device)
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            idx = idx.to(self.device)
+            batch_x, batch_idx, cb = self._prepare_inference_batch(x, idx, coords)
 
-            logits = self.model(x, cb)
+            logits = self.model(batch_x, cb)
             pred = torch.argmax(logits, dim=1)
             predictions.append(pred.cpu())
-            indices.append(idx)
+            indices.append(batch_idx.cpu())
+
+            del x, idx, batch_x, batch_idx, cb, logits, pred
+            torch.cuda.empty_cache()
 
         predictions = torch.cat(predictions, dim=0).cpu().numpy()
         indices = torch.cat(indices, dim=0).cpu().numpy()
 
         # Aggregate predictions if using chunks (majority voting)
         if self.chunk_len_s is not None and not self.model.is_multilabel_task:
+            unique_indices = np.unique(indices)
+            aggregated_predictions = []
+            for idx in unique_indices:
+                idx_predictions = predictions[indices == idx]
+                most_common_prediction = Counter(idx_predictions).most_common(1)[0][0]
+                aggregated_predictions.append(most_common_prediction)
+            predictions = np.array(aggregated_predictions)
+        elif self.use_internal_chunking and not self.model.is_multilabel_task:
             unique_indices = np.unique(indices)
             aggregated_predictions = []
             for idx in unique_indices:
