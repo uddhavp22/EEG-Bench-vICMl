@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import os
 from functools import partial
 from typing import Dict, List, Optional
 
@@ -19,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm import tqdm
 from transformers import AutoModel
 from safetensors.torch import load_file as load_safetensors
@@ -28,6 +29,7 @@ from joblib import Memory
 
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
+from ...utils.utils import configure_torch_backend_for_speed, create_temp_cache_dir, cleanup_temp_cache_dir
 from ...config import get_config_value
 from .LaBraM.make_dataset import make_dataset_luna, standard_1020
 from .LaBraM.utils_2 import n_unique_labels, calc_class_weights, reverse_map_label
@@ -196,15 +198,16 @@ class LUNABCIWrapper(nn.Module):
 
     def _extract_features(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Run backbone up to latent tokens and return pooled features."""
-        B = x.shape[0]
-        x_tokens, _ = self.backbone.prepare_tokens(x, channel_locations, mask=None)
-        x_tokens, _ = self.backbone.cross_attn(x_tokens)
-        num_patches = x_tokens.shape[0] // B
-        x_tokens = x_tokens.reshape(B, num_patches, -1)
-        for blk in self.backbone.blocks:
-            x_tokens = blk(x_tokens)
-        x_latent = self.backbone.norm(x_tokens)
-        return x_latent.mean(dim=1)
+        with torch.no_grad():
+            B = x.shape[0]
+            x_tokens, _ = self.backbone.prepare_tokens(x, channel_locations, mask=None)
+            x_tokens, _ = self.backbone.cross_attn(x_tokens)
+            num_patches = x_tokens.shape[0] // B
+            x_tokens = x_tokens.reshape(B, num_patches, -1)
+            for blk in self.backbone.blocks:
+                x_tokens = blk(x_tokens)
+            x_latent = self.backbone.norm(x_tokens)
+            return x_latent.mean(dim=1)
 
     def forward(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Forward pass through LUNA model.
@@ -445,6 +448,169 @@ class LUNABCIModel(AbstractModel):
 
         return X, y
 
+    def _fit_linear_probe_cached(
+        self,
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader],
+        criterion: nn.Module,
+        n_epochs: int,
+    ) -> None:
+        assert self.model is not None and self.model.linear_probe_head is not None
+
+        cache_dir = create_temp_cache_dir("luna_bci_lp_")
+        try:
+            feature_dim = self.model.feature_dim
+            train_count = len(train_loader.dataset)
+
+            train_features_path = os.path.join(cache_dir, "train_features.dat")
+            train_labels_path = os.path.join(cache_dir, "train_labels.dat")
+            train_features = np.memmap(
+                train_features_path, dtype=np.float32, mode="w+", shape=(train_count, feature_dim)
+            )
+            train_labels = np.memmap(
+                train_labels_path, dtype=np.int64, mode="w+", shape=(train_count,)
+            )
+
+            self.model.eval()
+            idx = 0
+            for batch in tqdm(train_loader, desc="Cache train embeddings", leave=False):
+                data = batch["sample"].to(self.device)
+                pos = batch["pos"].to(self.device)
+                labels = batch["label"].cpu().numpy()
+
+                feats = self.model._extract_features(data, pos).cpu().numpy()
+                bsz = feats.shape[0]
+                train_features[idx:idx + bsz] = feats
+                train_labels[idx:idx + bsz] = labels
+                idx += bsz
+
+            train_features.flush()
+            train_labels.flush()
+
+            train_dataset = TensorDataset(
+                torch.from_numpy(train_features), torch.from_numpy(train_labels)
+            )
+            train_feat_loader = DataLoader(
+                train_dataset,
+                batch_size=256,
+                shuffle=True,
+                num_workers=0
+            )
+
+            val_feat_loader = None
+            if val_loader is not None:
+                val_count = len(val_loader.dataset)
+                val_features_path = os.path.join(cache_dir, "val_features.dat")
+                val_labels_path = os.path.join(cache_dir, "val_labels.dat")
+                val_features = np.memmap(
+                    val_features_path, dtype=np.float32, mode="w+", shape=(val_count, feature_dim)
+                )
+                val_labels = np.memmap(
+                    val_labels_path, dtype=np.int64, mode="w+", shape=(val_count,)
+                )
+
+                idx = 0
+                for batch in tqdm(val_loader, desc="Cache val embeddings", leave=False):
+                    data = batch["sample"].to(self.device)
+                    pos = batch["pos"].to(self.device)
+                    labels = batch["label"].cpu().numpy()
+
+                    feats = self.model._extract_features(data, pos).cpu().numpy()
+                    bsz = feats.shape[0]
+                    val_features[idx:idx + bsz] = feats
+                    val_labels[idx:idx + bsz] = labels
+                    idx += bsz
+
+                val_features.flush()
+                val_labels.flush()
+
+                val_dataset = TensorDataset(
+                    torch.from_numpy(val_features), torch.from_numpy(val_labels)
+                )
+                val_feat_loader = DataLoader(
+                    val_dataset,
+                    batch_size=256,
+                    shuffle=False,
+                    num_workers=0
+                )
+
+            optimizer = torch.optim.AdamW(self.model.linear_probe_head.parameters(), lr=1e-3)
+
+            print(f"Starting linear probe training for {n_epochs} epochs on {self.device}...")
+
+            for epoch in range(n_epochs):
+                self.model.linear_probe_head.train()
+                total_loss = 0.0
+                total_samples = 0
+                correct = 0
+
+                pbar = tqdm(train_feat_loader, desc=f"Epoch {epoch+1}", leave=False)
+                for feats, target in pbar:
+                    feats = feats.to(self.device)
+                    target = target.to(self.device)
+
+                    optimizer.zero_grad()
+                    output = self.model.linear_probe_head(feats)
+                    loss = criterion(output, target)
+                    loss.backward()
+                    optimizer.step()
+
+                    batch_size = target.size(0)
+                    total_loss += loss.item() * batch_size
+                    _, predicted = output.max(1)
+                    total_samples += batch_size
+                    correct += predicted.eq(target).sum().item()
+
+                    pbar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'acc': f'{100.*correct/total_samples if total_samples > 0 else 0.0:.2f}%'
+                    })
+
+                epoch_loss = total_loss / total_samples if total_samples > 0 else 0.0
+                epoch_acc = 100. * correct / total_samples if total_samples > 0 else 0.0
+
+                val_loss = None
+                val_acc = None
+                if val_feat_loader is not None:
+                    self.model.linear_probe_head.eval()
+                    v_loss = 0.0
+                    v_samples = 0
+                    v_correct = 0
+                    with torch.no_grad():
+                        for feats, target in val_feat_loader:
+                            feats = feats.to(self.device)
+                            target = target.to(self.device)
+                            output = self.model.linear_probe_head(feats)
+                            loss = criterion(output, target)
+                            batch_size = target.size(0)
+                            v_loss += loss.item() * batch_size
+                            v_samples += batch_size
+                            _, predicted = output.max(1)
+                            v_correct += predicted.eq(target).sum().item()
+                    val_loss = v_loss / v_samples if v_samples > 0 else 0.0
+                    val_acc = v_correct / v_samples if v_samples > 0 else 0.0
+
+                metrics = {
+                    f"{self.name}/train_loss": epoch_loss,
+                    f"{self.name}/train_acc": epoch_acc / 100.0,
+                }
+                if val_loss is not None and val_acc is not None:
+                    metrics[f"{self.name}/val_loss"] = val_loss
+                    metrics[f"{self.name}/val_acc"] = val_acc
+
+                if self.wandb_run:
+                    wandb_utils.log(metrics, step=epoch + 1)
+
+                if val_loss is not None and val_acc is not None:
+                    print(
+                        f"Epoch {epoch+1}/{n_epochs} - Loss: {epoch_loss:.4f}, "
+                        f"Acc: {epoch_acc:.2f}%, Val Loss: {val_loss:.4f}, Val Acc: {val_acc * 100:.2f}%"
+                    )
+                else:
+                    print(f"Epoch {epoch+1}/{n_epochs} - Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.2f}%")
+        finally:
+            cleanup_temp_cache_dir(cache_dir)
+
     def _evaluate_loader(self, data_loader: DataLoader, criterion: nn.Module) -> tuple[float, float]:
         """Evaluate the model on a dataloader and return loss/accuracy."""
         assert self.model is not None
@@ -550,15 +716,22 @@ class LUNABCIModel(AbstractModel):
         if y_all is None:
             raise ValueError("Training labels are missing after preprocessing.")
 
+        configure_torch_backend_for_speed()
+
         collate_fn = self._get_collate_fn(channel_names)
         train_dataset = SimpleDataset(X_all, y_all)
+
+        num_workers = 2
+        loader_kwargs = dict(num_workers=num_workers, pin_memory=True)
+        if num_workers > 0:
+            loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
 
         train_loader = DataLoader(
             train_dataset,
             batch_size=64,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=0
+            **loader_kwargs
         )
 
         val_loader = None
@@ -571,7 +744,7 @@ class LUNABCIModel(AbstractModel):
                     batch_size=64,
                     shuffle=False,
                     collate_fn=collate_fn,
-                    num_workers=0
+                    **loader_kwargs
                 )
 
         # 5. Optimizer and loss
@@ -582,6 +755,10 @@ class LUNABCIModel(AbstractModel):
 
         # 6. Training loop
         n_epochs = 10
+
+        if self.linear_probe:
+            self._fit_linear_probe_cached(train_loader, val_loader, criterion, n_epochs)
+            return
 
         print(f"Starting training for {n_epochs} epochs on {self.device}...")
 
@@ -693,12 +870,17 @@ class LUNABCIModel(AbstractModel):
         test_dataset = SimpleDataset(X_all, y=None)
         collate_fn = self._get_collate_fn(self.channel_names)
 
+        num_workers = 2
+        loader_kwargs = dict(num_workers=num_workers, pin_memory=True)
+        if num_workers > 0:
+            loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
         test_loader = DataLoader(
             test_dataset,
             batch_size=64,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=0
+            **loader_kwargs
         )
 
         # Predict

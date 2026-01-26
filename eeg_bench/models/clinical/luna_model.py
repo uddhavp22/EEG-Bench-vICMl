@@ -16,12 +16,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import sys
 import logging
+import os
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from transformers import AutoModel
 from safetensors.torch import load_file as load_safetensors
@@ -30,6 +31,7 @@ from ..abstract_model import AbstractModel
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from ...utils import wandb_utils
+from ...utils.utils import configure_torch_backend_for_speed, create_temp_cache_dir, cleanup_temp_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -187,15 +189,16 @@ class LUNAClinicalWrapper(nn.Module):
 
     def _extract_features(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Run backbone up to latent tokens and return pooled features."""
-        B = x.shape[0]
-        x_tokens, _ = self.backbone.prepare_tokens(x, channel_locations, mask=None)
-        x_tokens, _ = self.backbone.cross_attn(x_tokens)
-        num_patches = x_tokens.shape[0] // B
-        x_tokens = x_tokens.reshape(B, num_patches, -1)
-        for blk in self.backbone.blocks:
-            x_tokens = blk(x_tokens)
-        x_latent = self.backbone.norm(x_tokens)
-        return x_latent.mean(dim=1)
+        with torch.no_grad():
+            B = x.shape[0]
+            x_tokens, _ = self.backbone.prepare_tokens(x, channel_locations, mask=None)
+            x_tokens, _ = self.backbone.cross_attn(x_tokens)
+            num_patches = x_tokens.shape[0] // B
+            x_tokens = x_tokens.reshape(B, num_patches, -1)
+            for blk in self.backbone.blocks:
+                x_tokens = blk(x_tokens)
+            x_latent = self.backbone.norm(x_tokens)
+            return x_latent.mean(dim=1)
 
     def forward(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Forward pass through LUNA model.
@@ -444,6 +447,256 @@ class LUNAClinicalModel(AbstractModel):
             torch.cat(chunked_cb, dim=0),
         )
 
+    def _fit_linear_probe_cached(
+        self,
+        dataset_train,
+        dataset_val,
+        coords_train: torch.Tensor,
+        coords_val: torch.Tensor,
+        class_weights: torch.Tensor,
+    ) -> None:
+        assert self.model is not None and self.model.linear_probe_head is not None
+
+        configure_torch_backend_for_speed()
+
+        batch_size = 64 if self.chunk_len_s else 1
+        num_workers = 2
+        loader_kwargs = dict(num_workers=num_workers, pin_memory=True)
+        if num_workers > 0:
+            loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
+        train_loader = DataLoader(
+            dataset_train,
+            batch_size=batch_size,
+            shuffle=False,
+            **loader_kwargs
+        )
+        val_loader = DataLoader(
+            dataset_val,
+            batch_size=batch_size,
+            shuffle=False,
+            **loader_kwargs
+        )
+
+        total_train = 0
+        label_shape = None
+        label_dtype = None
+        with torch.no_grad():
+            for x, yb, _ in train_loader:
+                x, yb = x.to(self.device), yb.to(self.device)
+                if not self.model.is_multilabel_task and yb.dim() > 1:
+                    yb = yb.argmax(dim=1)
+                x_chunks, y_chunks, _ = self._prepare_train_batch(x, yb, coords_train)
+                total_train += x_chunks.size(0)
+                if label_shape is None:
+                    label_shape = tuple(y_chunks.shape[1:]) if y_chunks.dim() > 1 else ()
+                    label_dtype = y_chunks.cpu().numpy().dtype
+
+        total_val = 0
+        with torch.no_grad():
+            for x, yb, _ in val_loader:
+                x, yb = x.to(self.device), yb.to(self.device)
+                if not self.model.is_multilabel_task and yb.dim() > 1:
+                    yb = yb.argmax(dim=1)
+                x_chunks, y_chunks, _ = self._prepare_train_batch(x, yb, coords_val)
+                total_val += x_chunks.size(0)
+
+        cache_dir = create_temp_cache_dir("luna_clinical_lp_")
+        try:
+            feature_dim = self.model.feature_dim
+            train_features_path = os.path.join(cache_dir, "train_features.dat")
+            train_labels_path = os.path.join(cache_dir, "train_labels.dat")
+            train_features = np.memmap(
+                train_features_path, dtype=np.float32, mode="w+", shape=(total_train, feature_dim)
+            )
+            if label_shape:
+                train_labels = np.memmap(
+                    train_labels_path, dtype=label_dtype, mode="w+", shape=(total_train, *label_shape)
+                )
+            else:
+                train_labels = np.memmap(
+                    train_labels_path, dtype=label_dtype, mode="w+", shape=(total_train,)
+                )
+
+            idx = 0
+            self.model.eval()
+            for x, yb, _ in tqdm(train_loader, desc="Cache train embeddings", leave=False):
+                x, yb = x.to(self.device), yb.to(self.device)
+                if not self.model.is_multilabel_task and yb.dim() > 1:
+                    yb = yb.argmax(dim=1)
+                x_chunks, y_chunks, cb = self._prepare_train_batch(x, yb, coords_train)
+                feats = self.model._extract_features(x_chunks, cb).cpu().numpy()
+                bsz = feats.shape[0]
+                train_features[idx:idx + bsz] = feats
+                train_labels[idx:idx + bsz] = y_chunks.cpu().numpy()
+                idx += bsz
+
+            train_features.flush()
+            train_labels.flush()
+
+            train_dataset_cached = TensorDataset(
+                torch.from_numpy(train_features),
+                torch.from_numpy(train_labels)
+            )
+            train_feat_loader = DataLoader(
+                train_dataset_cached,
+                batch_size=256,
+                shuffle=True,
+                num_workers=0
+            )
+
+            val_feat_loader = None
+            if total_val > 0:
+                val_features_path = os.path.join(cache_dir, "val_features.dat")
+                val_labels_path = os.path.join(cache_dir, "val_labels.dat")
+                val_features = np.memmap(
+                    val_features_path, dtype=np.float32, mode="w+", shape=(total_val, feature_dim)
+                )
+                if label_shape:
+                    val_labels = np.memmap(
+                        val_labels_path, dtype=label_dtype, mode="w+", shape=(total_val, *label_shape)
+                    )
+                else:
+                    val_labels = np.memmap(
+                        val_labels_path, dtype=label_dtype, mode="w+", shape=(total_val,)
+                    )
+
+                idx = 0
+                for x, yb, _ in tqdm(val_loader, desc="Cache val embeddings", leave=False):
+                    x, yb = x.to(self.device), yb.to(self.device)
+                    if not self.model.is_multilabel_task and yb.dim() > 1:
+                        yb = yb.argmax(dim=1)
+                    x_chunks, y_chunks, cb = self._prepare_train_batch(x, yb, coords_val)
+                    feats = self.model._extract_features(x_chunks, cb).cpu().numpy()
+                    bsz = feats.shape[0]
+                    val_features[idx:idx + bsz] = feats
+                    val_labels[idx:idx + bsz] = y_chunks.cpu().numpy()
+                    idx += bsz
+
+                val_features.flush()
+                val_labels.flush()
+
+                val_dataset_cached = TensorDataset(
+                    torch.from_numpy(val_features),
+                    torch.from_numpy(val_labels)
+                )
+                val_feat_loader = DataLoader(
+                    val_dataset_cached,
+                    batch_size=256,
+                    shuffle=False,
+                    num_workers=0
+                )
+
+            optimizer = optim.AdamW(self.model.linear_probe_head.parameters(), lr=1e-6, weight_decay=0.01)
+            criterion = nn.CrossEntropyLoss(weight=class_weights)
+            max_epochs = 30
+            steps_per_epoch = max(1, len(train_feat_loader))
+            max_lr = 4e-4
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch,
+                epochs=max_epochs,
+                pct_start=0.2,
+            )
+
+            patience = 10
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
+
+            for epoch in range(1, max_epochs + 1):
+                self.model.linear_probe_head.train()
+                total_loss = 0.0
+                total_samples = 0
+                correct = 0
+                total_acc_samples = 0
+
+                for feats, yb in tqdm(train_feat_loader, desc=f"Epoch {epoch}", leave=False):
+                    feats = feats.to(self.device)
+                    yb = yb.to(self.device)
+                    if not self.model.is_multilabel_task and yb.dim() > 1:
+                        yb = yb.argmax(dim=1)
+
+                    optimizer.zero_grad()
+                    logits = self.model.linear_probe_head(feats)
+                    loss = criterion(logits, yb)
+                    loss.backward()
+                    optimizer.step()
+                    scheduler.step()
+
+                    batch_samples = feats.size(0)
+                    total_loss += loss.item() * batch_samples
+                    total_samples += batch_samples
+
+                    if logits.dim() == 2:
+                        preds = torch.argmax(logits, dim=1)
+                        target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                        correct += (preds == target).sum().item()
+                        total_acc_samples += batch_samples
+
+                train_loss = total_loss / total_samples if total_samples > 0 else 0.0
+                train_acc = correct / total_acc_samples if total_acc_samples > 0 else 0.0
+
+                val_loss = 0.0
+                val_acc = 0.0
+                if val_feat_loader is not None:
+                    self.model.linear_probe_head.eval()
+                    val_total = 0
+                    val_correct = 0
+                    val_samples = 0
+                    with torch.no_grad():
+                        for feats, yb in val_feat_loader:
+                            feats = feats.to(self.device)
+                            yb = yb.to(self.device)
+                            if not self.model.is_multilabel_task and yb.dim() > 1:
+                                yb = yb.argmax(dim=1)
+                            logits = self.model.linear_probe_head(feats)
+                            loss = criterion(logits, yb)
+                            batch_samples = feats.size(0)
+                            val_total += loss.item() * batch_samples
+                            val_samples += batch_samples
+                            if logits.dim() == 2:
+                                preds = torch.argmax(logits, dim=1)
+                                target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                                val_correct += (preds == target).sum().item()
+                    val_loss = val_total / val_samples if val_samples > 0 else 0.0
+                    val_acc = val_correct / val_samples if val_samples > 0 else 0.0
+
+                if val_feat_loader is not None and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                current_lr = scheduler.get_last_lr()[0]
+                metrics = {
+                    f"{self.name}/train_loss": train_loss,
+                    f"{self.name}/train_acc": train_acc,
+                    f"{self.name}/val_loss": val_loss,
+                    f"{self.name}/val_acc": val_acc,
+                    f"{self.name}/lr": current_lr,
+                }
+
+                if self.wandb_run:
+                    wandb_utils.log(metrics, step=epoch)
+
+                print(
+                    f"[Epoch {epoch:02d}/{max_epochs}] "
+                    f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                    f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} | "
+                    f"lr={current_lr:.2e} patience={patience_counter}/{patience}"
+                )
+
+                if patience_counter >= patience:
+                    break
+
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
+        finally:
+            cleanup_temp_cache_dir(cache_dir)
+
     def _train_epoch(
         self,
         train_loader: DataLoader,
@@ -499,10 +752,7 @@ class LUNAClinicalModel(AbstractModel):
                 target = y_chunks if y_chunks.dim() == 1 else y_chunks.argmax(dim=1)
                 correct += (preds == target).sum().item()
                 total_acc_samples += batch_samples
-
-            # Memory cleanup
             del x, yb, x_chunks, y_chunks, cb, logits, loss
-            torch.cuda.empty_cache()
 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
         accuracy = correct / total_acc_samples if total_acc_samples > 0 else 0.0
@@ -552,10 +802,7 @@ class LUNAClinicalModel(AbstractModel):
                 target = y_chunks if y_chunks.dim() == 1 else y_chunks.argmax(dim=1)
                 val_correct += (preds == target).sum().item()
                 val_acc_samples += batch_samples
-
-            # Memory cleanup
             del x, yb, x_chunks, y_chunks, cb, logits, loss
-            torch.cuda.empty_cache()
 
         avg_loss = val_loss / val_samples if val_samples > 0 else 0.0
         accuracy = val_correct / val_acc_samples if val_acc_samples > 0 else 0.0
@@ -602,30 +849,39 @@ class LUNAClinicalModel(AbstractModel):
         if self.model is None:
             self._init_model(sample_data)
 
+        configure_torch_backend_for_speed()
+
         # Setup loss function with class weights
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
         # Create data loaders
         batch_size = 64 if self.chunk_len_s else 1
+        num_workers = 2
+        loader_kwargs = dict(num_workers=num_workers, pin_memory=True)
+        if num_workers > 0:
+            loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
         train_loader = DataLoader(
             dataset_train,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=8,
-            pin_memory=True
+            **loader_kwargs
         )
         val_loader = DataLoader(
             dataset_val,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=8,
-            pin_memory=True
+            **loader_kwargs
         )
 
         # Get channel coordinates
         coords_train = self._get_channel_coords(dataset_train.ch_names)
         coords_val = self._get_channel_coords(dataset_val.ch_names)
+
+        if self.linear_probe:
+            self._fit_linear_probe_cached(dataset_train, dataset_val, coords_train, coords_val, class_weights)
+            return
 
         # Setup optimizer and scheduler (following EEGLejepa pattern)
         max_epochs = 30
@@ -720,11 +976,16 @@ class LUNAClinicalModel(AbstractModel):
 
         # Create test loader
         batch_size = 64 if self.chunk_len_s else 1
+        num_workers = 2
+        loader_kwargs = dict(num_workers=num_workers, pin_memory=True)
+        if num_workers > 0:
+            loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
         test_loader = DataLoader(
             dataset_test,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=0
+            **loader_kwargs
         )
 
         # Get channel coordinates
@@ -746,7 +1007,6 @@ class LUNAClinicalModel(AbstractModel):
             indices.append(batch_idx.cpu())
 
             del x, idx, batch_x, batch_idx, cb, logits, pred
-            torch.cuda.empty_cache()
 
         predictions = torch.cat(predictions, dim=0).cpu().numpy()
         indices = torch.cat(indices, dim=0).cpu().numpy()
