@@ -64,6 +64,8 @@ def normalize_task_name(task_name):
 def get_completed_experiments(results_dir="results/raw"):
     """Check which experiments have already completed based on result files."""
     completed = set()
+    results_dir = '/raid/spanchavati/EEG-Bench-vICMl/results/raw'
+
     if not os.path.exists(results_dir):
         return completed
 
@@ -79,6 +81,7 @@ def get_completed_experiments(results_dir="results/raw"):
             pct = int(pct) / 100 if pct else 1.0
             completed.add((model_name.lower().replace("model", ""), task_name, pct))
     return completed
+
 
 
 def run_experiment(args):

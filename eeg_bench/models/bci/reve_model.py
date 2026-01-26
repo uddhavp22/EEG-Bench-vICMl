@@ -51,11 +51,19 @@ class REVEWrapper(nn.Module):
         # Load the backbone
         self.hidden_dim = hidden_dim
 
-        self.backbone = AutoModel.from_pretrained(
-            "brain-bzh/reve-base", 
-            trust_remote_code=True, 
-            torch_dtype="auto",
-        )
+        # Load REVE backbone
+        try:
+            self.backbone = AutoModel.from_pretrained(
+                "brain-bzh/reve-base",
+                trust_remote_code=True,
+                torch_dtype="auto",
+            ).to(self.device)
+        except:
+            self.backbone = AutoModel.from_pretrained(
+                "/raid/spanchavati/up-branch/reve-base",
+                trust_remote_code=True,
+                torch_dtype="auto",
+            ).to(self.device)
         
         # Freeze the backbone
         for param in self.backbone.parameters():

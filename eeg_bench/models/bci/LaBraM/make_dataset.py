@@ -270,7 +270,7 @@ def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str,
 
 def make_dataset_reve(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int,
                       ch_names: List[str], target_rate: int = 200, target_channels: Optional[List[str]] = None,
-                      l_freq: float = 0.5, h_freq: float = 99.5, train: bool = True, split_size=0.1):
+                      l_freq: float = 0.5, h_freq: float = 80.0, train: bool = True, split_size=0.1):
     """
     REVE-specific dataset creation with 200 Hz resampling, 0.5-99.5 Hz filtering, and z-score normalization.
 
