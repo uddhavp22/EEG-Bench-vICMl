@@ -6,14 +6,14 @@
 # using only the final checkpoint for each model.
 
 models:
-  # lejepa_small:
-  #   base_path: /path/to/your/lejepa_small  # UPDATE THIS PATH
-  #   version: 0
-  # lejepa_base:
-  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global 
-  #   version: 4
-  lejepa_base_global_proj:
+  lejepa_base_global_proj: #technically this is the old version!
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+    version: 0
+  lejepa_vitb_global_proj:
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_vitb_proj/
+    version: 2
+  lejepa_base_global_proj_channelmixerv1_short:
+    base_path: /home/spanchavati/eegfmchallenge/lightning_logs/v2_lejepa_pretraining_global_proj/
     version: 0
   # Add more model sizes as needed:
   # lejepa_large:

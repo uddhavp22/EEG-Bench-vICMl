@@ -189,7 +189,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        self.head = nn.Linear(DIM, out_dim) # nn.Sequential(nn.LayerNorm(DIM), 
+        self.head =  nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim)) #, 
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
 

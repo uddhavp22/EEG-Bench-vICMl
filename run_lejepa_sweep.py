@@ -64,6 +64,23 @@ CLINICAL_TASKS = [
     "parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy",
     "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"
 ]
+
+TASK_NAME_MAP = {
+    "Left Hand vs Right Hand MI": "left_right",
+    "Right Hand vs Feet MI": "right_feet",
+    "Left Hand vs Right Hand vs Feet vs Tongue MI": "left_right_feet_tongue",
+    "Five Fingers MI": "5_fingers",
+}
+
+def normalize_task_name(task_name):
+    if task_name in TASK_NAME_MAP:
+        return TASK_NAME_MAP[task_name]
+    if task_name.endswith("_clinical"):
+        return task_name.replace("_clinical", "")
+    return task_name
+
+
+
 ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
 
 
@@ -298,40 +315,51 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     if not os.path.exists(results_dir):
         return completed
 
-    # Pattern: model_task_LeJEPA*_ckpt_checkpointid_LP_timestamp.json
-    # Example: lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_20260124_122416.json
-    # Example: lejepa_base_global_proj_sleep_stages_clinical_LeJEPAClinical_ckpt_last_LP_20260124_184138.json
-    # Note: percentage is not in these filenames, defaulting to 1.0
+    # Pattern: {model_name}_{task}_{ModelClass}_ckpt_{checkpoint_id}[_pctXX][_LP]_{timestamp}.json
+    # Examples:
+    # - lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_20260124_122416.json
+    # - lejepa_base_global_proj_Left Hand vs Right Hand vs Feet vs Tongue MI_LeJEPABCI_ckpt_last_LP_20260124_192457.json
     
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
         
-        # Match pattern: *_LeJEPA*_ckpt_*_LP_timestamp.json or *_LeJEPA*_ckpt_*_timestamp.json
+        # Match pattern: *_LeJEPA{Type}_ckpt_{checkpoint_id}[_pctXX][_LP]_{timestamp}.json
         match = re.match(
-            r"(.+?)_(LeJEPA\w+)_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?_(\d{8}_\d{6})\.json",
+            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?_(\d{8}_\d{6})\.json",
             filename
         )
         if match:
             prefix, model_class, ckpt_id, pct_str, timestamp = match.groups()
             
-            # Now split prefix into model_name and task
-            # We know the valid tasks, so find which one matches at the end
+            # Split prefix into model_name and task
+            # Try to find a known task at the end of prefix
             model_name = None
             task = None
             
+            # Try each known task (including space-separated ones)
             for known_task in ALL_TASKS:
-                # Check if prefix ends with the task (accounting for _clinical/_bci suffix in filename)
-                # The task in filename might have _clinical or _bci appended
-                for suffix in ["_clinical", "_bci", ""]:
-                    task_pattern = known_task + suffix
-                    if prefix.endswith("_" + task_pattern):
-                        model_name = prefix[:-(len(task_pattern) + 1)]
-                        task = known_task
+                # Build possible task patterns to match in filename
+                possible_patterns = [
+                    f"{known_task}_clinical",
+                    f"{known_task}_bci",
+                    known_task
+                ]
+                
+                # Also check for the reverse mapping (e.g., "Left Hand vs Right Hand vs Feet vs Tongue MI")
+                for full_name, short_name in TASK_NAME_MAP.items():
+                    if short_name == known_task:
+                        possible_patterns.insert(0, full_name)
+                
+                for pattern in possible_patterns:
+                    if prefix.endswith("_" + pattern):
+                        model_name = prefix[:-(len(pattern) + 1)]
+                        task = normalize_task_name(pattern)
                         break
-                    elif prefix == task_pattern:
+                    elif prefix == pattern:
                         model_name = ""
-                        task = known_task
+                        task = normalize_task_name(pattern)
                         break
+                
                 if task:
                     break
             
