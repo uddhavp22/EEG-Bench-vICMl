@@ -36,6 +36,8 @@ class REVEClinicalWrapper(nn.Module):
         self.is_multilabel_task = num_labels_per_chunk is not None
         self.num_classes = num_classes
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.freeze_backbone = freeze_backbone
+        self._pos_cache: Dict[tuple[str, ...], torch.Tensor] = {}
 
         # Load REVE backbone
         try:
@@ -79,16 +81,16 @@ class REVEClinicalWrapper(nn.Module):
 
         if use_paper_head:
             self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.RMSNorm(input_dim),
-            nn.Dropout(0.1),
-            nn.Linear(input_dim, out_dim),
-        )
+                nn.Flatten(),
+                nn.RMSNorm(input_dim),
+                nn.Dropout(0.1),
+                nn.Linear(input_dim, out_dim),
+            )
         else:
             self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(input_dim, out_dim),
-        )
+                nn.Flatten(),
+                nn.Linear(input_dim, out_dim),
+            )
 
 
 
@@ -123,7 +125,10 @@ class REVEClinicalWrapper(nn.Module):
         pos = pos.reshape(B * n_chunks, C, -1)
 
         # Process all chunks through backbone
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        if self.freeze_backbone:
+            with torch.no_grad():
+                features = self.backbone(x, pos)  # (B*n_chunks, C, T_out, H)
+        else:
             features = self.backbone(x, pos)  # (B*n_chunks, C, T_out, H)
 
         # Mean over time: (B*n_chunks, C, H)
@@ -172,19 +177,47 @@ class REVEClinicalModel(AbstractModel):
     def _get_channel_coords(self, ch_names: List[str]) -> torch.Tensor:
         """Get channel coordinates from position bank."""
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
-        positions = self.pos_bank(clean_names)
-
-        
-        if isinstance(positions, dict):
-            positions = positions.get(
-                "positions", positions.get("coords", positions.get("last_hidden_state"))
-            )
-
-        
-        if positions.dim() == 3:
-            positions = positions.squeeze(0)
+        if hasattr(self.pos_bank, "mapping") and hasattr(self.pos_bank, "embedding"):
+            positions = []
+            for name in clean_names:
+                idx = self.pos_bank.mapping.get(name)
+                if idx is not None:
+                    positions.append(self.pos_bank.embedding[idx])
+            if not positions:
+                return torch.zeros((0, 3), device=self.device)
+            positions = torch.stack(positions, dim=0)
+        else:
+            positions = self.pos_bank(clean_names)
+            if isinstance(positions, dict):
+                positions = positions.get(
+                    "positions", positions.get("coords", positions.get("last_hidden_state"))
+                )
+            if positions.dim() == 3:
+                positions = positions.squeeze(0)
 
         return positions.float().to(self.device)
+
+    def _filter_channels_and_get_pos(
+        self, x: torch.Tensor, channels: List[str]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Filter input to channels present in the position bank and return coords."""
+        clean_names = [c.replace("EEG", "").strip().upper() for c in channels]
+        if hasattr(self.pos_bank, "mapping"):
+            keep = [i for i, name in enumerate(clean_names) if name in self.pos_bank.mapping]
+        else:
+            keep = list(range(len(clean_names)))
+
+        if not keep:
+            return x[:, :0, :], torch.zeros((0, 3), device=self.device)
+
+        x = x[:, keep, :]
+        kept_names = [clean_names[i] for i in keep]
+        key = tuple(kept_names)
+        cached = self._pos_cache.get(key)
+        if cached is None:
+            cached = self._get_channel_coords(kept_names)
+            self._pos_cache[key] = cached
+        return x, cached
 
     def _init_model(self, sample: np.ndarray) -> None:
         """Initialize the model based on sample data shape."""
@@ -212,11 +245,14 @@ class REVEClinicalModel(AbstractModel):
         correct = 0
         total_acc_samples = 0
 
-        for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
+        for x, yb, channels in tqdm(train_loader, desc=f"Epoch {epoch}"):
             x, yb = x.to(self.device), yb.to(self.device)
             if not self.model.is_multilabel_task and yb.dim() > 1:
                 yb = yb.argmax(dim=1)
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            if isinstance(channels, list):
+                channels = channels[0]
+            x, cb = self._filter_channels_and_get_pos(x, channels)
+            cb = cb.unsqueeze(0).expand(x.size(0), -1, -1)
 
             optimizer.zero_grad()
             logits = self.model(x, cb)
@@ -249,11 +285,14 @@ class REVEClinicalModel(AbstractModel):
         val_correct = 0
         val_acc_samples = 0
 
-        for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}"):
+        for x, yb, channels in tqdm(val_loader, desc=f"Val {epoch}"):
             x, yb = x.to(self.device), yb.to(self.device)
             if not self.model.is_multilabel_task and yb.dim() > 1:
                 yb = yb.argmax(dim=1)
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            if isinstance(channels, list):
+                channels = channels[0]
+            x, cb = self._filter_channels_and_get_pos(x, channels)
+            cb = cb.unsqueeze(0).expand(x.size(0), -1, -1)
 
             logits = self.model(x, cb)
             loss = self.model.loss_fn(logits, yb)
@@ -305,17 +344,15 @@ class REVEClinicalModel(AbstractModel):
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
-        # Create data loaders
+        # Create data loaders (batch_size=1 to avoid variable-length collation)
         train_loader = DataLoader(
-            dataset_train, batch_size=64, shuffle=True, num_workers=8, pin_memory=True
+            dataset_train, batch_size=1, shuffle=True, num_workers=2, pin_memory=True,
+            persistent_workers=True, prefetch_factor=2
         )
         val_loader = DataLoader(
-            dataset_val, batch_size=64, shuffle=False, num_workers=8, pin_memory=True
+            dataset_val, batch_size=1, shuffle=False, num_workers=2, pin_memory=True,
+            persistent_workers=True, prefetch_factor=2
         )
-
-        # Get channel coordinates
-        coords_train = self._get_channel_coords(dataset_train.ch_names)
-        coords_val = self._get_channel_coords(dataset_val.ch_names)
 
         # Setup optimizer
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
@@ -354,21 +391,25 @@ class REVEClinicalModel(AbstractModel):
         # Create test loader
         test_loader = DataLoader(
             dataset_test,
-            batch_size=64 if self.chunk_len_s else 1,
+            batch_size=1,
             shuffle=False,
-            num_workers=0
+            num_workers=2,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2
         )
 
-        # Get channel coordinates
-        coords = self._get_channel_coords(dataset_test.ch_names)
         self.model.eval()
 
         # Collect predictions
         predictions = []
         indices = []
-        for x, idx, _ in tqdm(test_loader, desc="Predicting"):
+        for x, idx, channels in tqdm(test_loader, desc="Predicting"):
             x = x.to(self.device)
-            cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            if isinstance(channels, list):
+                channels = channels[0]
+            x, cb = self._filter_channels_and_get_pos(x, channels)
+            cb = cb.unsqueeze(0).expand(x.size(0), -1, -1)
             logits = self.model(x, cb)
             pred = torch.argmax(logits, dim=1)
             predictions.append(pred.cpu())
