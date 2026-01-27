@@ -744,7 +744,7 @@ class LaBraMModel(AbstractModel):
         batch_size = 64 if self.chunk_len_s is not None else 1
         # Encoding is a single long pass; tune workers + prefetch to reduce GPU idle time.
         cpu_count = os.cpu_count() or 2
-        encode_workers = 2 #min(4, max(1, cpu_count // 2))
+        encode_workers = min(4, max(1, cpu_count // 2))
         loader_kwargs = dict(
             batch_size=batch_size,
             num_workers=encode_workers,
@@ -753,7 +753,7 @@ class LaBraMModel(AbstractModel):
         )
         if encode_workers > 0:
             loader_kwargs["persistent_workers"] = True
-            loader_kwargs["prefetch_factor"] = 4
+            loader_kwargs["prefetch_factor"] = 8
         dataloader = DataLoader(dataset, **loader_kwargs)
         input_chans = utils.get_input_chans(dataset.ch_names)
         cache_bundle = self._encode_dataset(dataset, dataloader, input_chans, task_name)
