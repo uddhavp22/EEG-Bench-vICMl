@@ -381,52 +381,53 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         labels_list = []
 
         chunk_length = self.model.chunk_length  # 4000 samples = 20s at 200Hz
+        with torch.inference_mode():
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                for batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
+                    x, yb, batch_coords = batch  # third element is channels, not needed
+                    x = x.to(self.device)
+                    B, C, T = x.shape
 
-        for batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
-            x, yb, batch_coords = batch  # third element is channels, not needed
-            x = x.to(self.device)
-            B, C, T = x.shape
+                    # Handle chunking (same logic as ConcreteLeJEPAClinical.forward)
+                    n_chunks = T // chunk_length
+                    if n_chunks == 0:
+                        pad_length = chunk_length - T
+                        x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
+                        n_chunks = 1
+                        T = chunk_length
 
-            # Handle chunking (same logic as ConcreteLeJEPAClinical.forward)
-            n_chunks = T // chunk_length
-            if n_chunks == 0:
-                pad_length = chunk_length - T
-                x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
-                n_chunks = 1
-                T = chunk_length
+                    chunk_trunc = n_chunks * chunk_length
+                    x = x[:, :, :chunk_trunc]
 
-            chunk_trunc = n_chunks * chunk_length
-            x = x[:, :, :chunk_trunc]
+                    # Reshape into chunks
+                    x = x.view(B, C, n_chunks, chunk_length)
+                    x = x.permute(0, 2, 1, 3)
+                    x = x.reshape(B * n_chunks, C, chunk_length)
 
-            # Reshape into chunks
-            x = x.view(B, C, n_chunks, chunk_length)
-            x = x.permute(0, 2, 1, 3)
-            x = x.reshape(B * n_chunks, C, chunk_length)
+                    #path for bipolar stuff
+                    if x.shape[1] != coords.shape[0]: # mismatch due to bipolar channels
+                        #stack batch_coords tuple to get batch channel names
+                        batch_coords = [ch_name[0] for ch_name in batch_coords]
+                        coords = self._coords(batch_coords).to(self.device)
 
-            #path for bipolar stuff
-            if x.shape[1] != coords.shape[0]: # mismatch due to bipolar channels
-                #stack batch_coords tuple to get batch channel names
-                batch_coords = [ch_name[0] for ch_name in batch_coords]
-                coords = self._coords(batch_coords).to(self.device)
+                    # Expand coords for all chunks
+                    cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
+                    cb = cb.reshape(B * n_chunks, C, 3)
 
-            # Expand coords for all chunks
-            cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
-            cb = cb.reshape(B * n_chunks, C, 3)
+                    # Forward through backbone
+                    outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
+                    cls = outputs["cls_token"]
 
-            # Forward through backbone
-            outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
-            cls = outputs["cls_token"]
+                    # Reshape and average across chunks
+                    embedding_dim = cls.shape[1]
+                    cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)  # (B, dim)
 
-            # Reshape and average across chunks
-            embedding_dim = cls.shape[1]
-            cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)  # (B, dim)
-
-            embeddings_list.append(cls.cpu())
-            # Handle different label formats (match LaBraM behavior)
-            if not self.model.is_multilabel_task and yb.dim() > 1:
-                labels_list.append(yb.argmax(dim=1).cpu())
-            else:
-                labels_list.append(yb.cpu())
+                    embeddings_list.append(cls.cpu())
+                    # Handle different label formats (match LaBraM behavior)
+                    if not self.model.is_multilabel_task and yb.dim() > 1:
+                        labels_list.append(yb.argmax(dim=1).cpu())
+                    else:
+                        labels_list.append(yb.cpu())
 
         embeddings = torch.cat(embeddings_list, dim=0)
         labels = torch.cat(labels_list, dim=0)
@@ -533,7 +534,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
         # 4. DataLoader Setup
         bs = 64 if self.chunk_len_s else 1
-        train_loader = DataLoader(dataset_train, batch_size=bs, shuffle=False, num_workers=8, pin_memory=True)  # shuffle=False for caching
+        train_loader = DataLoader(dataset_train, batch_size=bs, shuffle=False, num_workers=4, pin_memory=True)  # shuffle=False for caching
         val_loader = DataLoader(dataset_val, batch_size=bs, shuffle=False)
 
         # 5. Training Setup (aligned with BCI)

@@ -157,7 +157,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
 
             save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
                         data_percentage=percentage, linear_probe=linear_probe,
-                        result_prefix=result_prefix, checkpoint_id=checkpoint_id)
+                        result_prefix=result_prefix, checkpoint_id=checkpoint_id, seed =seed)
             print_classification_results(
                 y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
             )
