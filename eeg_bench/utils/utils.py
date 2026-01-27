@@ -246,6 +246,7 @@ def save_results(
     result_prefix: Optional[str] = None,
     checkpoint_id: Optional[str] = None,
     seed: Optional[int] = None,
+    eval_noise_metadata: Optional[Dict] = None,
 ):
 
     # Get the current timestamp
@@ -286,7 +287,8 @@ def save_results(
         "linear_probe": linear_probe,
         "result_prefix": result_prefix,
         "checkpoint_id": checkpoint_id,
-        "seed": seed
+        "seed": seed,
+        "eval_noise": eval_noise_metadata,
     }
 
     # Save the results to the file

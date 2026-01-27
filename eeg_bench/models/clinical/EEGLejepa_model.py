@@ -103,41 +103,6 @@ class ConcreteLeJEPAClinical(nn.Module):
             print("Loaded Config!")
         else:
             raise 
-            # cfg = EEGLEJEPAConfig(
-            #     name="EEGLEJEPA",
-            #     dim=384,
-            #     proj_dim=16,
-            #     patch_size=25,
-            #     n_channels=128,
-            #     max_time=1500,
-            #     patch_embedder=ConvPatchEmbedderConfig(
-            #         name="ConvPatchEmbedder",
-            #         preserve_channels=False,
-            #     ),
-            #     channel_mixer_config=DynamicChannelMixerConfig(
-            #         name="DynamicChannelMixer",
-            #         coord_dim=3,
-            #         output_channels=64,
-            #     ),
-            #     encoder_config=EncoderConfig(
-            #         dim=384,
-            #         depth=12,
-            #         heads=6,
-            #         use_flash_attn=True,
-            #     ),
-            #     predictor_config=EncoderConfig(
-            #         dim=128,
-            #         depth=4,
-            #         heads=4,
-            #         use_flash_attn=True,
-            #     ),
-            #     masking={
-            #         "mask_ratio": 0.5,
-            #         "block_size_range": [5, 10],
-            #         "strategy_probs": [1.0, 0.0, 0.0],
-            #     },
-            
-            # )
 
         # ------------------------------------------------------------
         # Build backbone
@@ -522,6 +487,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             use_cache=True,
             sfreq=250
         )
+        
+        breakpoint()
+
 
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
@@ -537,6 +505,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         # 3. Validation Split (aligned with BCI: 15%)
         val_split = 0.2
         dataset_train, dataset_val = dataset_train.split_train_val(val_split)
+
+
 
         # 4. DataLoader Setup
         bs = 64 if self.chunk_len_s else 1
@@ -858,7 +828,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
             if has_noise:
                 batch_seed = int(noise_seed) + int(batch_idx) if noise_seed is not None else None
-                x = apply_eeg_noise(
+                x_clean = x.clone()
+                x_noisy = apply_eeg_noise(
                     x,
                     sfreq=sfreq,
                     snr_db=snr_db,
@@ -868,6 +839,18 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     emg_band=emg_band,
                     seed=batch_seed,
                 )
+                noise = x_noisy - x_clean
+                sig_rms = torch.sqrt((x_clean ** 2).mean(dim=-1) + 1e-8)
+                noise_rms = torch.sqrt((noise ** 2).mean(dim=-1) + 1e-8)
+                achieved_snr_db = 20 * torch.log10(sig_rms / noise_rms)
+
+                print(
+                    f"[NoiseDebug] target={snr_db}dB "
+                    f"achieved_mean={achieved_snr_db.mean().item():.2f}dB "
+                    f"achieved_std={achieved_snr_db.std().item():.2f}dB"
+                )
+
+                x = x_noisy
 
             # Handle bipolar/mismatch channels like training path
             if C != coords.shape[0]:

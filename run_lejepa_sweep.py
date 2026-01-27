@@ -132,6 +132,8 @@ class ExperimentConfig:
                 args.extend(["--eval-noise-emg-band", str(fmin), str(fmax)])
             if noise_cfg.get("seed") is not None:
                 args.extend(["--eval-noise-seed", str(noise_cfg["seed"])])
+            if noise_cfg.get("mix_all"):
+                args.append("--eval-noise-mix-all")
             if noise_cfg.get("include_clean") is False:
                 args.append("--eval-noise-no-clean")
         return args

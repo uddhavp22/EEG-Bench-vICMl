@@ -105,35 +105,82 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
             # Don't subsample X/y here - pass full data to fit() with percentage parameter
             logger.info(f"Training data: full dataset, will subsample to {int(percentage*100)}% in model")
 
+
             noise_types = (eval_noise_config or {}).get("noise_types") or []
             noise_levels = (eval_noise_config or {}).get("levels_db") or []
             include_clean = (eval_noise_config or {}).get("include_clean", True)
-            noise_seed_base = (eval_noise_config or {}).get("seed", seed)
+            mix_all = (eval_noise_config or {}).get("mix_all", False)
+
+            noise_seed_base = (eval_noise_config or {}).get("seed")
+            if noise_seed_base is None:
+                noise_seed_base = seed
 
             if noise_types and noise_levels:
                 logger.info(
-                    "Evaluation noise sweep enabled: types=%s levels_db=%s include_clean=%s",
+                    "Evaluation noise sweep enabled: types=%s levels_db=%s include_clean=%s mix_all=%s",
                     noise_types,
                     noise_levels,
                     include_clean,
+                    mix_all,
                 )
             elif noise_types:
                 logger.warning(
                     "Eval noise types provided but no levels_db; falling back to clean evaluation only."
                 )
 
-            levels_to_run = []
-            if include_clean:
-                levels_to_run.append(math.inf)
-            levels_to_run.extend(noise_levels if noise_types and noise_levels else [])
-            if not levels_to_run:
-                levels_to_run = [math.inf]
+            noise_levels_to_run = noise_levels if noise_types and noise_levels else []
 
-            noise_tags = [format_noise_tag(noise_types if not math.isinf(lvl) else [], lvl) for lvl in levels_to_run]
-            per_noise_collectors = {
-                tag: {"models_names": [], "results": [], "y_trues": [], "y_trains": []}
-                for tag in noise_tags
-            }
+            # Build noise sets: either the provided mix, or each type + the mix.
+            if noise_types and noise_levels_to_run:
+                noise_sets = [[t] for t in noise_types] if mix_all else [list(noise_types)]
+                if mix_all and len(noise_types) > 1:
+                    noise_sets.append(list(noise_types))
+            else:
+                noise_sets = []
+
+            per_noise_collectors = {}
+
+            # Clean condition collector (run once, not per noise set)
+            if include_clean:
+                clean_tag = format_noise_tag([], math.inf)
+                per_noise_collectors[clean_tag] = {
+                    "models_names": [],
+                    "results": [],
+                    "y_trues": [],
+                    "y_trains": [],
+                    "noise_metadata": {
+                        "tag": clean_tag,
+                        "snr_db": None,
+                        "noise_types": [],
+                        "sfreq": (eval_noise_config or {}).get("sfreq"),
+                        "channel_dropout_prob": (eval_noise_config or {}).get("channel_dropout_prob", 0.0),
+                        "one_over_f_band": (eval_noise_config or {}).get("one_over_f_band"),
+                        "emg_band": (eval_noise_config or {}).get("emg_band"),
+                        "base_seed": noise_seed_base,
+                    },
+                }
+
+            # Noise condition collectors
+            for noise_set in noise_sets:
+                for lvl in noise_levels_to_run:
+                    tag = format_noise_tag(noise_set, lvl)
+                    if tag not in per_noise_collectors:
+                        per_noise_collectors[tag] = {
+                            "models_names": [],
+                            "results": [],
+                            "y_trues": [],
+                            "y_trains": [],
+                            "noise_metadata": {
+                                "tag": tag,
+                                "snr_db": float(lvl),
+                                "noise_types": list(noise_set),
+                                "sfreq": (eval_noise_config or {}).get("sfreq"),
+                                "channel_dropout_prob": (eval_noise_config or {}).get("channel_dropout_prob", 0.0),
+                                "one_over_f_band": (eval_noise_config or {}).get("one_over_f_band"),
+                                "emg_band": (eval_noise_config or {}).get("emg_band"),
+                                "base_seed": noise_seed_base,
+                            },
+                        }
 
             for model_entry in tqdm(models, desc=f"Models for Task: {task.name} ({int(percentage*100)}%)"):
                 # Handle both class types and factory functions
@@ -173,6 +220,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                         model.set_wandb_run(wandb_run)
                     model.fit(X_train_full, this_y_train, meta_train, data_percentage=percentage)
 
+
                     supports_noise = hasattr(model, "set_eval_noise_config")
                     if noise_types and noise_levels and not supports_noise:
                         logger.warning(
@@ -180,25 +228,59 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                             str(model),
                         )
 
-                    for level_idx, level in enumerate(levels_to_run):
-                        if supports_noise and noise_types and not math.isinf(level):
-                            noise_cfg = dict(eval_noise_config or {})
-                            noise_cfg["snr_db"] = float(level)
-                            noise_cfg["seed"] = int(noise_seed_base) + int(level_idx)
-                            model.set_eval_noise_config(noise_cfg)
-                        elif supports_noise:
-                            model.set_eval_noise_config(None)
-
-                        y_pred = []
+                    def _run_and_collect(tag: str):
+                        y_pred_local = []
                         for x, m in zip(X_test, meta_test):
-                            y_pred.append(model.predict([x], [m]))
+                            y_pred_local.append(model.predict([x], [m]))
+                        collector_local = per_noise_collectors[tag]
+                        collector_local["models_names"].append(str(model))
+                        collector_local["results"].append(y_pred_local)
+                        collector_local["y_trues"].append(this_y_test)
+                        collector_local["y_trains"].append(this_y_train)
 
-                        tag = format_noise_tag(noise_types if not math.isinf(level) else [], level)
-                        collector = per_noise_collectors[tag]
-                        collector["models_names"].append(str(model))
-                        collector["results"].append(y_pred)
-                        collector["y_trues"].append(this_y_test)
-                        collector["y_trains"].append(this_y_train)
+                    # Clean condition once
+                    if include_clean:
+                        if supports_noise:
+                            model.set_eval_noise_config(None)
+                        clean_tag = format_noise_tag([], math.inf)
+                        _run_and_collect(clean_tag)
+
+                    # Noise conditions: each set, each SNR level
+                    if supports_noise and noise_sets and noise_levels_to_run:
+                        total_levels = max(1, len(noise_levels_to_run))
+                        for set_idx, noise_set in enumerate(noise_sets):
+                            for level_idx, level in enumerate(noise_levels_to_run):
+                                noise_cfg = dict(eval_noise_config or {})
+                                noise_cfg["noise_types"] = list(noise_set)
+                                noise_cfg["snr_db"] = float(level)
+                                combo_idx = set_idx * total_levels + level_idx
+                                noise_cfg["seed"] = int(noise_seed_base) + int(combo_idx)
+                                model.set_eval_noise_config(noise_cfg)
+                                tag = format_noise_tag(noise_set, level)
+                                _run_and_collect(tag)
+                    elif not include_clean:
+                        # Fallback: if no clean and no supported noise sweep, still evaluate once.
+                        if supports_noise:
+                            model.set_eval_noise_config(None)
+                        fallback_tag = format_noise_tag([], math.inf)
+                        if fallback_tag not in per_noise_collectors:
+                            per_noise_collectors[fallback_tag] = {
+                                "models_names": [],
+                                "results": [],
+                                "y_trues": [],
+                                "y_trains": [],
+                                "noise_metadata": {
+                                    "tag": fallback_tag,
+                                    "snr_db": None,
+                                    "noise_types": [],
+                                    "sfreq": (eval_noise_config or {}).get("sfreq"),
+                                    "channel_dropout_prob": (eval_noise_config or {}).get("channel_dropout_prob", 0.0),
+                                    "one_over_f_band": (eval_noise_config or {}).get("one_over_f_band"),
+                                    "emg_band": (eval_noise_config or {}).get("emg_band"),
+                                    "base_seed": noise_seed_base,
+                                },
+                            }
+                        _run_and_collect(fallback_tag)
 
             for tag, collector in per_noise_collectors.items():
                 tag_prefix = result_prefix
@@ -218,6 +300,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     result_prefix=tag_prefix,
                     checkpoint_id=checkpoint_id,
                     seed=seed,
+                    eval_noise_metadata=collector.get("noise_metadata"),
                 )
                 print_classification_results(
                     collector["y_trains"],
@@ -333,6 +416,12 @@ def main():
         default=None,
         choices=["gaussian", "one_over_f", "emg", "channel_dropout"],
         help="Noise types to inject at evaluation time (LeJEPA clinical currently supports this).",
+    )
+
+    parser.add_argument(
+        "--eval-noise-mix-all",
+        action="store_true",
+        help="When multiple --eval-noise-types are provided, run each type separately and also the combined mix.",
     )
     parser.add_argument(
         "--eval-noise-levels-db",
@@ -453,6 +542,7 @@ def main():
             "sfreq": args.eval_noise_sfreq,
             "channel_dropout_prob": args.eval_noise_channel_dropout_prob,
             "seed": args.eval_noise_seed,
+            "mix_all": args.eval_noise_mix_all,
         }
         if args.eval_noise_one_over_f_band:
             eval_noise_config["one_over_f_band"] = tuple(args.eval_noise_one_over_f_band)

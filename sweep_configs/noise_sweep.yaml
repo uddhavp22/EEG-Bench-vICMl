@@ -1,0 +1,32 @@
+# sweep_configs/noise_sweep.yaml
+models:
+  lejepa_base_global_proj:
+    base_path: /path/to/lejepa_base_global_proj
+    version: 0
+
+checkpoints:
+  steps: []
+  include_last: true
+  auto_discover: false
+
+tasks:
+  epoch_sweep: []
+  final_only: [abnormal]
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+
+execution:
+  gpus: 1
+  workers_per_gpu: 1
+  log_dir: logs/lejepa_noise_sweep
+
+# Run one noise type at a time by editing noise_types below
+eval_noise:
+  noise_types: [gaussian, one_over_f, emg, channel_dropout]
+  levels_db: [30, 20, 10, 0, -5]
+  mix_all: true
+  channel_dropout_prob: 0.1
+  include_clean: true
+

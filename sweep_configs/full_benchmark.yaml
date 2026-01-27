@@ -24,6 +24,9 @@ models:
   lejepa_base_global_proj_channelmixerv1_short:
     base_path: /home/spanchavati/eegfmchallenge/lightning_logs/v2_lejepa_pretraining_global_proj/
     version: 0
+  lejepa_base_global_proj_channelmixerv1_short_v2:
+    base_path: /radraid2/spanchavati/eegfmchallenge/lightning_logs/v2_lejepa_pretraining_global_proj/
+    version: 0
   # Add more model sizes as needed:
   # lejepa_large:
   #   base_path: /path/to/your/lejepa_large
@@ -47,3 +50,13 @@ execution:
   gpus: 2
   workers_per_gpu: 1
   log_dir: logs/lejepa_full_benchmark
+
+# eval_noise:
+#   noise_types: [gaussian, one_over_f, emg, channel_dropout]
+#   levels_db: [30, 20, 10, 0]
+#   channel_dropout_prob: 0.1
+#   sfreq: 200
+#   one_over_f_band: [0.5, 40]
+#   emg_band: [30, 100]
+#   seed: 123
+#   include_clean: true

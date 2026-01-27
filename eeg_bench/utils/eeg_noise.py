@@ -82,13 +82,16 @@ def _band_limited_noise(
     device = device or torch.device("cpu")
     dtype = dtype or torch.float32
 
+    # cuFFT can be unstable with float16/bfloat16. Do FFTs in float32.
+    fft_dtype = torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
+
     nyq = 0.5 * float(sfreq)
     fmin = max(0.0, float(fmin))
     fmax = min(float(fmax), nyq * 0.999)
     if fmax <= fmin or t < 4:
         return torch.zeros(shape, device=device, dtype=dtype)
 
-    freqs = torch.fft.rfftfreq(t, d=1.0 / float(sfreq)).to(device=device)
+    freqs = torch.fft.rfftfreq(t, d=1.0 / float(sfreq)).to(device=device, dtype=fft_dtype)
     mask = (freqs >= fmin) & (freqs <= fmax)
 
     # 1/f^alpha shaping within the band; avoid singularity at 0 Hz.
@@ -103,8 +106,8 @@ def _band_limited_noise(
     weights[0] = 0.0
 
     n_freq = freqs.numel()
-    real = torch.randn((b, c, n_freq), generator=generator, device=device, dtype=dtype)
-    imag = torch.randn((b, c, n_freq), generator=generator, device=device, dtype=dtype)
+    real = torch.randn((b, c, n_freq), generator=generator, device=device, dtype=fft_dtype)
+    imag = torch.randn((b, c, n_freq), generator=generator, device=device, dtype=fft_dtype)
     spectrum = torch.complex(real, imag) * weights
 
     noise = torch.fft.irfft(spectrum, n=t, dim=-1)
