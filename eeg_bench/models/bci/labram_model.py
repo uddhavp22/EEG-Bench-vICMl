@@ -49,7 +49,7 @@ class LaBraMBCIModel(nn.Module):
     def __init__(self, num_classes, freeze_encoder: bool = True):
         super().__init__()
 
-        checkpoint = torch.load(check_and_download_pretrained_model())
+        checkpoint = torch.load(check_and_download_pretrained_model(), weights_only=False)
         new_checkpoint = {}
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
@@ -93,6 +93,7 @@ class LaBraMBCIModel(nn.Module):
 
 def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
     model.train()
+    model.feature.eval() 
     running_loss, running_corrects, total_samples = 0.0, 0, 0
     
     for batch in tqdm(dataloader, desc="Training", leave=False):

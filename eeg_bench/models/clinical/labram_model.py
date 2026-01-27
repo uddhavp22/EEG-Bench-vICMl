@@ -12,7 +12,7 @@ from mne.io import BaseRaw
 from .LaBraM import modeling_finetune # important to load the models
 import torch.nn as nn
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F
 from tqdm import tqdm
 from ...config import get_config_value
@@ -45,7 +45,7 @@ class LaBraMBCIModel(nn.Module):
         super().__init__()
         self.device = device
         self.chunks = chunks
-        checkpoint = torch.load(check_and_download_pretrained_model())
+        checkpoint = torch.load(check_and_download_pretrained_model(), weights_only=False)
         new_checkpoint = {}
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
@@ -78,6 +78,7 @@ class LaBraMBCIModel(nn.Module):
         self.head = nn.Linear(200, num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1))
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
+        self.freeze_encoder = freeze_encoder
 
     def forward(self, x, input_chans):
         B, C, T = x.shape
@@ -149,6 +150,8 @@ class LaBraMBCIModel(nn.Module):
 
 def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
     model.train()
+    # if self.freeze_encoder:
+    model.feature.eval() #always keep the encoder in eval mode for lp fine-tuning
     running_loss, running_corrects, total_samples = 0.0, 0, 0
 
     print([n for n, p in model.named_parameters() if p.requires_grad])
