@@ -96,6 +96,7 @@ class ExperimentConfig:
     task: str
     percentage: float
     linear_probe: bool
+    eval_noise_config: Optional[Dict[str, Any]] = None
 
     def to_cmd_args(self) -> List[str]:
         """Convert to benchmark_console.py CLI arguments."""
@@ -112,6 +113,27 @@ class ExperimentConfig:
             args.extend(["--linear-probe", "--lejepa-freeze-encoder"])
         else:
             args.append("--lejepa-no-freeze-encoder")
+
+        noise_cfg = self.eval_noise_config or {}
+        noise_types = noise_cfg.get("noise_types") or []
+        noise_levels = noise_cfg.get("levels_db") or []
+        if noise_types and noise_levels:
+            args.extend(["--eval-noise-types", *map(str, noise_types)])
+            args.extend(["--eval-noise-levels-db", *map(str, noise_levels)])
+            if noise_cfg.get("sfreq") is not None:
+                args.extend(["--eval-noise-sfreq", str(noise_cfg["sfreq"])])
+            if noise_cfg.get("channel_dropout_prob") is not None:
+                args.extend(["--eval-noise-channel-dropout-prob", str(noise_cfg["channel_dropout_prob"])])
+            if noise_cfg.get("one_over_f_band"):
+                fmin, fmax = noise_cfg["one_over_f_band"]
+                args.extend(["--eval-noise-one-over-f-band", str(fmin), str(fmax)])
+            if noise_cfg.get("emg_band"):
+                fmin, fmax = noise_cfg["emg_band"]
+                args.extend(["--eval-noise-emg-band", str(fmin), str(fmax)])
+            if noise_cfg.get("seed") is not None:
+                args.extend(["--eval-noise-seed", str(noise_cfg["seed"])])
+            if noise_cfg.get("include_clean") is False:
+                args.append("--eval-noise-no-clean")
         return args
 
 
@@ -226,6 +248,8 @@ def load_config(config_path: str) -> Dict[str, Any]:
     config["training"].setdefault("linear_probe", True)
     config["training"].setdefault("data_percentages", [1.0])
 
+    config.setdefault("eval_noise", {})
+
     config.setdefault("execution", {})
     config["execution"].setdefault("gpus", 3)
     config["execution"].setdefault("workers_per_gpu", 2)  # Back to 2 for parallelism
@@ -288,6 +312,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                         task=task,
                         percentage=pct,
                         linear_probe=config["training"]["linear_probe"],
+                        eval_noise_config=config.get("eval_noise"),
                     ))
 
         # Generate experiments for final_only tasks (last.ckpt only)
@@ -302,6 +327,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                         task=task,
                         percentage=pct,
                         linear_probe=config["training"]["linear_probe"],
+                        eval_noise_config=config.get("eval_noise"),
                     ))
 
     # Sort experiments to maximize cache hits:

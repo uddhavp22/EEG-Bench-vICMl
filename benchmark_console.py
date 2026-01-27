@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 from tqdm import tqdm
 from eeg_bench.enums.split import Split
 from eeg_bench.tasks.clinical import (
@@ -43,6 +44,7 @@ from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks, 
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
 from eeg_bench.utils import wandb_utils
 from eeg_bench.config import load_lejepa_config, merge_lejepa_config_with_cli
+from eeg_bench.utils.eeg_noise import format_noise_tag
 # NOTE: Removed 'from asyncio.tasks import ALL_COMPLETED' as it was unused and caused an error in some environments.
 
 logging.basicConfig(level=logging.INFO,
@@ -69,7 +71,7 @@ ALL_TASKS_CLASSES = [
 ]
 
 def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False,
-              result_prefix=None, checkpoint_id=None):
+              result_prefix=None, checkpoint_id=None, eval_noise_config=None):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
@@ -103,11 +105,35 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
             # Don't subsample X/y here - pass full data to fit() with percentage parameter
             logger.info(f"Training data: full dataset, will subsample to {int(percentage*100)}% in model")
 
-            # Reset collectors for this percentage
-            models_names = []
-            results = []
-            y_trues = []
-            y_trains = []
+            noise_types = (eval_noise_config or {}).get("noise_types") or []
+            noise_levels = (eval_noise_config or {}).get("levels_db") or []
+            include_clean = (eval_noise_config or {}).get("include_clean", True)
+            noise_seed_base = (eval_noise_config or {}).get("seed", seed)
+
+            if noise_types and noise_levels:
+                logger.info(
+                    "Evaluation noise sweep enabled: types=%s levels_db=%s include_clean=%s",
+                    noise_types,
+                    noise_levels,
+                    include_clean,
+                )
+            elif noise_types:
+                logger.warning(
+                    "Eval noise types provided but no levels_db; falling back to clean evaluation only."
+                )
+
+            levels_to_run = []
+            if include_clean:
+                levels_to_run.append(math.inf)
+            levels_to_run.extend(noise_levels if noise_types and noise_levels else [])
+            if not levels_to_run:
+                levels_to_run = [math.inf]
+
+            noise_tags = [format_noise_tag(noise_types if not math.isinf(lvl) else [], lvl) for lvl in levels_to_run]
+            per_noise_collectors = {
+                tag: {"models_names": [], "results": [], "y_trues": [], "y_trains": []}
+                for tag in noise_tags
+            }
 
             for model_entry in tqdm(models, desc=f"Models for Task: {task.name} ({int(percentage*100)}%)"):
                 # Handle both class types and factory functions
@@ -146,22 +172,71 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     if hasattr(model, "set_wandb_run"):
                         model.set_wandb_run(wandb_run)
                     model.fit(X_train_full, this_y_train, meta_train, data_percentage=percentage)
-                    y_pred = []
-                    for x, m in zip(X_test, meta_test):
-                        y_pred.append(model.predict([x], [m]))
 
-                    models_names.append(str(model))
-                    results.append(y_pred)
-                    y_trues.append(this_y_test)
-                    y_trains.append(this_y_train)
+                    supports_noise = hasattr(model, "set_eval_noise_config")
+                    if noise_types and noise_levels and not supports_noise:
+                        logger.warning(
+                            "Model %s does not support eval noise injection; using clean eval.",
+                            str(model),
+                        )
 
-            save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
-                        data_percentage=percentage, linear_probe=linear_probe,
-                        result_prefix=result_prefix, checkpoint_id=checkpoint_id, seed =seed)
-            print_classification_results(
-                y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
-            )
-            generate_classification_plots(y_trains, y_trues, models_names, results, dataset_names, task.name, metrics)
+                    for level_idx, level in enumerate(levels_to_run):
+                        if supports_noise and noise_types and not math.isinf(level):
+                            noise_cfg = dict(eval_noise_config or {})
+                            noise_cfg["snr_db"] = float(level)
+                            noise_cfg["seed"] = int(noise_seed_base) + int(level_idx)
+                            model.set_eval_noise_config(noise_cfg)
+                        elif supports_noise:
+                            model.set_eval_noise_config(None)
+
+                        y_pred = []
+                        for x, m in zip(X_test, meta_test):
+                            y_pred.append(model.predict([x], [m]))
+
+                        tag = format_noise_tag(noise_types if not math.isinf(level) else [], level)
+                        collector = per_noise_collectors[tag]
+                        collector["models_names"].append(str(model))
+                        collector["results"].append(y_pred)
+                        collector["y_trues"].append(this_y_test)
+                        collector["y_trains"].append(this_y_train)
+
+            for tag, collector in per_noise_collectors.items():
+                tag_prefix = result_prefix
+                if tag != "clean":
+                    tag_prefix = f"{result_prefix}_{tag}" if result_prefix else tag
+
+                logger.info("Saving/plotting results for noise condition: %s", tag)
+                save_results(
+                    collector["y_trains"],
+                    collector["y_trues"],
+                    collector["models_names"],
+                    collector["results"],
+                    dataset_names,
+                    task.name,
+                    data_percentage=percentage,
+                    linear_probe=linear_probe,
+                    result_prefix=tag_prefix,
+                    checkpoint_id=checkpoint_id,
+                    seed=seed,
+                )
+                print_classification_results(
+                    collector["y_trains"],
+                    collector["y_trues"],
+                    collector["models_names"],
+                    collector["results"],
+                    dataset_names,
+                    task.name,
+                    metrics,
+                )
+                generate_classification_plots(
+                    collector["y_trains"],
+                    collector["y_trues"],
+                    collector["models_names"],
+                    collector["results"],
+                    dataset_names,
+                    task.name,
+                    metrics,
+                )
 
 
 def main():
@@ -250,6 +325,62 @@ def main():
         help="Freeze encoder and train only the classification head (linear probe evaluation). Applies to all foundation models."
     )
 
+    # Evaluation-time EEG noise sweep (robustness)
+    parser.add_argument(
+        "--eval-noise-types",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["gaussian", "one_over_f", "emg", "channel_dropout"],
+        help="Noise types to inject at evaluation time (LeJEPA clinical currently supports this).",
+    )
+    parser.add_argument(
+        "--eval-noise-levels-db",
+        type=float,
+        nargs="+",
+        default=None,
+        help="SNR levels in dB for evaluation sweeps (e.g., 30 20 10 0).",
+    )
+    parser.add_argument(
+        "--eval-noise-sfreq",
+        type=float,
+        default=None,
+        help="Sampling frequency to assume for noise synthesis (defaults to dataset/meta).",
+    )
+    parser.add_argument(
+        "--eval-noise-channel-dropout-prob",
+        type=float,
+        default=0.0,
+        help="Per-channel dropout probability for channel_dropout noise type.",
+    )
+    parser.add_argument(
+        "--eval-noise-one-over-f-band",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("FMIN", "FMAX"),
+        help="Band (Hz) for 1/f noise, e.g., --eval-noise-one-over-f-band 0.5 40.",
+    )
+    parser.add_argument(
+        "--eval-noise-emg-band",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("FMIN", "FMAX"),
+        help="Band (Hz) for EMG-like noise, e.g., --eval-noise-emg-band 30 100.",
+    )
+    parser.add_argument(
+        "--eval-noise-seed",
+        type=int,
+        default=None,
+        help="Base seed for evaluation noise generation (levels offset deterministically).",
+    )
+    parser.add_argument(
+        "--eval-noise-no-clean",
+        action="store_true",
+        help="Exclude the clean (no-noise) condition when running eval noise sweeps.",
+    )
+
     # LeJEPA configuration
     parser.add_argument(
         "--lejepa-config",
@@ -312,6 +443,23 @@ def main():
     if args.linear_probe and getattr(args, 'lejepa_no_freeze_encoder', False):
         logger.warning("--linear-probe and --lejepa-no-freeze-encoder conflict. "
                        "Model-specific flag takes precedence (encoder will NOT be frozen for LeJEPA).")
+
+    eval_noise_config = None
+    if args.eval_noise_types and args.eval_noise_levels_db:
+        eval_noise_config = {
+            "noise_types": args.eval_noise_types,
+            "levels_db": args.eval_noise_levels_db,
+            "include_clean": not args.eval_noise_no_clean,
+            "sfreq": args.eval_noise_sfreq,
+            "channel_dropout_prob": args.eval_noise_channel_dropout_prob,
+            "seed": args.eval_noise_seed,
+        }
+        if args.eval_noise_one_over_f_band:
+            eval_noise_config["one_over_f_band"] = tuple(args.eval_noise_one_over_f_band)
+        if args.eval_noise_emg_band:
+            eval_noise_config["emg_band"] = tuple(args.eval_noise_emg_band)
+    elif args.eval_noise_types and not args.eval_noise_levels_db:
+        logger.warning("--eval-noise-types provided without --eval-noise-levels-db; ignoring eval noise.")
 
     # Load and merge LeJEPA configuration
     lejepa_config = merge_lejepa_config_with_cli(
@@ -447,7 +595,8 @@ def main():
                 model_classes = list(models_map.values())
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
                          data_percentages=args.data_percentages, linear_probe=args.linear_probe,
-                         result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id)
+                         result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
+                         eval_noise_config=eval_noise_config)
 
         else:
             if not args.task or not args.model:
@@ -480,7 +629,8 @@ def main():
 
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
                      data_percentages=args.data_percentages, linear_probe=args.linear_probe,
-                     result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id)
+                     result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
+                     eval_noise_config=eval_noise_config)
     finally:
         wandb_utils.finish()
 
