@@ -5,7 +5,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 from collections import Counter
 from sklearn.model_selection import train_test_split
 from ..config import get_config_value
@@ -57,8 +57,12 @@ def subsample_data_stratified(
     X: List[np.ndarray],
     y: List[np.ndarray],
     percentage: float,
-    random_state: int = 42
-) -> Tuple[List[np.ndarray], List[np.ndarray], Dict]:
+    random_state: int = 42,
+    return_indices: bool = False,
+) -> Union[
+    Tuple[List[np.ndarray], List[np.ndarray], Dict],
+    Tuple[List[np.ndarray], List[np.ndarray], Dict, List[List[int]]],
+]:
     """
     Subsample training data while maintaining class proportions.
 
@@ -72,6 +76,8 @@ def subsample_data_stratified(
         X_sub: Subsampled X
         y_sub: Subsampled y
         stats: Dict with samples_per_class and total_samples
+        indices_per_dataset: Optional list of indices (per dataset) referencing the
+            original X entries that were kept. Returned when ``return_indices`` is True.
     """
     MIN_SAMPLES_PER_CLASS = 2  # Hardcoded minimum to ensure class representation
 
@@ -112,6 +118,13 @@ def subsample_data_stratified(
     # Detect if this is multi-label data
     is_multilabel = any(_is_multilabel_data(y_i) for y_i in y)
 
+    selected_indices_all: List[List[int]] = [[] for _ in X]
+
+    def _finalize(X_ret, y_ret, stats_ret):
+        if return_indices:
+            return X_ret, y_ret, stats_ret, selected_indices_all
+        return X_ret, y_ret, stats_ret
+
     if percentage >= 1.0:
         if is_multilabel:
             all_labels = _collect_label_values_multilabel(y)
@@ -125,7 +138,9 @@ def subsample_data_stratified(
             "samples_per_class": dict(Counter(all_labels_hashable)),
             "total_samples": len(all_labels)
         }
-        return X, y, stats
+        for ds_idx, dataset in enumerate(X):
+            selected_indices_all[ds_idx] = list(range(len(dataset)))
+        return _finalize(X, y, stats)
 
     X_sub, y_sub = [], []
     rng = np.random.RandomState(random_state)
@@ -133,18 +148,20 @@ def subsample_data_stratified(
     if is_multilabel:
         # For multi-label tasks, subsample at the recording level (no stratification)
         logger.info("Multi-label task detected: subsampling at recording level")
-        for X_i, y_i in zip(X, y):
+        for ds_idx, (X_i, y_i) in enumerate(zip(X, y)):
             n_recordings = len(X_i)
             n_keep = max(1, int(n_recordings * percentage))
 
             if n_keep >= n_recordings:
                 X_sub.append(X_i)
                 y_sub.append(y_i)
+                selected_indices_all[ds_idx] = list(range(n_recordings))
             else:
                 indices = rng.choice(n_recordings, size=n_keep, replace=False)
                 indices = sorted(indices)  # Keep order for reproducibility
                 X_sub.append(_take_indices(X_i, indices))
                 y_sub.append(_take_indices(y_i, indices))
+                selected_indices_all[ds_idx] = list(indices)
 
         all_labels = _collect_label_values_multilabel(y_sub)
         all_labels_hashable = [str(l) if isinstance(l, list) else l for l in all_labels]
@@ -153,12 +170,12 @@ def subsample_data_stratified(
             "total_samples": sum(len(y_i) for y_i in y_sub),
             "total_recordings": sum(len(X_i) for X_i in X_sub)
         }
-        return X_sub, y_sub, stats
+        return _finalize(X_sub, y_sub, stats)
 
     # Single-label task: use stratified sampling
     all_labels_sub = []
 
-    for X_i, y_i in zip(X, y):
+    for ds_idx, (X_i, y_i) in enumerate(zip(X, y)):
         n_samples = len(y_i)
         label_arr = _get_label_array(y_i)
         unique_classes, class_counts = np.unique(label_arr, return_counts=True)
@@ -173,6 +190,7 @@ def subsample_data_stratified(
             X_sub.append(X_i)
             y_sub.append(y_i)
             all_labels_sub.extend(_collect_label_values_singlelabel(y_i))
+            selected_indices_all[ds_idx] = list(range(n_samples))
             continue
 
         # Check if stratification is feasible
@@ -195,18 +213,22 @@ def subsample_data_stratified(
             X_sub.append(_take_indices(X_i, indices))
             y_sub.append(_take_indices(y_i, indices))
             all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, indices)))
+            selected_indices_all[ds_idx] = list(indices.tolist())
         else:
             # Try stratified split
             try:
-                X_keep, _, y_keep, _ = train_test_split(
-                    X_i, y_i,
+                train_indices, _ = train_test_split(
+                    np.arange(n_samples),
+                    label_arr,
                     train_size=percentage,
                     stratify=label_arr,
                     random_state=random_state
                 )
-                X_sub.append(X_keep)
-                y_sub.append(y_keep)
-                all_labels_sub.extend(_collect_label_values_singlelabel(y_keep))
+                train_indices = np.array(train_indices)
+                X_sub.append(_take_indices(X_i, train_indices))
+                y_sub.append(_take_indices(y_i, train_indices))
+                all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, train_indices)))
+                selected_indices_all[ds_idx] = list(train_indices.tolist())
             except ValueError as e:
                 # Fallback: sample proportionally from each class
                 logger.warning(f"Stratified split failed: {e}. Using per-class sampling.")
@@ -220,6 +242,7 @@ def subsample_data_stratified(
                 X_sub.append(_take_indices(X_i, indices))
                 y_sub.append(_take_indices(y_i, indices))
                 all_labels_sub.extend(_collect_label_values_singlelabel(_take_indices(y_i, indices)))
+                selected_indices_all[ds_idx] = list(indices.tolist())
 
     stats = {
         "samples_per_class": dict(Counter(all_labels_sub)),
@@ -231,7 +254,7 @@ def subsample_data_stratified(
         if count < MIN_SAMPLES_PER_CLASS:
             logger.warning(f"Class {cls} has only {count} samples after subsampling!")
 
-    return X_sub, y_sub, stats
+    return _finalize(X_sub, y_sub, stats)
 
 def save_results(
     y_trains,

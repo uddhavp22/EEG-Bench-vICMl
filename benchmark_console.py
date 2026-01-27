@@ -100,9 +100,13 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
             logger.info(f"DATA PERCENTAGE: {int(percentage * 100)}%")
             logger.info(f"============================================================")
 
-            # Subsample training data (stratified to maintain class proportions)
-            X_train, y_train, data_stats = subsample_data_stratified(
-                X_train_full, y_train_full, percentage, random_state=seed + pct_idx
+            subset_seed = seed + pct_idx
+            X_train, y_train, data_stats, selected_indices = subsample_data_stratified(
+                X_train_full,
+                y_train_full,
+                percentage,
+                random_state=subset_seed,
+                return_indices=True,
             )
             logger.info(f"Training samples: {data_stats['total_samples']}, per class: {data_stats['samples_per_class']}")
 
@@ -113,34 +117,40 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
             y_trains = []
 
             for model_entry in tqdm(models, desc=f"Models for Task: {task.name} ({int(percentage*100)}%)"):
-                # Handle both class types and factory functions
-                is_factory = callable(model_entry) and not isinstance(model_entry, type)
-                model_name = model_entry.__name__ if hasattr(model_entry, '__name__') else str(model_entry)
+                model_name = model_entry.__name__ if hasattr(model_entry, "__name__") else str(model_entry)
                 logger.info(f"--- Starting Model: {model_name}")
 
-                for i in range(reps):
-                    # Logging for Repetition Clarity
-                    logger.info(f"--- REPETITION {i+1}/{reps} (Seed: {seed + i}) ---")
-
-                    set_seed(seed + i)  # set seed for reproducibility
+                for rep_idx in range(reps):
+                    rep_seed = seed + rep_idx
+                    logger.info(f"--- REPETITION {rep_idx + 1}/{reps} (Seed: {rep_seed}) ---")
+                    set_seed(rep_seed)
 
                     if is_multilabel_task:
                         num_classes = len(task.clinical_classes) + 1
-                        if is_factory:
-                            # Factory function - call with args
-                            model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
-                        else:
-                            # Class - instantiate with args
-                            model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
-                        this_y_train = make_multilabels(X_train, y_train, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
-                        this_y_test = make_multilabels(X_test, y_test, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
+                        model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
+                        full_y_train = make_multilabels(
+                            X_train_full,
+                            y_train_full,
+                            task.event_map,
+                            task.chunk_len_s,
+                            task.num_labels_per_chunk,
+                            model.name,
+                        )
+                        this_y_train = [
+                            [full_y_train[ds_idx][i] for i in ds_indices]
+                            for ds_idx, ds_indices in enumerate(selected_indices)
+                        ]
+                        this_y_test = make_multilabels(
+                            X_test,
+                            y_test,
+                            task.event_map,
+                            task.chunk_len_s,
+                            task.num_labels_per_chunk,
+                            model.name,
+                        )
                     else:
-                        if is_factory:
-                            # Factory function - call without args
-                            model = model_entry()
-                        else:
-                            # Class - instantiate without args
-                            model = model_entry()
+                        model = model_entry()
+                        full_y_train = y_train_full
                         this_y_train = y_train
                         this_y_test = y_test
 
@@ -148,23 +158,35 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
 
                     if hasattr(model, "set_wandb_run"):
                         model.set_wandb_run(wandb_run)
-                    model.fit(X_train, this_y_train, meta_train)
-                    y_pred = []
-                    for x, m in zip(X_test, meta_test):
-                        y_pred.append(model.predict([x], [m]))
+
+                    if getattr(model, "supports_full_dataset_cache", False):
+                        model.fit(
+                            X_train_full,
+                            full_y_train,
+                            meta_train,
+                            subset_fraction=percentage,
+                            subset_seed=subset_seed,
+                            subset_indices=selected_indices,
+                        )
+                        train_labels_used = this_y_train
+                    else:
+                        model.fit(X_train, this_y_train, meta_train)
+                        train_labels_used = this_y_train
+
+                    y_pred = [model.predict([x], [m]) for x, m in zip(X_test, meta_test)]
 
                     models_names.append(str(model))
                     results.append(y_pred)
                     y_trues.append(this_y_test)
-                    y_trains.append(this_y_train)
+                    y_trains.append(train_labels_used)
 
-            save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
-                        data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe,
+        save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
+                    data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe,
                         result_prefix=result_prefix, checkpoint_id=checkpoint_id)
-            print_classification_results(
-                y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
-            )
-            generate_classification_plots(y_trains, y_trues, models_names, results, dataset_names, task.name, metrics)
+        print_classification_results(
+            y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
+        )
+        generate_classification_plots(y_trains, y_trues, models_names, results, dataset_names, task.name, metrics)
 
 
 def main():
