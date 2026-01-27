@@ -1,12 +1,12 @@
 {
-    "data": "/radraid2/spanchavati/EEGBench/data/",
+    "data": "/home/spanchavati/EEG-Bench-vICMl/data/",
     "cache": "./cache/",
     "log": "./logs/",
     "tmp": "./tmp/",
     "chkpt": "./checkpoints/",
     "results": "./results/",
     "lejepa": {
-        "eegfm_path": "/raid/spanchavati",
+        "eegfm_path": "/home/spanchavati",
         "pos_bank_path": "./REVE_posbank",
         "checkpoint": {
             "base_path": null,
@@ -24,7 +24,7 @@
     "cavanagh2019": null,
     "singh2020": null,
     "singh2021": null,
-    "tuab": null,
+    "tuab": "/radraid2/spanchavati/EEGBench/data/tuab",
     "tuep": null,
     "tuar": null,
     "chb_mit": null,
