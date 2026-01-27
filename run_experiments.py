@@ -43,7 +43,7 @@ CLINICAL_TASKS = [
     "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"
 ]
 ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
-DEFAULT_PERCENTAGES = [0.25, 0.5, 0.75, 1.0] #0.01, 0.1, 
+DEFAULT_PERCENTAGES = [1.0, 0.25, 0.5, 0.75] #0.01, 0.1, 
 
 TASK_NAME_MAP = {
     "Left Hand vs Right Hand MI": "left_right",
@@ -165,9 +165,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
-    parser.add_argument("--gpus", type=int, default=3,
+    parser.add_argument("--gpus", type=int, default=1,
                         help="Number of GPUs available (default: 3)")
-    parser.add_argument("--workers-per-gpu", type=int, default=2,
+    parser.add_argument("--workers-per-gpu", type=int, default=1,
                         help="Number of jobs per GPU (default: 2)")
     parser.add_argument("--models", nargs="+", default=MODELS,
                         help=f"Models to run (default: {MODELS})")

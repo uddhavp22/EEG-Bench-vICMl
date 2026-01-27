@@ -324,7 +324,10 @@ class LUNABCIModel(AbstractModel):
         if raw_positions.dim() == 3:
             raw_positions = raw_positions.squeeze(0)
 
-        return raw_positions.float().to(self.device)
+        # Important: keep positions on CPU. This collate_fn runs inside
+        # DataLoader worker processes, and touching CUDA there can trigger
+        # "CUDA error: initialization error".
+        return raw_positions.detach().float().cpu()
 
     def _get_collate_fn(self, channel_names: List[str]):
         """Creates the collate function for LUNA that includes position embeddings.

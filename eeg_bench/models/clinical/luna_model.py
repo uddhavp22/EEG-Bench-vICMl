@@ -132,6 +132,7 @@ class LUNAClinicalWrapper(nn.Module):
 
         self.linear_probe_head = None
         if linear_probe:
+            print("Using linear probe!!")
             self.linear_probe_head = nn.Linear(self.feature_dim, num_classes).to(self.device)
             self._freeze_backbone(keep_classifier=False)
         elif freeze_backbone:
@@ -141,11 +142,12 @@ class LUNAClinicalWrapper(nn.Module):
 
     def _load_pretrained_weights(self, pretrained_path: str, freeze_backbone: bool):
         """Load pretrained weights from safetensors file."""
-        pretrained_path = Path(pretrained_path)
+        pretrained_path = Path("/raid/spanchavati/up-branch/LUNA_base.safetensors")
 
         if not pretrained_path.exists():
             logger.warning(f"Pretrained weights not found at {pretrained_path}. Training from scratch.")
             return
+            
 
         try:
             # Load safetensors
@@ -389,6 +391,19 @@ class LUNAClinicalModel(AbstractModel):
         chunks = signal.view(signal.shape[0], n_chunks, chunk_len).permute(1, 0, 2).contiguous()
         return chunks
 
+    def _ensure_patch_multiple(self, x: torch.Tensor) -> torch.Tensor:
+        """Trim time dimension so it is divisible by patch_size.
+
+        LUNA's patch embedder expects T % patch_size == 0. Some clinical
+        batches are 4096 samples (16s at 256 Hz), which is not divisible by
+        patch_size=40. Trimming avoids einops shape errors without padding.
+        """
+        t = x.shape[-1]
+        trimmed_t = (t // self.patch_size) * self.patch_size
+        if trimmed_t == t or trimmed_t == 0:
+            return x
+        return x[..., :trimmed_t].contiguous()
+
     def _expand_label_for_chunks(self, label: torch.Tensor, num_chunks: int) -> torch.Tensor:
         if label.dim() == 0:
             return label.repeat(num_chunks)
@@ -402,6 +417,7 @@ class LUNAClinicalModel(AbstractModel):
         coords: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.use_internal_chunking:
+            x = self._ensure_patch_multiple(x)
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
             return x, yb, cb
 
@@ -428,6 +444,7 @@ class LUNAClinicalModel(AbstractModel):
         coords: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.use_internal_chunking:
+            x = self._ensure_patch_multiple(x)
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
             return x, indices, cb
 
@@ -457,7 +474,7 @@ class LUNAClinicalModel(AbstractModel):
     ) -> None:
         assert self.model is not None and self.model.linear_probe_head is not None
 
-        configure_torch_backend_for_speed()
+        # configure_torch_backend_for_speed()
 
         batch_size = 64 if self.chunk_len_s else 1
         num_workers = 2
@@ -482,7 +499,7 @@ class LUNAClinicalModel(AbstractModel):
         label_shape = None
         label_dtype = None
         with torch.no_grad():
-            for x, yb, _ in train_loader:
+            for x, yb, _ in tqdm(train_loader):
                 x, yb = x.to(self.device), yb.to(self.device)
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)

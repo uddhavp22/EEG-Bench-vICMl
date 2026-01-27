@@ -219,6 +219,7 @@ class REVEBenchmarkModel(AbstractModel):
         
         # 5. Training Loop
         self.model.train()
+        self.model.backbone.eval()  # Keep backbone in eval mode since it's frozen
         n_epochs = 10 
 
         cache_dir = create_temp_cache_dir("reve_lp_")
