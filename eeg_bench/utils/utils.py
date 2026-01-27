@@ -245,6 +245,7 @@ def save_results(
     linear_probe: bool = False,
     result_prefix: Optional[str] = None,
     checkpoint_id: Optional[str] = None,
+    seed: Optional[int] = None,
 ):
 
     # Get the current timestamp
@@ -285,6 +286,7 @@ def save_results(
         "linear_probe": linear_probe,
         "result_prefix": result_prefix,
         "checkpoint_id": checkpoint_id,
+        "seed": seed
     }
 
     # Save the results to the file

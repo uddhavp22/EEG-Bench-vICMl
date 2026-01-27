@@ -35,7 +35,9 @@ EEGLEJEPAConfig = None
 ConvPatchEmbedderConfig = None
 DynamicChannelMixerConfig = None
 EncoderConfig = None
+import os
 
+EMBED_CACHE_VERSION = os.getenv("EMBED_CACHE_VERSION", "v2")
 
 def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
     """Setup eegfm imports by adding path to sys.path if needed."""
@@ -308,7 +310,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             version=version,
             freeze_encoder=freeze_encoder,
             config_path=config_path,
-            pretrained_path=pretrained_path,
+            pretrained_path=self.pretrained_path,
         ).to(self.device)
 
     def _load_position_bank(self, local_fallback_path: str):
@@ -506,12 +508,24 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         # 1. Dataset Loading (matching LaBraM exact args)
-        dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True, sfreq=250)
+        dataset_train = make_dataset_2(
+            X, y, meta, task_name, self.name, 
+            chunk_len_s=self.chunk_len_s,
+            is_train=True, 
+            use_cache=True,
+            sfreq=250
+        )
 
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
-            dataset_train = make_dataset_2(X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False, sfreq=250)
+            dataset_train = make_dataset_2(
+                X, y, meta, task_name, self.name,
+                chunk_len_s=self.chunk_len_s,
+                is_train=True,
+                use_cache=False,
+                sfreq=250
+            )
 
         # 3. Validation Split (aligned with BCI: 15%)
         val_split = 0.2
@@ -540,9 +554,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
             # Compute dataset hash for caching
             dataset_hash = self._compute_dataset_hash(X, meta)
-            checkpoint_path = str(self.model.backbone) if hasattr(self, 'pretrained_path') else "default"
-            if hasattr(self, 'pretrained_path') and self.pretrained_path:
-                checkpoint_path = str(self.pretrained_path)
+            checkpoint_path = str(self.pretrained_path) if self.pretrained_path else "no_ckpt"
 
             # Load or extract embeddings (cached to disk)
             train_emb, train_lbl = self._load_or_extract_embeddings(
@@ -821,38 +833,49 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         """Generate cache path for embeddings."""
         cache_dir = Path(get_config_value("cache", ".cache")) / "lejepa_embeddings"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Hash the checkpoint path to handle long paths
         ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:12]
-        return cache_dir / f"{task_name}_{ckpt_hash}_{dataset_hash}_{split}.npz"
+        return cache_dir / f"{task_name}_{ckpt_hash}_{dataset_hash}_{split}_{EMBED_CACHE_VERSION}.npz"
 
     def _compute_dataset_hash(self, X: list, meta: list) -> str:
-        """Compute a hash to identify the dataset."""
-        # Use shape info and metadata for hashing (fast, doesn't load all data)
+        """Compute a hash to identify the dataset (robust to missing fields)."""
+        task = ""
+        channels = []
+        if meta and isinstance(meta, list) and isinstance(meta[0], dict):
+            task = meta[0].get("task_name", "") or ""
+            ch = meta[0].get("channel_names") or meta[0].get("ch_names") or []
+            channels = list(ch)[:5] if ch is not None else []
+
+        shapes = []
+        for x in X[:5]:
+            shapes.append(getattr(x, "shape", None))
+
         hash_data = {
             "n_samples": len(X),
-            "shapes": [x.shape for x in X[:5]],  # First 5 shapes
-            "task": meta[0].get("task_name", ""),
-            "channels": meta[0].get("channel_names", [])[:5],
+            "shapes": shapes,
+            "task": task,
+            "channels": channels,
+            "cache_version": EMBED_CACHE_VERSION,
         }
-        return hashlib.md5(json.dumps(hash_data, sort_keys=True).encode()).hexdigest()[:12]
+        return hashlib.md5(json.dumps(hash_data, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
-    def _load_or_extract_embeddings(self, dataloader, coords, checkpoint_path: str, task_name: str, 
-                                     dataset_hash: str, split: str) -> tuple:
+    def _load_or_extract_embeddings(self, dataloader, coords, checkpoint_path: str, task_name: str,
+                                    dataset_hash: str, split: str) -> tuple:
         """Load cached embeddings or extract and cache them."""
         cache_path = self._get_embedding_cache_path(checkpoint_path, task_name, dataset_hash, split)
-        
+
         if cache_path.exists():
-            print(f"[LeJEPAClinical] Loading cached embeddings from {cache_path}")
-            data = np.load(cache_path)
-            embeddings = torch.from_numpy(data["embeddings"])
-            labels = torch.from_numpy(data["labels"])
-            return embeddings, labels
-        
+            try:
+                print(f"[LeJEPAClinical] Loading cached embeddings from {cache_path}")
+                data = np.load(cache_path)
+                embeddings = torch.from_numpy(data["embeddings"])
+                labels = torch.from_numpy(data["labels"])
+                return embeddings, labels
+            except Exception as e:
+                print(f"[LeJEPAClinical] Cache load failed ({e}); re-extracting.")
+
         print(f"[LeJEPAClinical] Extracting embeddings (will cache to {cache_path})")
         embeddings, labels = self._extract_embeddings_clinical(dataloader, coords)
-        
-        # Save to disk
+
         np.savez_compressed(
             cache_path,
             embeddings=embeddings.numpy(),

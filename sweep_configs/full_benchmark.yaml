@@ -9,32 +9,41 @@ models:
   lejepa_base_global_proj: #technically this is the old version!
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
     version: 0
+  lejepa_base_global_projv2: #technically this is the old version!
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+    version: 2
+  lejepa_base_global_projv2_smallds: #technically this is the old version!
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+    version: 4
   lejepa_vitb_global_proj:
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_vitb_proj/
     version: 2
+  lejepa_vitb_global_proj_v2:
+    base_path: /home/spanchavati/eegfmchallenge/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_vitb_proj/
+    version: 0
   lejepa_base_global_proj_channelmixerv1_short:
     base_path: /home/spanchavati/eegfmchallenge/lightning_logs/v2_lejepa_pretraining_global_proj/
     version: 0
   # Add more model sizes as needed:
   # lejepa_large:
   #   base_path: /path/to/your/lejepa_large
-  #   version: 0
+  #   version: 0 
 
 checkpoints:
-  steps: [10000, 50000]  # No step sweep - only final checkpoint
+  steps: [10000, 50000]
   include_last: true
 
 tasks:
-  epoch_sweep:
-    - abnormal      # Clinical task
+  epoch_sweep: []
+    # - abnormal      # Clinical task
   final_only:
     - all  # Run all 14 tasks
 
 training:
   linear_probe: true
-  data_percentages: [0.25, 0.5, 0.75, 1.0]
+  data_percentages: [1.0] #0.1, 0.25, 0.5, 
 
 execution:
-  gpus: 1
-  workers_per_gpu: 3
+  gpus: 2
+  workers_per_gpu: 1
   log_dir: logs/lejepa_full_benchmark

@@ -100,11 +100,8 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
             logger.info(f"DATA PERCENTAGE: {int(percentage * 100)}%")
             logger.info(f"============================================================")
 
-            # Subsample training data (stratified to maintain class proportions)
-            X_train, y_train, data_stats = subsample_data_stratified(
-                X_train_full, y_train_full, percentage, random_state=seed + pct_idx
-            )
-            logger.info(f"Training samples: {data_stats['total_samples']}, per class: {data_stats['samples_per_class']}")
+            # Don't subsample X/y here - pass full data to fit() with percentage parameter
+            logger.info(f"Training data: full dataset, will subsample to {int(percentage*100)}% in model")
 
             # Reset collectors for this percentage
             models_names = []
@@ -132,7 +129,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                         else:
                             # Class - instantiate with args
                             model = model_entry(num_classes=num_classes, num_labels_per_chunk=task.num_labels_per_chunk)
-                        this_y_train = make_multilabels(X_train, y_train, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
+                        this_y_train = make_multilabels(X_train_full, y_train_full, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
                         this_y_test = make_multilabels(X_test, y_test, task.event_map, task.chunk_len_s, task.num_labels_per_chunk, model.name)
                     else:
                         if is_factory:
@@ -141,14 +138,14 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                         else:
                             # Class - instantiate without args
                             model = model_entry()
-                        this_y_train = y_train
+                        this_y_train = y_train_full
                         this_y_test = y_test
 
                     print(model)
 
                     if hasattr(model, "set_wandb_run"):
                         model.set_wandb_run(wandb_run)
-                    model.fit(X_train, this_y_train, meta_train)
+                    model.fit(X_train_full, this_y_train, meta_train, data_percentage=percentage)
                     y_pred = []
                     for x, m in zip(X_test, meta_test):
                         y_pred.append(model.predict([x], [m]))
@@ -159,7 +156,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     y_trains.append(this_y_train)
 
             save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
-                        data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe,
+                        data_percentage=percentage, linear_probe=linear_probe,
                         result_prefix=result_prefix, checkpoint_id=checkpoint_id)
             print_classification_results(
                 y_trains, y_trues, models_names, results, dataset_names, task.name, metrics

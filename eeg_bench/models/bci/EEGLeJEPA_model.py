@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import sys
 import logging
+import os
 
 from ..abstract_model import AbstractModel
 from .LaBraM.make_dataset import make_dataset_lejepa  # LeJEPA-specific loader with Defossez scaling
@@ -53,6 +54,8 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
     ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig
     DynamicChannelMixerConfig = _DynamicChannelMixerConfig
     EncoderConfig = _EncoderConfig
+
+EMBED_CACHE_VERSION = os.getenv("EEG_BENCH_EMBED_CACHE_VERSION", "v2")
 
 class ConcreteLeJEPABCI(nn.Module):
     def __init__(
@@ -452,7 +455,7 @@ class EEGLeJEPABCIModel(AbstractModel):
         cache_dir = Path(get_config_value("cache", ".cache")) / "lejepa_embeddings"
         cache_dir.mkdir(parents=True, exist_ok=True)
         ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:12]
-        return cache_dir / f"bci_{task_name}_{ckpt_hash}_{dataset_hash}_{split}.npz"
+        return cache_dir / f"bci_{task_name}_{ckpt_hash}_{dataset_hash}_{split}_{EMBED_CACHE_VERSION}.npz"
 
     def _compute_dataset_hash(self, datasets: list, ch_names_list: list) -> str:
         """Compute a hash to identify the combined datasets."""

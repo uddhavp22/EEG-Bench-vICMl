@@ -39,7 +39,7 @@ Example YAML config:
 
     execution:
       gpus: 3
-      workers_per_gpu: 2
+      workers_per_gpu: 2  # Back to 2 for parallelism
       log_dir: logs/lejepa_sweep
 """
 
@@ -82,6 +82,7 @@ def normalize_task_name(task_name):
 
 
 
+EMBED_CACHE_VERSION = os.getenv("EEG_BENCH_EMBED_CACHE_VERSION", "v2")
 ALL_TASKS = CLINICAL_TASKS + BCI_TASKS
 
 
@@ -227,7 +228,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
     config.setdefault("execution", {})
     config["execution"].setdefault("gpus", 3)
-    config["execution"].setdefault("workers_per_gpu", 2)
+    config["execution"].setdefault("workers_per_gpu", 2)  # Back to 2 for parallelism
     config["execution"].setdefault("log_dir", "logs/lejepa_sweep")
 
     return config
@@ -383,6 +384,7 @@ def run_experiment(args: Tuple) -> Tuple:
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["EEG_BENCH_EMBED_CACHE_VERSION"] = EMBED_CACHE_VERSION
 
     cmd = [sys.executable, "benchmark_console.py"] + experiment.to_cmd_args()
 
@@ -521,12 +523,24 @@ def main():
     if not args.skip_prewarm and config["training"]["data_percentages"] != [1.0]:
         prewarm_embedding_cache(experiments, gpus, args.dry_run)
     
-    # Assign GPUs round-robin
+    # Assign GPUs round-robin, but assign to same GPU sequentially per (checkpoint, task)
+    # This ensures 100% runs before 75% on same GPU
     jobs = []
-    for i, exp in enumerate(experiments):
-        gpu_id = i % gpus
+    gpu_assignment = {}  # Track (checkpoint, task) -> gpu_id for sequential execution
+    
+    for exp in experiments:
+        key = (exp.checkpoint_path, exp.task)
+        
+        if key not in gpu_assignment:
+            # First time seeing this (checkpoint, task): assign to next GPU
+            gpu_id = len(gpu_assignment) % gpus
+            gpu_assignment[key] = gpu_id
+        else:
+            # Reuse same GPU for this (checkpoint, task) pair
+            gpu_id = gpu_assignment[key]
+        
         jobs.append((exp, gpu_id, log_dir, args.dry_run))
-
+    
     # Run experiments in parallel
     print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
     start_time = time.time()
