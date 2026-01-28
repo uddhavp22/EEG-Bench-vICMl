@@ -488,8 +488,6 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             sfreq=250
         )
         
-        breakpoint()
-
 
         # 2. Safety Check: If dataset is empty, the .h5 cache is likely bad
         if len(dataset_train) == 0:

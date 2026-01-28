@@ -1,12 +1,16 @@
+import mne
 import os
-# This removes the environment variable for the duration of the script
-if "HF_TOKEN" in os.environ:
-    del os.environ["HF_TOKEN"]
 
-from transformers import AutoModel
-import torch
+# Get the base data path
+mne_data_path = mne.get_config('MNE_DATA')
+if not mne_data_path:
+    mne_data_path = os.path.join(os.path.expanduser("~"), "mne_data")
 
-my_token='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'
+print(f"MNE is looking in: {mne_data_path}")
 
-model = AutoModel.from_pretrained("brain-bzh/reve-base", trust_remote_code=True, torch_dtype="auto",token=my_token)
-pos_bank = AutoModel.from_pretrained("brain-bzh/reve-positions", trust_remote_code=True, torch_dtype="auto",token=my_token)
+# Check specifically for Liu zip files
+print("Checking for zip files in that directory...")
+for root, dirs, files in os.walk(mne_data_path):
+    for file in files:
+        if "liu" in file.lower() and file.endswith(".zip"):
+            print(f"FOUND ZIP: {os.path.join(root, file)}")
