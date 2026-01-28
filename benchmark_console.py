@@ -71,7 +71,7 @@ ALL_TASKS_CLASSES = [
 ]
 
 def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False,
-              result_prefix=None, checkpoint_id=None, eval_noise_config=None):
+              result_prefix=None, checkpoint_id=None, eval_noise_config=None, probe_type=None):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
@@ -297,6 +297,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     task.name,
                     data_percentage=percentage,
                     linear_probe=linear_probe,
+                    probe_type=probe_type,
                     result_prefix=tag_prefix,
                     checkpoint_id=checkpoint_id,
                     seed=seed,
@@ -511,6 +512,11 @@ def main():
         action="store_true",
         help="Do NOT freeze the LeJEPA encoder (allow fine-tuning)"
     )
+    parser.add_argument(
+        "--lejepa-attentive-probe",
+        action="store_true",
+        help="Use an attentive pooling probe head for LeJEPA"
+    )
 
     # Result file naming (for sweep scripts)
     parser.add_argument(
@@ -559,6 +565,8 @@ def main():
     # Apply --linear-probe to LeJEPA config (model-specific flags already override via merge)
     if args.linear_probe and not getattr(args, 'lejepa_no_freeze_encoder', False):
         lejepa_config.freeze_encoder = True
+
+    probe_type = "attentive" if args.lejepa_attentive_probe else ("linear" if args.linear_probe else "finetune")
 
     # Factory functions for LeJEPA models (to inject config)
     def make_lejepa_clinical(num_classes=2, num_labels_per_chunk=None):
@@ -686,7 +694,7 @@ def main():
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
                          data_percentages=args.data_percentages, linear_probe=args.linear_probe,
                          result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
-                         eval_noise_config=eval_noise_config)
+                         eval_noise_config=eval_noise_config, probe_type=probe_type)
 
         else:
             if not args.task or not args.model:
@@ -720,7 +728,7 @@ def main():
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
                      data_percentages=args.data_percentages, linear_probe=args.linear_probe,
                      result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
-                     eval_noise_config=eval_noise_config)
+                     eval_noise_config=eval_noise_config, probe_type=probe_type)
     finally:
         wandb_utils.finish()
 

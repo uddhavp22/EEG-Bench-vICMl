@@ -96,6 +96,7 @@ class ExperimentConfig:
     task: str
     percentage: float
     linear_probe: bool
+    attentive_probe: bool
     eval_noise_config: Optional[Dict[str, Any]] = None
 
     def to_cmd_args(self) -> List[str]:
@@ -113,6 +114,8 @@ class ExperimentConfig:
             args.extend(["--linear-probe", "--lejepa-freeze-encoder"])
         else:
             args.append("--lejepa-no-freeze-encoder")
+        if self.attentive_probe:
+            args.append("--lejepa-attentive-probe")
 
         noise_cfg = self.eval_noise_config or {}
         noise_types = noise_cfg.get("noise_types") or []
@@ -249,6 +252,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     config.setdefault("training", {})
     config["training"].setdefault("linear_probe", True)
     config["training"].setdefault("data_percentages", [1.0])
+    config["training"].setdefault("attentive_probe", False)
 
     config.setdefault("eval_noise", {})
 
@@ -314,6 +318,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                         task=task,
                         percentage=pct,
                         linear_probe=config["training"]["linear_probe"],
+                        attentive_probe=config["training"]["attentive_probe"],
                         eval_noise_config=config.get("eval_noise"),
                     ))
 
@@ -329,6 +334,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                         task=task,
                         percentage=pct,
                         linear_probe=config["training"]["linear_probe"],
+                        attentive_probe=config["training"]["attentive_probe"],
                         eval_noise_config=config.get("eval_noise"),
                     ))
 
@@ -524,6 +530,7 @@ def main():
     print(f"Checkpoints: steps={config['checkpoints']['steps']}, "
           f"include_last={config['checkpoints']['include_last']}")
     print(f"Linear probe: {config['training']['linear_probe']}")
+    print(f"Attentive probe: {config['training']['attentive_probe']}")
     print(f"Data percentages: {config['training']['data_percentages']}")
     print(f"GPUs: {gpus}, Workers/GPU: {workers_per_gpu}, Total workers: {total_workers}")
     print("=" * 60)
