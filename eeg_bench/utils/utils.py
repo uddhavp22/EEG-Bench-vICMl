@@ -5,10 +5,11 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Iterable
 from collections import Counter
 from sklearn.model_selection import train_test_split
 from ..config import get_config_value
+from .eeg_noise import format_noise_tag
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +269,9 @@ def save_results(
     linear_probe: bool = False,
     result_prefix: Optional[str] = None,
     checkpoint_id: Optional[str] = None,
+    eval_noise_types: Optional[Iterable[str]] = None,
+    eval_noise_snr_db: Optional[float] = None,
+    eval_noise_channel_dropout_prob: Optional[float] = None,
 ):
 
     # Get the current timestamp
@@ -280,7 +284,13 @@ def save_results(
     ckpt_str = f"_ckpt_{checkpoint_id}" if checkpoint_id else ""
     pct_str = f"_pct{int(data_percentage * 100)}" if data_percentage < 1.0 else ""
     lp_str = "_LP" if linear_probe else ""
-    filename = os.path.join(get_config_value("results"), "raw", f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}_{timestamp}.json")
+    noise_tag = format_noise_tag(eval_noise_types, eval_noise_snr_db)
+    noise_str = f"_{noise_tag}" if noise_tag != "clean" else ""
+    filename = os.path.join(
+        get_config_value("results"),
+        "raw",
+        f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}{noise_str}_{timestamp}.json",
+    )
 
     if task_name in get_multilabel_tasks():
         y_trains = [[[y_2.tolist() for y_2 in y] for y in y_train] for y_train in y_trains]
@@ -308,6 +318,9 @@ def save_results(
         "linear_probe": linear_probe,
         "result_prefix": result_prefix,
         "checkpoint_id": checkpoint_id,
+        "eval_noise_types": list(eval_noise_types) if eval_noise_types is not None else None,
+        "eval_noise_snr_db": eval_noise_snr_db,
+        "eval_noise_channel_dropout_prob": eval_noise_channel_dropout_prob,
     }
 
     # Save the results to the file

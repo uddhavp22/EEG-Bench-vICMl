@@ -1,5 +1,7 @@
 import argparse
 import logging
+from itertools import product
+from typing import Dict, Iterable, List, Optional, Tuple
 from tqdm import tqdm
 from eeg_bench.enums.split import Split
 from eeg_bench.tasks.clinical import (
@@ -43,6 +45,7 @@ from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks, 
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
 from eeg_bench.utils import wandb_utils
 from eeg_bench.config import load_lejepa_config, merge_lejepa_config_with_cli
+from eeg_bench.utils.eeg_noise import VALID_NOISE_TYPES
 # NOTE: Removed 'from asyncio.tasks import ALL_COMPLETED' as it was unused and caused an error in some environments.
 
 logging.basicConfig(level=logging.INFO,
@@ -68,8 +71,35 @@ ALL_TASKS_CLASSES = [
 
 ]
 
-def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False,
-              result_prefix=None, checkpoint_id=None):
+def _build_eval_conditions(
+    eval_noise_types: Optional[Iterable[str]],
+    eval_noise_levels_db: Optional[Iterable[float]],
+    mix_all: bool = False,
+) -> List[Tuple[Optional[List[str]], Optional[float]]]:
+    if not eval_noise_types or not eval_noise_levels_db:
+        return [(None, None)]
+    noise_types_list = [str(t).strip().lower() for t in eval_noise_types if str(t).strip()]
+    noise_levels_list = [float(x) for x in eval_noise_levels_db]
+    if mix_all:
+        return [(noise_types_list, snr_db) for snr_db in noise_levels_list]
+    return [([noise_type], snr_db) for noise_type, snr_db in product(noise_types_list, noise_levels_list)]
+
+
+def benchmark(
+    tasks,
+    models,
+    seed,
+    reps=1,
+    wandb_run=None,
+    data_percentages=None,
+    linear_probe=False,
+    result_prefix=None,
+    checkpoint_id=None,
+    eval_noise_types: Optional[Iterable[str]] = None,
+    eval_noise_levels_db: Optional[Iterable[float]] = None,
+    eval_noise_channel_dropout_prob: float = 0.0,
+    eval_noise_mix_all: bool = False,
+):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
@@ -94,6 +124,11 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
         metrics = task.get_metrics()
         dataset_names = [m["name"] for m in meta_train]
         is_multilabel_task = task.name in get_multilabel_tasks()
+        eval_conditions = _build_eval_conditions(
+            eval_noise_types,
+            eval_noise_levels_db,
+            mix_all=eval_noise_mix_all,
+        )
 
         for pct_idx, percentage in enumerate(data_percentages):
             logger.info(f"============================================================")
@@ -110,11 +145,21 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
             )
             logger.info(f"Training samples: {data_stats['total_samples']}, per class: {data_stats['samples_per_class']}")
 
-            # Reset collectors for this percentage
-            models_names = []
-            results = []
-            y_trues = []
-            y_trains = []
+            # Reset collectors per noise condition for this percentage
+            condition_collectors: Dict[
+                Tuple[Tuple[str, ...], Optional[float]],
+                Dict[str, object],
+            ] = {}
+            for noise_types, snr_db in eval_conditions:
+                key = (tuple(noise_types) if noise_types else tuple(), snr_db)
+                condition_collectors[key] = {
+                    "noise_types": noise_types,
+                    "snr_db": snr_db,
+                    "models_names": [],
+                    "results": [],
+                    "y_trues": [],
+                    "y_trains": [],
+                }
 
             for model_entry in tqdm(models, desc=f"Models for Task: {task.name} ({int(percentage*100)}%)"):
                 model_name = model_entry.__name__ if hasattr(model_entry, "__name__") else str(model_entry)
@@ -173,20 +218,60 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                         model.fit(X_train, this_y_train, meta_train)
                         train_labels_used = this_y_train
 
-                    y_pred = [model.predict([x], [m]) for x, m in zip(X_test, meta_test)]
+                    # Evaluate across noise conditions without retraining
+                    for noise_types, snr_db in eval_conditions:
+                        if hasattr(model, "set_eval_noise"):
+                            model.set_eval_noise(
+                                noise_types=noise_types,
+                                snr_db=snr_db,
+                                channel_dropout_prob=eval_noise_channel_dropout_prob,
+                                seed=rep_seed,
+                            )
 
-                    models_names.append(str(model))
-                    results.append(y_pred)
-                    y_trues.append(this_y_test)
-                    y_trains.append(train_labels_used)
+                        y_pred = [model.predict([x], [m]) for x, m in zip(X_test, meta_test)]
 
-        save_results(y_trains, y_trues, models_names, results, dataset_names, task.name,
-                    data_percentage=percentage, data_stats=data_stats, linear_probe=linear_probe,
-                        result_prefix=result_prefix, checkpoint_id=checkpoint_id)
-        print_classification_results(
-            y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
-        )
-        generate_classification_plots(y_trains, y_trues, models_names, results, dataset_names, task.name, metrics)
+                        key = (tuple(noise_types) if noise_types else tuple(), snr_db)
+                        collector = condition_collectors[key]
+                        collector["models_names"].append(str(model))
+                        collector["results"].append(y_pred)
+                        collector["y_trues"].append(this_y_test)
+                        collector["y_trains"].append(train_labels_used)
+
+                    # Reset to clean after sweep to avoid accidental carryover
+                    if hasattr(model, "set_eval_noise"):
+                        model.set_eval_noise(noise_types=None, snr_db=None)
+
+            # Persist and report results per noise condition
+            for collector in condition_collectors.values():
+                noise_types = collector["noise_types"]
+                snr_db = collector["snr_db"]
+                models_names = collector["models_names"]
+                results = collector["results"]
+                y_trues = collector["y_trues"]
+                y_trains = collector["y_trains"]
+
+                save_results(
+                    y_trains,
+                    y_trues,
+                    models_names,
+                    results,
+                    dataset_names,
+                    task.name,
+                    data_percentage=percentage,
+                    data_stats=data_stats,
+                    linear_probe=linear_probe,
+                    result_prefix=result_prefix,
+                    checkpoint_id=checkpoint_id,
+                    eval_noise_types=noise_types if noise_types else None,
+                    eval_noise_snr_db=snr_db,
+                    eval_noise_channel_dropout_prob=eval_noise_channel_dropout_prob if noise_types else None,
+                )
+                print_classification_results(
+                    y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
+                )
+                generate_classification_plots(
+                    y_trains, y_trues, models_names, results, dataset_names, task.name, metrics
+                )
 
 
 def main():
@@ -274,6 +359,31 @@ def main():
         default=False,
         help="Freeze encoder and train only the classification head (linear probe evaluation). Applies to all foundation models."
     )
+    parser.add_argument(
+        "--eval-noise-types",
+        type=str,
+        nargs="+",
+        default=None,
+        help=f"Evaluation-time noise types to sweep (e.g., gaussian one_over_f emg channel_dropout). Valid: {sorted(VALID_NOISE_TYPES)}",
+    )
+    parser.add_argument(
+        "--eval-noise-levels-db",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Evaluation-time SNR levels in dB to sweep (e.g., 30 20 10 0). Requires --eval-noise-types.",
+    )
+    parser.add_argument(
+        "--eval-noise-channel-dropout-prob",
+        type=float,
+        default=0.0,
+        help="Channel dropout probability used when channel_dropout is included in --eval-noise-types.",
+    )
+    parser.add_argument(
+        "--eval-noise-mix-all",
+        action="store_true",
+        help="Apply all --eval-noise-types simultaneously at each SNR level (instead of one type at a time).",
+    )
 
     # LeJEPA configuration
     parser.add_argument(
@@ -337,6 +447,17 @@ def main():
     if args.linear_probe and getattr(args, 'lejepa_no_freeze_encoder', False):
         logger.warning("--linear-probe and --lejepa-no-freeze-encoder conflict. "
                        "Model-specific flag takes precedence (encoder will NOT be frozen for LeJEPA).")
+
+    # Validate eval-noise arguments early
+    if args.eval_noise_types and not args.eval_noise_levels_db:
+        parser.error("--eval-noise-levels-db is required when --eval-noise-types is provided.")
+    if args.eval_noise_levels_db and not args.eval_noise_types:
+        parser.error("--eval-noise-types is required when --eval-noise-levels-db is provided.")
+    if args.eval_noise_types:
+        requested = {t.strip().lower() for t in args.eval_noise_types}
+        unknown = sorted(requested - set(VALID_NOISE_TYPES))
+        if unknown:
+            parser.error(f"Unknown --eval-noise-types: {unknown}. Valid: {sorted(VALID_NOISE_TYPES)}")
 
     # Load and merge LeJEPA configuration
     lejepa_config = merge_lejepa_config_with_cli(
@@ -454,6 +575,10 @@ def main():
                 "all": args.all,
                 "data_percentages": args.data_percentages,
                 "linear_probe": args.linear_probe,
+                "eval_noise_types": args.eval_noise_types,
+                "eval_noise_levels_db": args.eval_noise_levels_db,
+                "eval_noise_channel_dropout_prob": args.eval_noise_channel_dropout_prob,
+                "eval_noise_mix_all": args.eval_noise_mix_all,
             },
         )
         wandb_utils.set_run(wandb_run)
@@ -472,7 +597,11 @@ def main():
                 model_classes = list(models_map.values())
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
                          data_percentages=args.data_percentages, linear_probe=args.linear_probe,
-                         result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id)
+                         result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
+                         eval_noise_types=args.eval_noise_types,
+                         eval_noise_levels_db=args.eval_noise_levels_db,
+                         eval_noise_channel_dropout_prob=args.eval_noise_channel_dropout_prob,
+                         eval_noise_mix_all=args.eval_noise_mix_all)
 
         else:
             if not args.task or not args.model:
@@ -505,7 +634,11 @@ def main():
 
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
                      data_percentages=args.data_percentages, linear_probe=args.linear_probe,
-                     result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id)
+                     result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
+                     eval_noise_types=args.eval_noise_types,
+                     eval_noise_levels_db=args.eval_noise_levels_db,
+                     eval_noise_channel_dropout_prob=args.eval_noise_channel_dropout_prob,
+                     eval_noise_mix_all=args.eval_noise_mix_all)
     finally:
         wandb_utils.finish()
 

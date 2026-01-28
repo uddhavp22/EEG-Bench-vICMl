@@ -164,7 +164,7 @@ def main():
     )
     parser.add_argument("--gpus", type=int, default=3,
                         help="Number of GPUs available (default: 3)")
-    parser.add_argument("--workers-per-gpu", type=int, default=2,
+    parser.add_argument("--workers-per-gpu", type=int, default=1,
                         help="Number of jobs per GPU (default: 2)")
     parser.add_argument("--models", nargs="+", default=MODELS,
                         help=f"Models to run (default: {MODELS})")
