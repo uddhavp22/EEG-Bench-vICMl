@@ -10,7 +10,7 @@ import logging
 
 def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_cache, **kwargs):
     # Create or override the HDF5 file.
-    h5_folder = os.path.join(get_config_value("data"), "make_dataset")
+    h5_folder = get_config_value("make_dataset") or os.path.join(get_config_value("data"), "make_dataset")
     h5_path = os.path.join(h5_folder, f"{task_name}_{model_name}_{meta[0]['name'].replace(' ', '_')}_{chunk_len_s}_{True}_{sum(len(obj) for obj in X)}.h5")
     if os.path.exists(h5_path) and use_cache:
         print(f"[Info] Dataset already exists at {h5_path}. Loading existing dataset.")

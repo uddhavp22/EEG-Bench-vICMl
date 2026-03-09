@@ -6,22 +6,26 @@
 # to analyze how pre-training progress affects downstream performance.
 
 models:
-  lejepa_base:
-    base_path: /home/spanchavati/eegfm/lightning_logs/lejepa_pretraining_global  # UPDATE THIS PATH
-    version: 4
+  # lejepa_base_global_projv2_05sig_FULL_v2: #laya-b updated
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_05_longrun/
+  #   version: 0
+  lejepa_base_global_projv2_05sig_FULL_v3: #laya-b updated with weight decay setup
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v3_lejepa_pretraining_global_v2mixer_proj_05_longrun/
+    version: 0
 
 checkpoints:
   # Steps to evaluate - adjust based on your checkpoint availability
-  # steps: [1000, 5000, 10000, 25000, 50000]
-  include_last: false
+  steps: [10000] #, 20000, 50000
+  include_last: true
   # Alternatively, auto-discover all available checkpoints:
-  auto_discover: true
+  auto_discover: false
 
 tasks:
   # Only run epoch sweep on these tasks (to save time)
   epoch_sweep:
     # - left_right      # BCI task
-    - abnormal      # Clinical task
+    # - abnormal      # Clinical task
+    - all  # Run all 14 tasks
   # No final_only tasks - we only care about epoch sweep here
   final_only: []
 
@@ -30,6 +34,7 @@ training:
   data_percentages: [1.0]  # Use full training data
 
 execution:
-  gpus: 1
-  workers_per_gpu: 2
+  gpus: 2
+  workers_per_gpu: 1
   log_dir: logs/lejepa_perf_over_training
+  results_dir: results_new/lejepa_perf_over_training

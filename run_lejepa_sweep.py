@@ -260,6 +260,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     config["execution"].setdefault("gpus", 3)
     config["execution"].setdefault("workers_per_gpu", 2)  # Back to 2 for parallelism
     config["execution"].setdefault("log_dir", "logs/lejepa_sweep")
+    config["execution"].setdefault("results_dir", "results")
 
     return config
 
@@ -335,7 +336,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                         percentage=pct,
                         linear_probe=config["training"]["linear_probe"],
                         attentive_probe=config["training"]["attentive_probe"],
-                        eval_noise_config=config.get("eval_noise"),
+                        eval_noise_config=config.get("eval_noise") if pct == 1.0 else None,
                     ))
 
     # Sort experiments to maximize cache hits:
@@ -351,15 +352,16 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     """
     Check which experiments have already completed based on result files.
 
-    Returns set of (model_name, task, checkpoint_id, percentage) tuples.
+    Returns set of (model_name, task, checkpoint_id, percentage, attentive_probe) tuples.
     """
     completed = set()
     if not os.path.exists(results_dir):
         return completed
 
-    # Pattern: {model_name}_{task}_{ModelClass}_ckpt_{checkpoint_id}[_pctXX][_LP]_{timestamp}.json
+    # Pattern: {model_name}_{task}_{ModelClass}_ckpt_{checkpoint_id}[_pctXX][_LP][_ATTN]_{timestamp}.json
     # Examples:
     # - lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_20260124_122416.json
+    # - lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_ATTN_20260124_122416.json
     # - lejepa_base_global_proj_Left Hand vs Right Hand vs Feet vs Tongue MI_LeJEPABCI_ckpt_last_LP_20260124_192457.json
     
     for f in glob.glob(os.path.join(results_dir, "*.json")):
@@ -367,7 +369,7 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
         
         # Match pattern: *_LeJEPA{Type}_ckpt_{checkpoint_id}[_pctXX][_LP]_{timestamp}.json
         match = re.match(
-            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?_(\d{8}_\d{6})\.json",
+            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_ATTN)?_(\d{8}_\d{6})\.json",
             filename
         )
         if match:
@@ -407,18 +409,23 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
             
             if model_name is not None and task:
                 pct = int(pct_str) / 100 if pct_str else 1.0
-                completed.add((model_name, task, ckpt_id, pct))
-
+                attentive_probe = "_ATTN_" in filename or "attnprob" in model_name.lower()
+                completed.add((model_name, task, ckpt_id, pct, attentive_probe))
     return completed
 
 
 def run_experiment(args: Tuple) -> Tuple:
     """Run a single experiment in a subprocess."""
-    experiment, gpu_id, log_dir, dry_run = args
+    experiment, gpu_id, log_dir, dry_run, results_dir = args
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    # If CUDA_VISIBLE_DEVICES was set externally, use it as-is; otherwise use script's gpu_id
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     env["EEG_BENCH_EMBED_CACHE_VERSION"] = EMBED_CACHE_VERSION
+    env["EEG_BENCHMARK_RESULTS"] = results_dir
 
     cmd = [sys.executable, "benchmark_console.py"] + experiment.to_cmd_args()
 
@@ -441,6 +448,7 @@ def run_experiment(args: Tuple) -> Tuple:
             f.write(f"Command: {' '.join(cmd)}\n")
             f.write(f"Started: {datetime.now().isoformat()}\n")
             f.write(f"GPU: {gpu_id}\n")
+            f.write(f"Results dir: {results_dir}\n")
             f.write("-" * 50 + "\n")
             f.flush()
 
@@ -515,8 +523,10 @@ def main():
 
     # Setup directories
     log_dir = config["execution"]["log_dir"]
+    results_dir = config["execution"]["results_dir"]
     os.makedirs(log_dir, exist_ok=True)
-    os.makedirs("results/raw", exist_ok=True)
+    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(os.path.join(results_dir, "raw"), exist_ok=True)
 
     gpus = config["execution"]["gpus"]
     workers_per_gpu = config["execution"]["workers_per_gpu"]
@@ -532,6 +542,7 @@ def main():
     print(f"Linear probe: {config['training']['linear_probe']}")
     print(f"Attentive probe: {config['training']['attentive_probe']}")
     print(f"Data percentages: {config['training']['data_percentages']}")
+    print(f"Results dir: {results_dir}")
     print(f"GPUs: {gpus}, Workers/GPU: {workers_per_gpu}, Total workers: {total_workers}")
     print("=" * 60)
 
@@ -541,11 +552,11 @@ def main():
 
     # Filter completed experiments if resuming
     if args.resume:
-        completed = get_completed_experiments()
+        completed = get_completed_experiments(os.path.join(results_dir, "raw"))
         original_count = len(experiments)
         experiments = [
             e for e in experiments
-            if (e.model_name, e.task, e.checkpoint_id, e.percentage) not in completed
+            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.attentive_probe) not in completed
         ]
         print(f"Already completed: {original_count - len(experiments)}")
         print(f"Remaining: {len(experiments)}")
@@ -574,7 +585,7 @@ def main():
             # Reuse same GPU for this (checkpoint, task) pair
             gpu_id = gpu_assignment[key]
         
-        jobs.append((exp, gpu_id, log_dir, args.dry_run))
+        jobs.append((exp, gpu_id, log_dir, args.dry_run, results_dir))
     
     # Run experiments in parallel
     print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")

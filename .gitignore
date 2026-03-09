@@ -26,4 +26,6 @@ wandb/
 !sweep_configs/*.yaml
 REVE_posbank/
 cache/
-results/
+results*/
+tables/
+*.csv

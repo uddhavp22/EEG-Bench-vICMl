@@ -1,5 +1,6 @@
 {
     "data": "/radraid2/spanchavati/EEGBench/data/",
+    "make_dataset": "./data/make_dataset",
     "cache": "./cache/",
     "log": "./logs/",
     "tmp": "./tmp/",

@@ -1,12 +1,12 @@
 # lejepa_clinical_model.py
 
 from __future__ import annotations
-from typing import List, Dict, Optional, cast
+from typing import List, Dict, Optional, cast, Any
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset, Subset
 from tqdm import tqdm
 import pickle
 from collections import Counter
@@ -16,6 +16,7 @@ import sys
 import logging
 import hashlib
 import json
+import bisect
 from pathlib import Path
 from ..abstract_model import AbstractModel
 from ...config import get_config_value, LeJEPAConfig
@@ -40,31 +41,152 @@ import os
 
 EMBED_CACHE_VERSION = os.getenv("EMBED_CACHE_VERSION", "v2")
 
+    # def __init__(self, dim: int, out_dim: int):
+    #     super().__init__()
+    #     self.attn = nn.Linear(dim, 1, bias=False)
+    #     self.norm = nn.LayerNorm(dim)
+    #     self.fc = nn.Linear(dim, out_dim)
+
+    # def _pool(self, x: torch.Tensor) -> torch.Tensor:
+    #     # x: (B, S, D)
+    #     dim = x.size(-1)
+    #     scores = self.attn(x).squeeze(-1)
+    #     weights = torch.softmax(scores / math.sqrt(dim), dim=1)
+
+    #     return torch.einsum("bs,bsd->bd", weights, x)
+
+    # def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     # x: (B, S, D) or (B, n_chunks, S, D)
+    #     if x.dim() == 4:
+    #         bsz, n_chunks, seq_len, dim = x.shape
+    #         x = x.reshape(bsz * n_chunks, seq_len, dim)
+    #         pooled = self._pool(x).view(bsz, n_chunks, dim).mean(dim=1)
+    #     elif x.dim() == 3:
+    #         pooled = self._pool(x)
+    #     else:
+    #         raise ValueError(f"Unexpected attentive probe input shape: {tuple(x.shape)}")
+    #     pooled = self.norm(pooled)
+    #     return self.fc(pooled)
+
 class AttentiveProbe(nn.Module):
-    def __init__(self, dim: int, out_dim: int):
+    def __init__(self, dim: int, out_dim: int, use_mlp: bool = False):
         super().__init__()
-        self.attn = nn.Linear(dim, 1, bias=False)
+
+        # Single learned query
+        self.query = nn.Parameter(torch.randn(1, 1, dim))
+
+        # Value projection (linear here, but could be identity?)
+        self.value_proj = nn.Linear(dim, dim)
+
+        # Normalization after pooling
         self.norm = nn.LayerNorm(dim)
-        self.fc = nn.Linear(dim, out_dim)
+
+        # Output head
+        if use_mlp:
+            self.head = nn.Sequential(
+                nn.Linear(dim, dim),
+                nn.GELU(),
+                nn.Linear(dim, out_dim),
+            )
+        else:
+            self.head = nn.Linear(dim, out_dim)
 
     def _pool(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, S, D)
-        scores = self.attn(x).squeeze(-1)
-        weights = torch.softmax(scores, dim=1)
-        return torch.einsum("bs,bsd->bd", weights, x)
+        """
+        x: (B, S, D)
+        returns: (B, D)
+        """
+        B, S, D = x.shape
+
+        # Expand query per batch
+        q = self.query.expand(B, -1, -1)  # (B, 1, D)
+
+        # Scaled dot-product attention
+        scores = torch.einsum("bqd,bsd->bqs", q, x) / math.sqrt(D)
+        weights = torch.softmax(scores, dim=-1)  # (B, 1, S)
+
+        values = self.value_proj(x)
+        pooled = torch.einsum("bqs,bsd->bqd", weights, values)
+
+        return pooled.squeeze(1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, S, D) or (B, n_chunks, S, D)
+        """
+        x: (B, S, D) or (B, n_chunks, S, D)
+        """
         if x.dim() == 4:
-            bsz, n_chunks, seq_len, dim = x.shape
-            x = x.reshape(bsz * n_chunks, seq_len, dim)
-            pooled = self._pool(x).view(bsz, n_chunks, dim).mean(dim=1)
+            B, n_chunks, S, D = x.shape
+            x = x.view(B * n_chunks, S, D)
+            pooled = self._pool(x).view(B, n_chunks, D).mean(dim=1)
         elif x.dim() == 3:
             pooled = self._pool(x)
         else:
-            raise ValueError(f"Unexpected attentive probe input shape: {tuple(x.shape)}")
+            raise ValueError(f"Unexpected input shape: {tuple(x.shape)}")
+
         pooled = self.norm(pooled)
-        return self.fc(pooled)
+        return self.head(pooled)
+
+class ShardedEmbeddingDataset(Dataset):
+    def __init__(self, index_path: Path):
+        with open(index_path, "r") as f:
+            index = json.load(f)
+
+        self.shards = []
+        self.cum_counts = []
+        total = 0
+
+        for shard in index.get("shards", []):
+            emb = np.load(shard["embeddings"], mmap_mode="r")
+            lbl = np.load(shard["labels"], mmap_mode="r")
+            count = int(shard.get("count", len(emb)))
+            self.shards.append(
+                {
+                    "emb": emb,
+                    "lbl": lbl,
+                    "count": count,
+                    "sequence_ids": shard.get("sequence_ids"),
+                }
+            )
+            total += count
+            self.cum_counts.append(total)
+
+    def __len__(self) -> int:
+        return self.cum_counts[-1] if self.cum_counts else 0
+
+    def __getitem__(self, idx: int):
+        shard_idx = bisect.bisect_left(self.cum_counts, idx + 1)
+        prev = 0 if shard_idx == 0 else self.cum_counts[shard_idx - 1]
+        local_idx = idx - prev
+        shard = self.shards[shard_idx]
+        emb = shard["emb"][local_idx]
+        lbl = shard["lbl"][local_idx]
+        return torch.from_numpy(emb), torch.from_numpy(lbl)
+
+    def get_sequence_id(self, idx: int) -> Optional[Any]:
+        shard_idx = bisect.bisect_left(self.cum_counts, idx + 1)
+        prev = 0 if shard_idx == 0 else self.cum_counts[shard_idx - 1]
+        local_idx = idx - prev
+        seq_ids = self.shards[shard_idx].get("sequence_ids")
+        if seq_ids is None:
+            return None
+        return seq_ids[local_idx]
+
+class MemmapEmbeddingDataset(Dataset):
+    def __init__(self, emb_path: Path, lbl_path: Path, sequence_ids: Optional[List[Any]] = None):
+        self.emb = np.load(emb_path, mmap_mode="r")
+        self.lbl = np.load(lbl_path, mmap_mode="r")
+        self.sequence_ids = sequence_ids
+
+    def __len__(self) -> int:
+        return len(self.emb)
+
+    def __getitem__(self, idx: int):
+        return torch.from_numpy(self.emb[idx]), torch.from_numpy(self.lbl[idx])
+
+    def get_sequence_id(self, idx: int) -> Optional[Any]:
+        if self.sequence_ids is None:
+            return None
+        return self.sequence_ids[idx]
 
 def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
     """Setup eegfm imports by adding path to sys.path if needed."""
@@ -446,6 +568,128 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         labels = torch.cat(labels_list, dim=0)
         return embeddings, labels
 
+    @torch.no_grad()
+    def _extract_embeddings_clinical_stream(self, dataloader, coords, index_path: Path, shard_prefix: Path, shard_size: int = 1000) -> Dataset:
+        """Stream embeddings/labels to sharded .npy files to avoid large in-memory concatenation."""
+        self.model.backbone.eval()
+        write_idx = 0
+        shard_idx = 0
+        shards = []
+        rec_names = getattr(dataloader.dataset, "recording_names", None)
+        emb_buffer = []
+        lbl_buffer = []
+        seq_buffer = []
+
+        chunk_length = self.model.chunk_length
+        with torch.inference_mode():
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                for batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
+                    x, yb, batch_coords = batch
+                    x = x.to(self.device)
+                    B, C, T = x.shape
+
+                    n_chunks = T // chunk_length
+                    if n_chunks == 0:
+                        pad_length = chunk_length - T
+                        x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
+                        n_chunks = 1
+                        T = chunk_length
+
+                    chunk_trunc = n_chunks * chunk_length
+                    x = x[:, :, :chunk_trunc]
+
+                    x = x.view(B, C, n_chunks, chunk_length)
+                    x = x.permute(0, 2, 1, 3)
+                    x = x.reshape(B * n_chunks, C, chunk_length)
+
+                    if x.shape[1] != coords.shape[0]:
+                        batch_coords = [ch_name[0] for ch_name in batch_coords]
+                        coords = self._coords(batch_coords).to(self.device)
+
+                    cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
+                    cb = cb.reshape(B * n_chunks, C, 3)
+
+                    outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
+                    if self.attentive_probe:
+                        seq = outputs["sequence_embeddings"]
+                        seq_len = seq.shape[1]
+                        embed_dim = seq.shape[2]
+                        seq = seq.view(B, n_chunks, seq_len, embed_dim)
+                        embeddings = seq.cpu().numpy()
+                    else:
+                        cls = outputs["cls_token"]
+                        embedding_dim = cls.shape[1]
+                        cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)
+                        embeddings = cls.cpu().numpy()
+
+                    if not self.model.is_multilabel_task and yb.dim() > 1:
+                        labels = yb.argmax(dim=1).cpu().numpy()
+                    else:
+                        labels = yb.cpu().numpy()
+
+                    end_idx = write_idx + embeddings.shape[0]
+                    if rec_names is not None:
+                        seq_ids = rec_names[write_idx:end_idx]
+                    else:
+                        seq_ids = [f"sample_{i:08d}" for i in range(write_idx, end_idx)]
+
+                    emb_buffer.append(embeddings)
+                    lbl_buffer.append(labels)
+                    seq_buffer.extend(seq_ids)
+                    write_idx = end_idx
+
+                    buffer_count = sum(arr.shape[0] for arr in emb_buffer)
+                    if buffer_count >= shard_size:
+                        shard_emb_path = Path(f"{shard_prefix}.part{shard_idx:04d}.embeddings.npy")
+                        shard_lbl_path = Path(f"{shard_prefix}.part{shard_idx:04d}.labels.npy")
+                        shard_emb = np.concatenate(emb_buffer, axis=0)
+                        shard_lbl = np.concatenate(lbl_buffer, axis=0)
+                        np.save(shard_emb_path, shard_emb)
+                        np.save(shard_lbl_path, shard_lbl)
+
+                        shards.append(
+                            {
+                                "embeddings": str(shard_emb_path),
+                                "labels": str(shard_lbl_path),
+                                "count": int(shard_emb.shape[0]),
+                                "sequence_ids": list(seq_buffer),
+                            }
+                        )
+                        emb_buffer.clear()
+                        lbl_buffer.clear()
+                        seq_buffer.clear()
+                        shard_idx += 1
+
+        if emb_buffer:
+            shard_emb_path = Path(f"{shard_prefix}.part{shard_idx:04d}.embeddings.npy")
+            shard_lbl_path = Path(f"{shard_prefix}.part{shard_idx:04d}.labels.npy")
+            shard_emb = np.concatenate(emb_buffer, axis=0)
+            shard_lbl = np.concatenate(lbl_buffer, axis=0)
+            np.save(shard_emb_path, shard_emb)
+            np.save(shard_lbl_path, shard_lbl)
+            shards.append(
+                {
+                    "embeddings": str(shard_emb_path),
+                    "labels": str(shard_lbl_path),
+                    "count": int(shard_emb.shape[0]),
+                    "sequence_ids": list(seq_buffer),
+                }
+            )
+
+        index = {
+            "shards": shards,
+            "meta": {
+                "chunk_len_s": self.chunk_len_s,
+                "num_labels_per_chunk": self.num_labels_per_chunk,
+                "attentive_probe": True,
+                "shard_size": shard_size,
+            },
+        }
+        with open(index_path, "w") as f:
+            json.dump(index, f)
+
+        return ShardedEmbeddingDataset(index_path)
+
     def _train_epoch_cached(self, dataloader, optimizer):
         """Train only the head on cached embeddings."""
         self.model.head.train()
@@ -586,30 +830,39 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     val_loader, coords_val, checkpoint_path, task_name, dataset_hash, "val"
                 )
 
-            # Apply data percentage subsampling (deterministic)
-            if data_percentage < 1.0:
-                train_indices = self._subsample_indices(len(train_emb), data_percentage)
-                train_emb = train_emb[train_indices]
-                train_lbl = train_lbl[train_indices]
-                print(f"[LeJEPAClinical] Subsampled to {len(train_emb)} samples ({data_percentage*100:.0f}%)")
+            if self.attentive_probe and isinstance(train_emb, Dataset):
+                cached_train_dataset = train_emb
+                cached_val_dataset = val_emb if has_val else None
 
-            cached_train_dataset = TensorDataset(train_emb, train_lbl)
-            cached_val_dataset = TensorDataset(val_emb, val_lbl) if has_val else None
+                if data_percentage < 1.0:
+                    train_indices = self._subsample_indices(len(cached_train_dataset), data_percentage)
+                    cached_train_dataset = Subset(cached_train_dataset, train_indices)
+                    print(f"[LeJEPAClinical] Subsampled to {len(cached_train_dataset)} samples ({data_percentage*100:.0f}%)")
+            else:
+                # Apply data percentage subsampling (deterministic)
+                if data_percentage < 1.0:
+                    train_indices = self._subsample_indices(len(train_emb), data_percentage)
+                    train_emb = train_emb[train_indices]
+                    train_lbl = train_lbl[train_indices]
+                    print(f"[LeJEPAClinical] Subsampled to {len(train_emb)} samples ({data_percentage*100:.0f}%)")
+
+                cached_train_dataset = TensorDataset(train_emb, train_lbl)
+                cached_val_dataset = TensorDataset(val_emb, val_lbl) if has_val else None
 
             val_count = len(cached_val_dataset) if cached_val_dataset is not None else 0
             print(f"[LeJEPAClinical] Using {len(cached_train_dataset)} train and {val_count} val embeddings")
 
             # Use larger batch size for cached training (no encoder memory needed)
-            cached_batch_size = bs * 32  # 256 for chunked, 4 for full recordings
-            cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True)
-            cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True) if has_val else None
+            cached_batch_size = bs * 32  if not self.attentive_probe else 32 # 256 for chunked, 4 for full recordings
+            cached_train_loader = DataLoader(cached_train_dataset, batch_size=cached_batch_size, shuffle=True, pin_memory=True, num_workers = 4)
+            cached_val_loader = DataLoader(cached_val_dataset, batch_size=cached_batch_size, shuffle=False, pin_memory=True, num_workers = 4) if has_val else None
 
             steps_per_epoch = math.ceil(len(train_loader))
 
             trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
             
 
-            max_lr = 1e-3
+            max_lr = 5e-2 #1e-3 if bs < 1024 else 1e-2
             optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-2)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
@@ -957,6 +1210,28 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                                     dataset_hash: str, split: str) -> tuple:
         """Load cached embeddings or extract and cache them."""
         cache_path = self._get_embedding_cache_path(checkpoint_path, task_name, dataset_hash, split)
+
+        if self.attentive_probe:
+            index_path = cache_path.with_suffix(".index.json")
+            shard_prefix = cache_path.with_suffix("")
+            if index_path.exists():
+                try:
+                    print(f"[LeJEPAClinical] Loading cached shards from {index_path}")
+                    return ShardedEmbeddingDataset(index_path), None
+                except Exception as e:
+                    print(f"[LeJEPAClinical] Sharded cache load failed ({e}); re-extracting.")
+
+            emb_path = cache_path.with_suffix(".embeddings.npy")
+            lbl_path = cache_path.with_suffix(".labels.npy")
+            if emb_path.exists() and lbl_path.exists():
+                try:
+                    print(f"[LeJEPAClinical] Loading cached embeddings from {emb_path}")
+                    return MemmapEmbeddingDataset(emb_path, lbl_path), None
+                except Exception as e:
+                    print(f"[LeJEPAClinical] Cache load failed ({e}); re-extracting.")
+
+            print(f"[LeJEPAClinical] Extracting embeddings (will cache to {index_path})")
+            return self._extract_embeddings_clinical_stream(dataloader, coords, index_path, shard_prefix), None
 
         if cache_path.exists():
             try:
