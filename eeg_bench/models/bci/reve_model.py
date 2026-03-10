@@ -63,8 +63,8 @@ class REVEWrapper(nn.Module):
         
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.RMSNorm(input_dim),
-            nn.Dropout(0.1),
+            # nn.RMSNorm(input_dim),
+            # nn.Dropout(0.1),
             nn.Linear(input_dim, n_classes),
         )
 
@@ -180,6 +180,7 @@ class REVEBenchmarkModel(AbstractModel):
         
         # 5. Training Loop
         self.model.train()
+        self.model.backbone.eval()
         n_epochs = 10 
         
         print(f"Starting training for {n_epochs} epochs on {self.device}...")
