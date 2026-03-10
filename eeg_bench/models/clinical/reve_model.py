@@ -60,8 +60,8 @@ class REVEClinicalWrapper(nn.Module):
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.RMSNorm(input_dim),
-            nn.Dropout(0.1),
+            # nn.RMSNorm(input_dim),
+            # nn.Dropout(0.1),
             nn.Linear(input_dim, out_dim),
         )
         self.loss_fn = nn.CrossEntropyLoss()
@@ -161,6 +161,7 @@ class REVEClinicalModel(AbstractModel):
         num_epochs = 30
         for epoch in range(num_epochs):
             self.model.train()
+            self.model.backbone.eval()
             total_loss = 0.0
             total_samples = 0
             correct = 0

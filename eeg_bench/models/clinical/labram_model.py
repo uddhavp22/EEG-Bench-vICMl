@@ -1,6 +1,6 @@
 
 from ..abstract_model import AbstractModel
-from typing import List, Dict, cast, Literal, Optional
+from typing import List, Dict, cast, Literal, Optional, Iterable
 import numpy as np
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse, LaBraMDataset2, make_multilabels
@@ -25,6 +25,7 @@ import logging
 import os
 import requests
 from pathlib import Path
+from ...utils.eeg_noise import apply_eeg_noise
 
 def check_and_download_pretrained_model():
     chkpt_dir = Path(get_config_value("chkpt"))
@@ -298,16 +299,31 @@ def validate_epoch(model, dataloader, device, input_chans, cached_features: bool
     
     return epoch_loss, epoch_acc, results
 
-def inference(model, dataloader, device, input_chans):
+def inference(model, dataloader, device, input_chans, eval_noise: Optional[Dict] = None, sfreq: float = 200.0):
     model.eval()
     predictions = []
     indices = []
+    noise_seed_base: Optional[int] = None
+    if eval_noise is not None:
+        noise_seed_base = eval_noise.get("seed")
+
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Testing", leave=True):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Testing", leave=True)):
             x, idx, channels  = batch
             if channels != -1 and channels[0] != -1:
                 channels = [ch_arr[0] for ch_arr in channels]
                 input_chans = utils.get_input_chans(channels)
+
+            if eval_noise is not None:
+                seed = None if noise_seed_base is None else int(noise_seed_base) + batch_idx
+                x = apply_eeg_noise(
+                    x,
+                    sfreq=sfreq,
+                    snr_db=eval_noise.get("snr_db"),
+                    noise_types=eval_noise.get("noise_types"),
+                    channel_dropout_prob=float(eval_noise.get("channel_dropout_prob", 0.0)),
+                    seed=seed,
+                )
 
             # x = x.to(device) will be done in the model
             _, logits = model(x, input_chans)
@@ -345,6 +361,28 @@ class LaBraMModel(AbstractModel):
         self.cached_batch_multiplier = 4
         self.supports_full_dataset_cache = self.cache_encoder_outputs
         self.last_data_stats = None
+        self.eval_noise_config: Optional[Dict] = None
+
+    def set_eval_noise(
+        self,
+        noise_types: Optional[Iterable[str]],
+        snr_db: Optional[float],
+        channel_dropout_prob: float = 0.0,
+        seed: Optional[int] = None,
+    ) -> None:
+        """
+        Configure evaluation-time noise injection. This is applied only in predict().
+        Passing noise_types=None or snr_db=None disables noise.
+        """
+        if not noise_types or snr_db is None:
+            self.eval_noise_config = None
+            return
+        self.eval_noise_config = {
+            "noise_types": list(noise_types),
+            "snr_db": float(snr_db),
+            "channel_dropout_prob": float(channel_dropout_prob),
+            "seed": None if seed is None else int(seed),
+        }
 
     def fit(
         self,
@@ -887,7 +925,14 @@ class LaBraMModel(AbstractModel):
         test_loader = DataLoader(dataset_test, batch_size=batch_size, num_workers=4, shuffle=False, pin_memory=True)
 
         input_chans = utils.get_input_chans(ch_names)
-        predictions, indices_mapping = inference(self.model, test_loader, self.device, input_chans)
+        predictions, indices_mapping = inference(
+            self.model,
+            test_loader,
+            self.device,
+            input_chans,
+            eval_noise=self.eval_noise_config,
+            sfreq=float(getattr(dataset_test, "sfreq", 200.0)),
+        )
         
         predictions = predictions.numpy()
         indices_mapping = indices_mapping.numpy()
