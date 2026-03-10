@@ -232,3 +232,4 @@ dependencies:
       - wsproto==1.2.0
       - yarl==1.18.3
       - wfdb==4.1.0
+      - braindecode

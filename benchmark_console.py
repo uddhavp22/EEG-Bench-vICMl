@@ -30,6 +30,7 @@ from eeg_bench.models.clinical import (
     REVEClinicalModel as REVEClinical,
     LUNAClinicalModel as LUNAClinical,
     CBraModClinicalModel as CBraModClinical,
+    SJEPAClinicalModel as SJEPAClinical,
 )
 from eeg_bench.models.bci import (
     CSPLDAModel as CSPLDA,
@@ -41,6 +42,7 @@ from eeg_bench.models.bci import (
     EEGLeJEPABCIModel as LeJEPABci,
     LUNABCIModel as LUNABci,
     CBraModBCIModel as CBraModBci,
+    SJEPABCIModel as SJEPABci,
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks
@@ -53,6 +55,7 @@ from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks, 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
+
 
 
 ALL_TASKS_CLASSES = [
@@ -184,7 +187,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa"
+        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa, luna, cbramod, sjepa"
     )
     parser.add_argument(
         "--seed",
@@ -383,6 +386,17 @@ def main():
             linear_probe=args.linear_probe
         )
 
+    # Factory functions for S-JEPA models
+    def make_sjepa_clinical(num_classes=2, num_labels_per_chunk=None):
+        return SJEPAClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            freeze_encoder=args.linear_probe,
+        )
+
+    def make_sjepa_bci():
+        return SJEPABci(freeze_encoder=args.linear_probe)
+
     # Factory functions for CBraMod models
     def make_cbramod_clinical(num_classes=2, num_labels_per_chunk=None):
         return CBraModClinical(
@@ -429,6 +443,7 @@ def main():
         "reve": REVEClinical,
         "luna": make_luna_clinical,
         "cbramod": make_cbramod_clinical,
+        "sjepa": make_sjepa_clinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
@@ -440,6 +455,7 @@ def main():
         "lejepa": make_lejepa_bci,
         "luna": make_luna_bci,
         "cbramod": make_cbramod_bci,
+        "sjepa": make_sjepa_bci,
     }
 
     wandb_run = None

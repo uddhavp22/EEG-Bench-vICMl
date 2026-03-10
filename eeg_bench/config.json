@@ -1,13 +1,13 @@
 {
-    "data": "/radraid2/spanchavati/EEGBench/data/",
-    "cache": "/raid/spanchavati/EEG-Bench-vICMl/cache/",
-    "log": "/raid/spanchavati/EEG-Bench-vICMl/logs/",
-    "tmp": "/raid/spanchavati/EEG-Bench-vICMl/tmp/",
-    "chkpt": "/raid/spanchavati/EEG-Bench-vICMl/checkpoints/",
-    "results": "/raid/spanchavati/EEG-Bench-vICMl/results/",
+    "data": "/mnt/sphere/projects/uddhavp/EEGBench/data/",
+    "cache": "/mnt/sphere/projects/uddhavp/EEGBench/cache/",
+    "log": "/mnt/sphere/projects/uddhavp/EEGBench/logs/",
+    "tmp": "/mnt/sphere/projects/uddhavp/EEGBench/tmp/",
+    "chkpt": "/mnt/sphere/projects/uddhavp/EEGBench/checkpoints/",
+    "results": "/mnt/sphere/projects/uddhavp/EEGBench/results/",
     "lejepa": {
-        "eegfm_path": "/raid/spanchavati",
-        "pos_bank_path": "/raid/spanchavati/EEG-Bench-vICMl/REVE_posbank",
+        "eegfm_path": "/mnt/sphere/projects/uddhavp",
+        "pos_bank_path": "/mnt/sphere/projects/uddhavp/EEGBench/REVE_posbank",
         "checkpoint": {
             "base_path": null,
             "version": null,

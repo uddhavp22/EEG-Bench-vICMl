@@ -8,3 +8,5 @@ from .EEGLeJEPA_model import EEGLeJEPABCIModel
 from .luna_model import LUNABCIModel
 from .cbramod_model import CBraModBCIModel
 
+
+from .sjepa_model import SJEPAModel as SJEPABCIModel

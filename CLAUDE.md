@@ -44,7 +44,7 @@ Clinical: `parkinsons`, `schizophrenia`, `mtbi`, `ocd`, `epilepsy`, `abnormal`, 
 BCI (Motor Imagery): `left_right`, `right_feet`, `left_right_feet_tongue`, `5_fingers`
 
 ### Model Codes
-`lda`, `svm`, `labram`, `bendr`, `neurogpt`, `reve`, `lejepa`
+`lda`, `svm`, `labram`, `bendr`, `neurogpt`, `reve`, `lejepa`, `luna`, `cbramod`, `sjepa`
 
 ## Architecture
 
