@@ -82,6 +82,7 @@ dependencies:
       - attrs==25.1.0
       - beautifulsoup4==4.13.3
       - blobfile==3.0.0
+      - braindecode
       - bs4==0.0.2
       - cffi==1.17.1
       - charset-normalizer==3.4.1

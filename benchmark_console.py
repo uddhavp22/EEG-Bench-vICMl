@@ -30,6 +30,9 @@ from eeg_bench.models.clinical import (
     NeuroGPTModel as NeuroGPTClinical,
     EEGLeJEPAClinicalModel as LeJEPAClinical,
     REVEClinicalModel as REVEClinical,
+    LUNAClinicalModel as LUNAClinical,
+    SJEPAClinicalModel as SJEPAClinical,
+    CBraModClinicalModel as CBraModClinical,
 )
 from eeg_bench.models.bci import (
     CSPLDAModel as CSPLDA,
@@ -38,13 +41,16 @@ from eeg_bench.models.bci import (
     BENDRModel as BENDRBci,
     NeuroGPTModel as NeuroGPTBci,
     REVEBenchmarkModel as REVEBci,
-    EEGLeJEPABCIModel as LeJEPABci, 
+    EEGLeJEPABCIModel as LeJEPABci,
+    LUNABCIModel as LUNABci,
+    SJEPABCIModel as SJEPABci,
+    CBraModBCIModel as CBraModBci,
 )
 from eeg_bench.utils.evaluate_and_plot import print_classification_results, generate_classification_plots
 from eeg_bench.utils.utils import set_seed, save_results, get_multilabel_tasks, subsample_data_stratified
 from eeg_bench.models.clinical.LaBraM.utils_2 import make_multilabels
 from eeg_bench.utils import wandb_utils
-from eeg_bench.config import load_lejepa_config, merge_lejepa_config_with_cli
+from eeg_bench.config import load_config, load_lejepa_config, merge_lejepa_config_with_cli
 from eeg_bench.utils.eeg_noise import VALID_NOISE_TYPES
 # NOTE: Removed 'from asyncio.tasks import ALL_COMPLETED' as it was unused and caused an error in some environments.
 
@@ -70,6 +76,22 @@ ALL_TASKS_CLASSES = [
     FiveFingersMITask,
 
 ]
+CLINICAL_TASK_KEYS = {
+    "parkinsons",
+    "schizophrenia",
+    "mtbi",
+    "ocd",
+    "epilepsy",
+    "abnormal",
+    "sleep_stages",
+    "seizure",
+    "binary_artifact",
+    "multiclass_artifact",
+}
+
+
+def _is_clinical_task_key(task_key: str) -> bool:
+    return task_key in CLINICAL_TASK_KEYS
 
 def _build_eval_conditions(
     eval_noise_types: Optional[Iterable[str]],
@@ -286,7 +308,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa"
+        help="Model to use. Options: lda, svm, labram, bendr, neurogpt, reve, lejepa, luna, sjepa, cbramod"
     )
     parser.add_argument(
         "--seed",
@@ -384,6 +406,30 @@ def main():
         action="store_true",
         help="Apply all --eval-noise-types simultaneously at each SNR level (instead of one type at a time).",
     )
+    parser.add_argument(
+        "--luna-pretrained-path",
+        type=str,
+        default=None,
+        help="Path to LUNA pretrained checkpoint (.safetensors)"
+    )
+    parser.add_argument(
+        "--luna-biofoundation-path",
+        type=str,
+        default=None,
+        help="Path to BioFoundation repo used by LUNA"
+    )
+    parser.add_argument(
+        "--cbramod-pretrained-path",
+        type=str,
+        default=None,
+        help="Path to CBraMod pretrained checkpoint (.pth)"
+    )
+    parser.add_argument(
+        "--cbramod-path",
+        type=str,
+        default=None,
+        help="Path to CBraMod repo used for imports"
+    )
 
     # LeJEPA configuration
     parser.add_argument(
@@ -468,6 +514,14 @@ def main():
     if args.linear_probe and not getattr(args, 'lejepa_no_freeze_encoder', False):
         lejepa_config.freeze_encoder = True
 
+    raw_config = load_config()
+    luna_config = raw_config.get("luna", {}) if isinstance(raw_config.get("luna", {}), dict) else {}
+    cbramod_config = raw_config.get("cbramod", {}) if isinstance(raw_config.get("cbramod", {}), dict) else {}
+    luna_pretrained_path = args.luna_pretrained_path or luna_config.get("pretrained_path")
+    luna_biofoundation_path = args.luna_biofoundation_path or luna_config.get("biofoundation_path")
+    cbramod_pretrained_path = args.cbramod_pretrained_path or cbramod_config.get("pretrained_path")
+    cbramod_path = args.cbramod_path or cbramod_config.get("path")
+
     # Factory functions for LeJEPA models (to inject config)
     def make_lejepa_clinical(num_classes=2, num_labels_per_chunk=None):
         return LeJEPAClinical(
@@ -518,6 +572,50 @@ def main():
     def make_reve_bci():
         return REVEBci(freeze_backbone=args.linear_probe)
 
+    def make_luna_clinical(num_classes=2, num_labels_per_chunk=None):
+        return LUNAClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            pretrained_path=luna_pretrained_path,
+            biofoundation_path=luna_biofoundation_path,
+            freeze_backbone=True,
+            linear_probe=args.linear_probe,
+        )
+
+    def make_luna_bci():
+        return LUNABci(
+            pretrained_path=luna_pretrained_path,
+            biofoundation_path=luna_biofoundation_path,
+            freeze_backbone=True,
+            linear_probe=args.linear_probe,
+        )
+
+    def make_sjepa_clinical(num_classes=2, num_labels_per_chunk=None):
+        return SJEPAClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            freeze_encoder=args.linear_probe,
+        )
+
+    def make_sjepa_bci():
+        return SJEPABci(freeze_encoder=args.linear_probe)
+
+    def make_cbramod_clinical(num_classes=2, num_labels_per_chunk=None):
+        return CBraModClinical(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            pretrained_path=cbramod_pretrained_path,
+            cbramod_path=cbramod_path,
+            freeze_backbone=True,
+        )
+
+    def make_cbramod_bci():
+        return CBraModBci(
+            pretrained_path=cbramod_pretrained_path,
+            cbramod_path=cbramod_path,
+            freeze_backbone=True,
+        )
+
     # Mapping command-line strings to task classes
     tasks_map = {
         "parkinsons": ParkinsonsClinicalTask,
@@ -545,6 +643,9 @@ def main():
         "neurogpt": make_neurogpt_clinical,
         "lejepa": make_lejepa_clinical,
         "reve": make_reve_clinical,
+        "luna": make_luna_clinical,
+        "sjepa": make_sjepa_clinical,
+        "cbramod": make_cbramod_clinical,
     }
     bci_models_map = {
         "lda": CSPLDA,
@@ -554,6 +655,9 @@ def main():
         "neurogpt": make_neurogpt_bci,
         "reve": make_reve_bci,
         "lejepa": make_lejepa_bci,
+        "luna": make_luna_bci,
+        "sjepa": make_sjepa_bci,
+        "cbramod": make_cbramod_bci,
     }
 
     wandb_run = None
@@ -579,6 +683,10 @@ def main():
                 "eval_noise_levels_db": args.eval_noise_levels_db,
                 "eval_noise_channel_dropout_prob": args.eval_noise_channel_dropout_prob,
                 "eval_noise_mix_all": args.eval_noise_mix_all,
+                "luna_pretrained_path": luna_pretrained_path,
+                "luna_biofoundation_path": luna_biofoundation_path,
+                "cbramod_pretrained_path": cbramod_pretrained_path,
+                "cbramod_path": cbramod_path,
             },
         )
         wandb_utils.set_run(wandb_run)
@@ -588,7 +696,7 @@ def main():
         if args.all:
             logger.info("Running all task/model combinations...")
             for task_key, task_cls in tasks_map.items():
-                if task_key in ["parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy", "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"]:
+                if _is_clinical_task_key(task_key):
                     models_map = clinical_models_map
                 else:
                     models_map = bci_models_map
@@ -611,18 +719,39 @@ def main():
             model_key = args.model.lower()
             
             if task_key == "full":
-                tasks_to_run = "full" 
+                if model_key not in clinical_models_map or model_key not in bci_models_map:
+                    parser.error(
+                        f"Model '{model_key}' must be available in both clinical and BCI maps for --task full. "
+                        f"Clinical: {', '.join(sorted(clinical_models_map.keys()))} | "
+                        f"BCI: {', '.join(sorted(bci_models_map.keys()))}"
+                    )
+                for full_task_key, full_task_cls in tasks_map.items():
+                    task_models_map = clinical_models_map if _is_clinical_task_key(full_task_key) else bci_models_map
+                    benchmark(
+                        [full_task_cls()],
+                        [task_models_map[model_key]],
+                        args.seed,
+                        args.reps,
+                        wandb_run=wandb_run,
+                        data_percentages=args.data_percentages,
+                        linear_probe=args.linear_probe,
+                        result_prefix=args.result_prefix,
+                        checkpoint_id=args.checkpoint_id,
+                        eval_noise_types=args.eval_noise_types,
+                        eval_noise_levels_db=args.eval_noise_levels_db,
+                        eval_noise_channel_dropout_prob=args.eval_noise_channel_dropout_prob,
+                        eval_noise_mix_all=args.eval_noise_mix_all,
+                    )
+                return
             elif task_key not in tasks_map:
                 parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")
             else:
-                tasks_to_run = [tasks_map[task_key]()] 
-            
-            if task_key in ["parkinsons", "schizophrenia", "mtbi", "ocd", "epilepsy", "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"]:
+                tasks_to_run = [tasks_map[task_key]()]
+
+            if _is_clinical_task_key(task_key):
                 models_map = clinical_models_map
             elif task_key in ["left_right", "right_feet", "left_right_feet_tongue", "5_fingers"]:
                 models_map = bci_models_map
-            elif task_key == "full": 
-                models_map = clinical_models_map 
             else:
                 models_map = {}
                 parser.error(f"Invalid task specified. Choose from: {', '.join(tasks_map.keys())} or 'full'")

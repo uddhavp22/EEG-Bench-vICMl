@@ -15,6 +15,14 @@
         },
         "freeze_encoder": true
     },
+    "luna": {
+        "pretrained_path": null,
+        "biofoundation_path": null
+    },
+    "cbramod": {
+        "pretrained_path": null,
+        "path": null
+    },
     "cavanagh2018a": null,
     "cavanagh2018b": null,
     "albrecht2019": null,
