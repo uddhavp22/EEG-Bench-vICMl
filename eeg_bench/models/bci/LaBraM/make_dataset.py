@@ -32,6 +32,12 @@ standard_1020 = [
     "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1", "FP2-F4", "F4-C4", "C4-P4", "P4-O2"
 ]
 
+
+def _ordered_target_channels(ch_names: List[str]) -> List[str]:
+    """Return channels in deterministic standard_1020 order."""
+    available = set(ch_names)
+    return [ch.upper() for ch in standard_1020 if ch.upper() in available]
+
 def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int, 
                  ch_names: List[str], target_rate: int = 200, target_channels: Optional[List[str]] = None,
                  l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1) -> LaBraMBCIDataset:
@@ -60,7 +66,7 @@ def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, samp
     else:
         # target_channels = ch_names
         ch_names = [ch.upper() for ch in ch_names]
-        target_channels = list(set([ch.upper() for ch in standard_1020]).intersection(set(ch_names)))
+        target_channels = _ordered_target_channels(ch_names)
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     # bandpass filter
@@ -127,7 +133,7 @@ def make_dataset_lejepa(data: np.ndarray, labels: np.ndarray|None, task_name: st
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
     else:
         ch_names = [ch.upper() for ch in ch_names]
-        target_channels = list(set([ch.upper() for ch in standard_1020]).intersection(set(ch_names)))
+        target_channels = _ordered_target_channels(ch_names)
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     data = filter_resample_array(data, sampling_rate, target_rate)
@@ -185,7 +191,7 @@ def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str,
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
     else:
         ch_names = [ch.upper() for ch in ch_names]
-        target_channels = list(set([ch.upper() for ch in standard_1020]).intersection(set(ch_names)))
+        target_channels = _ordered_target_channels(ch_names)
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     data = filter_data(data, sfreq=sampling_rate, l_freq=l_freq, h_freq=h_freq, method='fir', verbose=False)
@@ -241,7 +247,7 @@ def make_dataset_sjepa(data: np.ndarray, labels: np.ndarray|None, task_name: str
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
     else:
         ch_names = [ch.upper() for ch in ch_names]
-        target_channels = list(set([ch.upper() for ch in standard_1020]).intersection(set(ch_names)))
+        target_channels = _ordered_target_channels(ch_names)
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     data = filter_data(data, sfreq=sampling_rate, l_freq=l_freq, h_freq=h_freq, method='fir', verbose=False)
@@ -295,7 +301,7 @@ def make_dataset_cbramod(data: np.ndarray, labels: np.ndarray|None, task_name: s
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
     else:
         ch_names = [ch.upper() for ch in ch_names]
-        target_channels = list(set([ch.upper() for ch in standard_1020]).intersection(set(ch_names)))
+        target_channels = _ordered_target_channels(ch_names)
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     data = filter_data(data, sfreq=sampling_rate, l_freq=l_freq, h_freq=h_freq, method='fir', verbose=False)
