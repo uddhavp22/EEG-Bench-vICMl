@@ -4,6 +4,8 @@ import torch
 import os
 import json
 import logging
+import shutil
+import tempfile
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Union, Iterable
 from collections import Counter
@@ -24,6 +26,22 @@ def set_seed(seed=42):
 
 def get_multilabel_tasks():
     return set(["seizure_clinical", "sleep_stages_clinical", "binary_artifact_clinical", "multiclass_artifact_clinical"])
+
+
+def configure_torch_backend_for_speed():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def create_temp_cache_dir(prefix: str = "lp_cache_") -> str:
+    cache_root = get_config_value("cache") or "/tmp"
+    return tempfile.mkdtemp(prefix=prefix, dir=cache_root)
+
+
+def cleanup_temp_cache_dir(path: str) -> None:
+    if path and os.path.exists(path):
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _is_multilabel_data(y_i) -> bool:
