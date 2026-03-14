@@ -10,6 +10,7 @@ Reference:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from functools import partial
 from pathlib import Path
@@ -19,11 +20,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm import tqdm
 
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
+from ...utils.utils import create_temp_cache_dir, cleanup_temp_cache_dir
 from .LaBraM.make_dataset import make_dataset_cbramod
 from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
 
@@ -159,6 +161,13 @@ class CBraModBCIWrapper(nn.Module):
         logits = self.classifier(feats)
         return logits
 
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            return self.backbone(x.to(self.device))
+
+    def classify_features(self, feats: torch.Tensor) -> torch.Tensor:
+        return self.classifier(feats.to(self.device))
+
 
 class CBraModBCIModel(AbstractModel):
     """CBraMod wrapper for BCI (Motor Imagery) EEG classification tasks."""
@@ -249,6 +258,84 @@ class CBraModBCIModel(AbstractModel):
 
         return X_patched
 
+    def _fit_linear_probe_cached(self, X_patched: np.ndarray, y_all: np.ndarray, n_epochs: int) -> None:
+        assert self.model is not None
+
+        cache_dir = create_temp_cache_dir("cbramod_bci_lp_")
+        try:
+            total_samples = X_patched.shape[0]
+            sample_batch = torch.from_numpy(X_patched[:1]).float().to(self.device)
+            sample_features = self.model.extract_features(sample_batch).cpu().numpy()
+            feature_shape = sample_features.shape[1:]
+
+            features = np.memmap(
+                os.path.join(cache_dir, "train_features.dat"),
+                dtype=np.float32,
+                mode="w+",
+                shape=(total_samples, *feature_shape),
+            )
+            labels = np.memmap(
+                os.path.join(cache_dir, "train_labels.dat"),
+                dtype=np.int64,
+                mode="w+",
+                shape=(total_samples,),
+            )
+
+            data_loader = DataLoader(SimpleDataset(X_patched, y_all), batch_size=64, shuffle=False, num_workers=0)
+
+            idx = 0
+            self.model.eval()
+            for batch in tqdm(data_loader, desc="Cache CBraMod BCI embeddings", leave=False):
+                data = batch["data"].to(self.device)
+                target = batch["labels"].cpu().numpy()
+                feats = self.model.extract_features(data).cpu().numpy()
+                bsz = feats.shape[0]
+                features[idx:idx + bsz] = feats
+                labels[idx:idx + bsz] = target
+                idx += bsz
+
+            features.flush()
+            labels.flush()
+
+            feat_loader = DataLoader(
+                TensorDataset(torch.from_numpy(features), torch.from_numpy(labels)),
+                batch_size=256,
+                shuffle=True,
+                num_workers=0,
+            )
+
+            optimizer = torch.optim.AdamW(self.model.classifier.parameters(), lr=1e-3)
+            criterion = nn.CrossEntropyLoss()
+
+            for epoch in range(n_epochs):
+                total_loss = 0.0
+                correct = 0
+                total = 0
+                self.model.classifier.train()
+                for feats, target in tqdm(feat_loader, desc=f"Epoch {epoch+1}", leave=False):
+                    feats = feats.to(self.device)
+                    target = target.to(self.device)
+                    optimizer.zero_grad()
+                    output = self.model.classify_features(feats)
+                    loss = criterion(output, target)
+                    loss.backward()
+                    optimizer.step()
+                    total_loss += loss.item() * target.size(0)
+                    correct += (output.argmax(dim=1) == target).sum().item()
+                    total += target.size(0)
+
+                epoch_loss = total_loss / total if total else 0.0
+                epoch_acc = 100.0 * correct / total if total else 0.0
+                metrics = {
+                    f"{self.name}/train_loss": epoch_loss,
+                    f"{self.name}/train_acc": epoch_acc / 100.0,
+                }
+                if self.wandb_run:
+                    wandb_utils.log(metrics, step=epoch + 1)
+                print(f"Epoch {epoch+1}/{n_epochs} - Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.2f}%")
+        finally:
+            cleanup_temp_cache_dir(cache_dir)
+
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         """Train the CBraMod model on BCI data."""
         logger.info("Initializing CBraMod BCI Fit...")
@@ -305,22 +392,25 @@ class CBraModBCIModel(AbstractModel):
             ).to(self.device)
             logger.info(f"[CBraMod] Initialized with {n_channels} channels, {num_patches} patches of size {patch_size} (200 Hz)")
 
-        # 6. Create dataset and dataloader
+        # Training loop
+        n_epochs = 10
+
+        logger.info(f"Starting training for {n_epochs} epochs...")
+
+        if self.freeze_backbone:
+            self._fit_linear_probe_cached(X_patched, y_all, n_epochs)
+            logger.info("Training complete!")
+            return
+
         train_dataset = SimpleDataset(X_patched, y_all)
         train_loader = DataLoader(
             train_dataset, batch_size=64, shuffle=True, num_workers=0
         )
 
-        # Optimizer
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = torch.optim.AdamW(trainable_params, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
-
-        # Training loop
         self.model.train()
-        n_epochs = 10
-
-        logger.info(f"Starting training for {n_epochs} epochs...")
 
         for epoch in range(n_epochs):
             total_loss = 0

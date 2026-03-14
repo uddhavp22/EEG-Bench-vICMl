@@ -1,6 +1,7 @@
+import os
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from transformers import AutoModel
 import numpy as np
 from typing import List, Dict, Union
@@ -9,6 +10,7 @@ import logging
 from functools import partial
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
+from ...utils.utils import create_temp_cache_dir, cleanup_temp_cache_dir
 
 
 
@@ -81,6 +83,14 @@ class REVEWrapper(nn.Module):
         logits = self.classifier(features)
         return logits
 
+    def extract_features(self, x, pos):
+        with torch.no_grad():
+            features = self.backbone(x, pos)
+        return features.reshape(features.shape[0], -1)
+
+    def classify_features(self, features):
+        return self.classifier(features)
+
 
 class REVEBenchmarkModel(AbstractModel):
     def __init__(self, freeze_backbone: bool = True):
@@ -95,6 +105,78 @@ class REVEBenchmarkModel(AbstractModel):
             torch_dtype="auto",
         )
         self.model = None
+
+    def _fit_linear_probe_cached(self, train_loader, n_epochs=10):
+        assert self.model is not None
+
+        cache_dir = create_temp_cache_dir("reve_bci_lp_")
+        try:
+            total_samples = len(train_loader.dataset)
+            feature_dim = self.model.classifier[1].in_features
+            features_path = os.path.join(cache_dir, "train_features.dat")
+            labels_path = os.path.join(cache_dir, "train_labels.dat")
+            train_features = np.memmap(
+                features_path, dtype=np.float32, mode="w+", shape=(total_samples, feature_dim)
+            )
+            train_labels = np.memmap(
+                labels_path, dtype=np.int64, mode="w+", shape=(total_samples,)
+            )
+
+            idx = 0
+            self.model.eval()
+            for batch in tqdm(train_loader, desc="Cache REVE BCI embeddings", leave=False):
+                data = batch["sample"].to(self.device)
+                pos = batch["pos"].to(self.device)
+                labels = batch["label"].cpu().numpy()
+                feats = self.model.extract_features(data, pos).cpu().numpy()
+                bsz = feats.shape[0]
+                train_features[idx:idx + bsz] = feats
+                train_labels[idx:idx + bsz] = labels
+                idx += bsz
+
+            train_features.flush()
+            train_labels.flush()
+
+            feat_loader = DataLoader(
+                TensorDataset(torch.from_numpy(train_features), torch.from_numpy(train_labels)),
+                batch_size=256,
+                shuffle=True,
+                num_workers=0,
+            )
+
+            optimizer = torch.optim.AdamW(self.model.classifier.parameters(), lr=1e-3)
+            criterion = nn.CrossEntropyLoss()
+
+            for epoch in range(n_epochs):
+                self.model.classifier.train()
+                total_loss = 0.0
+                correct = 0
+                total = 0
+                for feats, target in tqdm(feat_loader, desc=f"Epoch {epoch+1}", leave=False):
+                    feats = feats.to(self.device)
+                    target = target.to(self.device)
+                    optimizer.zero_grad()
+                    output = self.model.classify_features(feats)
+                    loss = criterion(output, target)
+                    loss.backward()
+                    optimizer.step()
+                    total_loss += loss.item() * target.size(0)
+                    correct += (output.argmax(dim=1) == target).sum().item()
+                    total += target.size(0)
+
+                avg_loss = total_loss / total if total else 0.0
+                avg_acc = correct / total if total else 0.0
+                print(f"Epoch {epoch+1} - Acc: {avg_acc:.4f} - Loss: {avg_loss:.4f}")
+                if self.wandb_run:
+                    wandb_utils.log(
+                        {
+                            f"{self.name}/train_loss": avg_loss,
+                            f"{self.name}/train_acc": avg_acc,
+                        },
+                        step=epoch + 1,
+                    )
+        finally:
+            cleanup_temp_cache_dir(cache_dir)
 
     def _get_collate_fn(self, channel_names):
         """
@@ -179,12 +261,15 @@ class REVEBenchmarkModel(AbstractModel):
         criterion = nn.CrossEntropyLoss()
         
         # 5. Training Loop
-        self.model.train()
-        self.model.backbone.eval()
-        n_epochs = 10 
-        
+        n_epochs = 10
         print(f"Starting training for {n_epochs} epochs on {self.device}...")
-        
+
+        if self.freeze_backbone:
+            self._fit_linear_probe_cached(train_loader, n_epochs=n_epochs)
+            return
+
+        self.model.train()
+        self.model.backbone.train()
         for epoch in range(n_epochs):
             total_loss = 0
             correct = 0
