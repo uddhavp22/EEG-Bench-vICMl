@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel
 import numpy as np
 from typing import List, Dict, Union
@@ -10,7 +10,7 @@ import logging
 from functools import partial
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
-from ...utils.utils import create_temp_cache_dir, cleanup_temp_cache_dir
+from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_temp_cache_dir
 
 
 
@@ -138,7 +138,7 @@ class REVEBenchmarkModel(AbstractModel):
             train_labels.flush()
 
             feat_loader = DataLoader(
-                TensorDataset(torch.from_numpy(train_features), torch.from_numpy(train_labels)),
+                CachedArrayDataset(train_features, train_labels),
                 batch_size=256,
                 shuffle=True,
                 num_workers=0,

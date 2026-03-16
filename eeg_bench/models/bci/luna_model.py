@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, TensorDataset, ConcatDataset
+from torch.utils.data import DataLoader, Dataset, ConcatDataset
 from tqdm import tqdm
 from transformers import AutoModel
 from safetensors.torch import load_file as load_safetensors
@@ -29,7 +29,7 @@ from joblib import Memory
 
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
-from ...utils.utils import configure_torch_backend_for_speed, create_temp_cache_dir, cleanup_temp_cache_dir
+from ...utils.utils import CachedArrayDataset, configure_torch_backend_for_speed, create_temp_cache_dir, cleanup_temp_cache_dir
 from ...config import get_config_value
 from .LaBraM.make_dataset import make_dataset_luna, standard_1020
 from .LaBraM.utils_2 import n_unique_labels, calc_class_weights, reverse_map_label
@@ -491,9 +491,7 @@ class LUNABCIModel(AbstractModel):
 
                 train_features.flush()
                 train_labels.flush()
-                train_datasets.append(
-                    TensorDataset(torch.from_numpy(train_features), torch.from_numpy(train_labels))
-                )
+                train_datasets.append(CachedArrayDataset(train_features, train_labels))
 
             for i, loader in enumerate(val_loaders):
                 val_count = len(loader.dataset)
@@ -520,9 +518,7 @@ class LUNABCIModel(AbstractModel):
 
                 val_features.flush()
                 val_labels.flush()
-                val_datasets.append(
-                    TensorDataset(torch.from_numpy(val_features), torch.from_numpy(val_labels))
-                )
+                val_datasets.append(CachedArrayDataset(val_features, val_labels))
 
             train_feat_loader = DataLoader(
                 ConcatDataset(train_datasets),

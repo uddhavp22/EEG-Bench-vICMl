@@ -20,12 +20,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
-from ...utils.utils import create_temp_cache_dir, cleanup_temp_cache_dir
+from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_temp_cache_dir
 from .LaBraM.make_dataset import make_dataset_cbramod
 from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
 
@@ -298,7 +298,7 @@ class CBraModBCIModel(AbstractModel):
             labels.flush()
 
             feat_loader = DataLoader(
-                TensorDataset(torch.from_numpy(features), torch.from_numpy(labels)),
+                CachedArrayDataset(features, labels),
                 batch_size=256,
                 shuffle=True,
                 num_workers=0,

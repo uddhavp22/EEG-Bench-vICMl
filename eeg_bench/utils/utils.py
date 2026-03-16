@@ -1,6 +1,7 @@
 import random
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 import os
 import json
 import logging
@@ -42,6 +43,22 @@ def create_temp_cache_dir(prefix: str = "lp_cache_") -> str:
 def cleanup_temp_cache_dir(path: str) -> None:
     if path and os.path.exists(path):
         shutil.rmtree(path, ignore_errors=True)
+
+
+class CachedArrayDataset(Dataset):
+    """Dataset wrapper that safely materializes tensors from memmaps/ndarrays."""
+
+    def __init__(self, features, labels):
+        self.features = features
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.features)
+
+    def __getitem__(self, idx):
+        feature = torch.tensor(np.asarray(self.features[idx]))
+        label = torch.tensor(np.asarray(self.labels[idx]))
+        return feature, label
 
 
 def _is_multilabel_data(y_i) -> bool:

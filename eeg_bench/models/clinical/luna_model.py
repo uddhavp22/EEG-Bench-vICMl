@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModel
 from safetensors.torch import load_file as load_safetensors
@@ -31,7 +31,7 @@ from ..abstract_model import AbstractModel
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from ...utils import wandb_utils
-from ...utils.utils import configure_torch_backend_for_speed, create_temp_cache_dir, cleanup_temp_cache_dir
+from ...utils.utils import CachedArrayDataset, configure_torch_backend_for_speed, create_temp_cache_dir, cleanup_temp_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -549,10 +549,7 @@ class LUNAClinicalModel(AbstractModel):
             train_features.flush()
             train_labels.flush()
 
-            train_dataset_cached = TensorDataset(
-                torch.from_numpy(train_features),
-                torch.from_numpy(train_labels)
-            )
+            train_dataset_cached = CachedArrayDataset(train_features, train_labels)
             train_feat_loader = DataLoader(
                 train_dataset_cached,
                 batch_size=256,
@@ -591,10 +588,7 @@ class LUNAClinicalModel(AbstractModel):
                 val_features.flush()
                 val_labels.flush()
 
-                val_dataset_cached = TensorDataset(
-                    torch.from_numpy(val_features),
-                    torch.from_numpy(val_labels)
-                )
+                val_dataset_cached = CachedArrayDataset(val_features, val_labels)
                 val_feat_loader = DataLoader(
                     val_dataset_cached,
                     batch_size=256,

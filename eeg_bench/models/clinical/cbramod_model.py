@@ -27,14 +27,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from einops.layers.torch import Rearrange
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ..abstract_model import AbstractModel
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
 from .LaBraM.utils_2 import calc_class_weights, map_label_reverse
 from ...utils import wandb_utils
-from ...utils.utils import create_temp_cache_dir, cleanup_temp_cache_dir
+from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_temp_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -437,13 +437,13 @@ class CBraModClinicalModel(AbstractModel):
             val_labels.flush()
 
             train_feat_loader = DataLoader(
-                TensorDataset(torch.from_numpy(train_features), torch.from_numpy(train_labels)),
+                CachedArrayDataset(train_features, train_labels),
                 batch_size=256,
                 shuffle=True,
                 num_workers=0,
             )
             val_feat_loader = DataLoader(
-                TensorDataset(torch.from_numpy(val_features), torch.from_numpy(val_labels)),
+                CachedArrayDataset(val_features, val_labels),
                 batch_size=256,
                 shuffle=False,
                 num_workers=0,
