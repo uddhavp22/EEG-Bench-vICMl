@@ -405,6 +405,25 @@ def process_one_abnormal(parameters, output_queue):
         logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(t_channels)})")
         return
 
+    elif model_name in ("REVEModel", "LUNAModel", "CBraModModel", "SJEPAClinicalModel"):
+        t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
+        t_channels = [ch for ch in t_channels if ch in standard_1020]
+        ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        raw.pick_channels(chs, ordered=True)
+        sfreq = raw.info['sfreq']
+        signals = raw.get_data(units="uV")
+        max_duration_s = 30 * 60
+        if signals.shape[1] > int(max_duration_s * sfreq):
+            signals = signals[:, : int(max_duration_s * sfreq)]
+        signals = filter_data(signals.astype(np.float64), sfreq=sfreq, l_freq=0.1, h_freq=75.0, method="fir", verbose=False)
+        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+        out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
+        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+        output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
+        return
+
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -448,6 +467,28 @@ def process_one_epilepsy(parameters, output_queue):
         output_queue.put((idx, signals, label, chunk_len_s, 250, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(t_channels)})")
         return
+
+    elif model_name in ("REVEModel", "LUNAModel", "CBraModModel", "SJEPAClinicalModel"):
+        t_channels = [ch for ch in get_channels(task_name) if ch in standard_1020]
+        if "le" in montage:
+            ch_name_pattern = "EEG {}-LE"
+        else:
+            ch_name_pattern = "EEG {}-REF"
+        chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        raw.pick_channels(chs, ordered=True)
+        sfreq = raw.info['sfreq']
+        signals = raw.get_data(units="uV")
+        max_duration_s = 30 * 60
+        if signals.shape[1] > int(max_duration_s * sfreq):
+            signals = signals[:, : int(max_duration_s * sfreq)]
+        signals = filter_data(signals.astype(np.float64), sfreq=sfreq, l_freq=0.1, h_freq=75.0, method="fir", verbose=False)
+        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+        out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
+        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+        output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
+        logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
+        return
+
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -553,6 +594,22 @@ def process_one_multilabel(parameters, output_queue):
         output_queue.put((idx, signals, label, chunk_len_s, 250, out_channels))
         logging.info(f"Processed recording {idx} with label {label} (LeJEPA multilabel)")
         return
+
+    elif model_name in ("REVEModel", "LUNAModel", "CBraModModel", "SJEPAClinicalModel"):
+        t_channels = sorted(list(set(standard_1020).intersection(set(raw.ch_names))))
+        if len(t_channels) > 0:
+            raw = raw.reorder_channels(t_channels)
+        else:
+            print(f"WARN: No channels match standard channels for {model_name}. Keeping original")
+            t_channels = list(raw.ch_names)
+        out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
+        raw = process_filter(raw, out_freq)
+        signals = raw.get_data(units="uV")
+        out_channels = list(raw.ch_names)
+        output_queue.put((idx, signals, label, chunk_len_s, out_freq, out_channels))
+        logging.info(f"Processed recording {idx} with label {label} ({model_name} multilabel)")
+        return
+
     else:
         raise ValueError(f"Invalid model name: {model_name}")
 
@@ -721,13 +778,13 @@ def process_one_cli_unm(parameters, output_queue):
         logging.info(f"Processed recording {idx} with label {label} (LeJEPA channels={len(target_channels)})")
         return
 
-    elif model_name == "REVEModel":
+    elif model_name in ("REVEModel", "LUNAModel", "CBraModModel", "SJEPAClinicalModel"):
         ch_names = [ch.upper() for ch in o_channels]
         required_channels = [c.upper() for c in get_channels(task_name)]
         target_channels = [ch for ch in required_channels if ch in ch_names]
 
         if len(target_channels) == 0:
-            raise ValueError("No required REVE clinical channels found in recording")
+            raise ValueError(f"No required {model_name} clinical channels found in recording")
 
         signals = signals[[ch_names.index(ch) for ch in target_channels], :]
 
@@ -745,11 +802,11 @@ def process_one_cli_unm(parameters, output_queue):
         )
         signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
 
-        out_freq = 200
+        out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
 
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
-        logging.info(f"Processed recording {idx} with label {label} (REVE channels={len(target_channels)})")
+        logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(target_channels)})")
         return
 
     else:
