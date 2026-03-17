@@ -54,6 +54,7 @@ def _setup_luna_imports(biofoundation_path: Optional[str] = None):
     """Setup BioFoundation imports by adding path to sys.path if needed."""
     global LUNA, CrossAttentionBlock, PatchEmbedNetwork
     global RotaryTransformerBlock, FrequencyFeatureEmbedder, ChannelEmbeddings
+    biofoundation_path = '/raid/spanchavati/BioFoundation'
     
 
     if biofoundation_path and biofoundation_path not in sys.path:

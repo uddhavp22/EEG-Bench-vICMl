@@ -32,7 +32,7 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
     output_queue = manager.Queue()
     writer = Process(target=writer_task, args=(output_queue, h5_path))
     writer.start()
-    n_jobs = os.cpu_count() - 1
+    n_jobs = os.cpu_count() - 1 #ALERT! MAJOR CHANGE!!
     if n_jobs < 1:
         n_jobs = 1
 
