@@ -784,6 +784,7 @@ class LUNABCIModel(AbstractModel):
 
         for epoch in range(n_epochs):
             self.model.train()
+            self.model.backbone.eval()
             total_loss = 0.0
             total_samples = 0
             correct = 0

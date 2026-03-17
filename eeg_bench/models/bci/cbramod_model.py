@@ -411,6 +411,7 @@ class CBraModBCIModel(AbstractModel):
         optimizer = torch.optim.AdamW(trainable_params, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
         self.model.train()
+        self.model.backbone.eval()
 
         for epoch in range(n_epochs):
             total_loss = 0

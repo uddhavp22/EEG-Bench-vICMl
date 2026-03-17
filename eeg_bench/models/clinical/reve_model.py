@@ -30,8 +30,8 @@ class REVEClinicalWrapper(nn.Module):
         n_timepoints: int,
         num_classes: int,
         num_labels_per_chunk: Optional[int] = None,
-        hidden_dim: Optional[int] = None,
         freeze_backbone: bool = True,
+        coords: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -48,22 +48,20 @@ class REVEClinicalWrapper(nn.Module):
                 param.requires_grad = False
             self.backbone.eval()
 
-        if hidden_dim is None:
-            config = getattr(self.backbone, "config", None)
-            hidden_dim = (
-                getattr(config, "hidden_size", None)
-                or getattr(config, "hidden_dim", None)
-                or getattr(config, "d_model", None)
-                or 512
-            )
+        # Determine input_dim dynamically via a sample forward pass
+        with torch.no_grad():
+            dummy = torch.randn(1, n_channels, n_timepoints, device=next(self.backbone.parameters()).device)
+            if coords is not None:
+                dummy_coords = coords.unsqueeze(0)
+            else:
+                dummy_coords = torch.zeros(1, n_channels, 3, device=dummy.device)
+            dummy_out = self.backbone(dummy, dummy_coords)
+            input_dim = dummy_out.reshape(1, -1).shape[1]
 
-        input_dim = n_channels * n_timepoints * hidden_dim
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            # nn.RMSNorm(input_dim),
-            # nn.Dropout(0.1),
             nn.Linear(input_dim, out_dim),
         )
         self.loss_fn = nn.CrossEntropyLoss()
@@ -121,7 +119,7 @@ class REVEClinicalModel(AbstractModel):
             positions = positions.squeeze(0)
         return positions.float().to(self.device)
 
-    def _init_model(self, sample: np.ndarray) -> None:
+    def _init_model(self, sample: np.ndarray, coords: torch.Tensor) -> None:
         n_channels, n_timepoints = sample.shape[0], sample.shape[1]
         self.model = REVEClinicalWrapper(
             n_channels=n_channels,
@@ -129,6 +127,7 @@ class REVEClinicalModel(AbstractModel):
             num_classes=self.num_classes,
             num_labels_per_chunk=self.num_labels_per_chunk,
             freeze_backbone=self.freeze_backbone,
+            coords=coords,
         ).to(self.device)
 
     def _fit_linear_probe_cached(self, train_loader, val_loader, coords_train, coords_val) -> None:
@@ -136,7 +135,7 @@ class REVEClinicalModel(AbstractModel):
 
         cache_dir = create_temp_cache_dir("reve_clinical_lp_")
         try:
-            feature_dim = self.model.classifier[0].in_features if hasattr(self.model.classifier[0], "in_features") else self.model.classifier[1].in_features
+            feature_dim = self.model.classifier[-1].in_features
             train_count = len(train_loader.dataset)
             val_count = len(val_loader.dataset)
 
@@ -288,9 +287,12 @@ class REVEClinicalModel(AbstractModel):
             print("[Warning] Training split is empty. Skipping training.")
             return
 
+        coords_train = self._coords(dataset_train.ch_names)
+        coords_val = self._coords(dataset_val.ch_names)
+
         sample_data, _, _ = dataset_train[0]
         if self.model is None:
-            self._init_model(sample_data)
+            self._init_model(sample_data, coords_train)
 
         class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
@@ -302,8 +304,6 @@ class REVEClinicalModel(AbstractModel):
             dataset_val, batch_size=64, shuffle=False, num_workers=8, pin_memory=True
         )
 
-        coords_train = self._coords(dataset_train.ch_names)
-        coords_val = self._coords(dataset_val.ch_names)
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = optim.AdamW(trainable_params, lr=1e-3)

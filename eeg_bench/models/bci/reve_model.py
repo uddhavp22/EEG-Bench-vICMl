@@ -44,7 +44,7 @@ class REVEWrapper(nn.Module):
     Wraps the HuggingFace REVE model.
     Freezes the backbone and adds a custom classification head.
     """
-    def __init__(self, n_channels, n_timepoints, n_classes, hidden_dim=512, freeze_backbone: bool = True):
+    def __init__(self, n_channels, n_timepoints, n_classes, freeze_backbone: bool = True, coords=None):
         super().__init__()
         # Load the backbone
 
@@ -57,16 +57,19 @@ class REVEWrapper(nn.Module):
         # Optionally freeze the backbone
         for param in self.backbone.parameters():
             param.requires_grad = not freeze_backbone
-            
-        # Define the classification head
-        # REVE output is [Batch, Channels, Time, HiddenDim]
-        # We flatten this to [Batch, Channels * Time * HiddenDim]
-        input_dim = n_channels * n_timepoints * hidden_dim
-        
+
+        # Determine input_dim dynamically via a sample forward pass
+        with torch.no_grad():
+            dummy = torch.randn(1, n_channels, n_timepoints, device=next(self.backbone.parameters()).device)
+            if coords is not None:
+                dummy_coords = coords.unsqueeze(0)
+            else:
+                dummy_coords = torch.zeros(1, n_channels, 3, device=dummy.device)
+            dummy_out = self.backbone(dummy, dummy_coords)
+            input_dim = dummy_out.reshape(1, -1).shape[1]
+
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            # nn.RMSNorm(input_dim),
-            # nn.Dropout(0.1),
             nn.Linear(input_dim, n_classes),
         )
 
@@ -112,7 +115,7 @@ class REVEBenchmarkModel(AbstractModel):
         cache_dir = create_temp_cache_dir("reve_bci_lp_")
         try:
             total_samples = len(train_loader.dataset)
-            feature_dim = self.model.classifier[1].in_features
+            feature_dim = self.model.classifier[-1].in_features
             features_path = os.path.join(cache_dir, "train_features.dat")
             labels_path = os.path.join(cache_dir, "train_labels.dat")
             train_features = np.memmap(
@@ -229,12 +232,22 @@ class REVEBenchmarkModel(AbstractModel):
         
         channel_names = meta_data["channel_names"]
 
+        # Get position embeddings for channel names
+        raw_positions = self.pos_bank(channel_names)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
+                "positions", raw_positions.get("coords", raw_positions.get("last_hidden_state"))
+            )
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
+
         # 2. Initialize Model
         self.model = REVEWrapper(
             n_channels=n_channels,
             n_timepoints=n_timepoints,
             n_classes=n_classes,
-            freeze_backbone=self.freeze_backbone
+            freeze_backbone=self.freeze_backbone,
+            coords=raw_positions,
         ).to(self.device)
         
         # 3. Prepare DataLoaders
@@ -269,7 +282,7 @@ class REVEBenchmarkModel(AbstractModel):
             return
 
         self.model.train()
-        self.model.backbone.train()
+        self.model.backbone.eval()
         for epoch in range(n_epochs):
             total_loss = 0
             correct = 0

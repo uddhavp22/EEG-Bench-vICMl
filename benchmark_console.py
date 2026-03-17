@@ -535,42 +535,42 @@ def main():
 
     # Factory functions for other models with freeze_encoder support
     def make_labram_clinical(num_classes=2, num_labels_per_chunk=None):
-        return LaBraMClinical(num_classes=num_classes, 
+        return LaBraMClinical(num_classes=num_classes,
                               num_labels_per_chunk=num_labels_per_chunk,
-                              freeze_encoder=args.linear_probe)
+                              freeze_encoder=True)
 
     def make_labram_bci():
-        return LaBraMBci(freeze_encoder=args.linear_probe)
+        return LaBraMBci(freeze_encoder=True)
 
     def make_bendr_clinical(num_classes=2, num_labels_per_chunk=None):
         return BENDRClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
-            freeze_encoder=args.linear_probe
+            freeze_encoder=True,
         )
 
     def make_bendr_bci():
-        return BENDRBci(freeze_encoder=args.linear_probe)
+        return BENDRBci(freeze_encoder=True)
 
     def make_neurogpt_clinical(num_classes=2, num_labels_per_chunk=None):
         return NeuroGPTClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
-            freeze_encoder=args.linear_probe
+            freeze_encoder=True,
         )
 
     def make_neurogpt_bci():
-        return NeuroGPTBci(freeze_encoder=args.linear_probe)
+        return NeuroGPTBci(freeze_encoder=True)
 
     def make_reve_clinical(num_classes=2, num_labels_per_chunk=None):
         return REVEClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
-            freeze_backbone=args.linear_probe
+            freeze_backbone=True,
         )
 
     def make_reve_bci():
-        return REVEBci(freeze_backbone=args.linear_probe)
+        return REVEBci(freeze_backbone=True)
 
     def make_luna_clinical(num_classes=2, num_labels_per_chunk=None):
         return LUNAClinical(
@@ -594,11 +594,11 @@ def main():
         return SJEPAClinical(
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
-            freeze_encoder=args.linear_probe,
+            freeze_encoder=True,
         )
 
     def make_sjepa_bci():
-        return SJEPABci(freeze_encoder=args.linear_probe)
+        return SJEPABci(freeze_encoder=True)
 
     def make_cbramod_clinical(num_classes=2, num_labels_per_chunk=None):
         return CBraModClinical(

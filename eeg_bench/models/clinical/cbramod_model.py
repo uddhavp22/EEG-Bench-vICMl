@@ -298,6 +298,7 @@ class CBraModClinicalModel(AbstractModel):
         """Train for one epoch."""
         assert self.model is not None
         self.model.train()
+        self.model.backbone.eval()
         total_loss = 0.0
         total_samples = 0
         correct = 0
