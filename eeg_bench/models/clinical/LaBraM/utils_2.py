@@ -410,17 +410,13 @@ def process_one_abnormal(parameters, output_queue):
         t_channels = [ch for ch in t_channels if ch in standard_1020]
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        raw.load_data()
-        raw.pick_channels(chs, ordered=True)
-        sfreq = raw.info['sfreq']
-        signals = raw.get_data(units="uV")
+        raw = raw.reorder_channels(chs)
         max_duration_s = 30 * 60
-        if signals.shape[1] > int(max_duration_s * sfreq):
-            signals = signals[:, : int(max_duration_s * sfreq)]
-        signals = filter_data(signals.astype(np.float64), sfreq=sfreq, l_freq=0.1, h_freq=75.0, method="fir", verbose=False)
-        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+        if raw.times[-1] > max_duration_s:
+            raw.crop(tmax=max_duration_s)
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
-        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+        raw = process_filter(raw, out_freq)
+        signals = raw.get_data(units="uV")
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
         return
@@ -476,16 +472,13 @@ def process_one_epilepsy(parameters, output_queue):
         else:
             ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        raw.pick_channels(chs, ordered=True)
-        sfreq = raw.info['sfreq']
-        signals = raw.get_data(units="uV")
+        raw = raw.reorder_channels(chs)
         max_duration_s = 30 * 60
-        if signals.shape[1] > int(max_duration_s * sfreq):
-            signals = signals[:, : int(max_duration_s * sfreq)]
-        signals = filter_data(signals.astype(np.float64), sfreq=sfreq, l_freq=0.1, h_freq=75.0, method="fir", verbose=False)
-        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+        if raw.times[-1] > max_duration_s:
+            raw.crop(tmax=max_duration_s)
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
-        signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+        raw = process_filter(raw, out_freq)
+        signals = raw.get_data(units="uV")
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
         return
