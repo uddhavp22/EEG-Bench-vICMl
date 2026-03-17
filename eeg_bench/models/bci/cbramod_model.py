@@ -163,10 +163,12 @@ class CBraModBCIWrapper(nn.Module):
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            return self.backbone(x.to(self.device))
+            raw_feats = self.backbone(x.to(self.device))
+            # Flatten via first classifier layer to get fixed-size features
+            return self.classifier[0](raw_feats)  # Rearrange -> (B, c*s*d)
 
     def classify_features(self, feats: torch.Tensor) -> torch.Tensor:
-        return self.classifier(feats.to(self.device))
+        return self.classifier[1:](feats.to(self.device))
 
 
 class CBraModBCIModel(AbstractModel):

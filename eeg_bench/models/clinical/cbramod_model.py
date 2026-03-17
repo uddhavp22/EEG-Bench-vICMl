@@ -188,10 +188,14 @@ class CBraModClinicalWrapper(nn.Module):
             x = x[:, :, :trimmed_samples]
             x = x.reshape(batch_size, n_channels, num_patches, self.patch_size)
         with torch.no_grad():
-            return self.backbone(x)
+            raw_feats = self.backbone(x)
+            # Apply pooling layers (first 3 of classifier) to get fixed-size features
+            pooled = self.classifier[:3](raw_feats)  # Rearrange -> AdaptiveAvgPool2d -> Flatten -> (B, d_model)
+            return pooled
 
     def classify_features(self, feats: torch.Tensor) -> torch.Tensor:
-        logits = self.classifier(feats.to(device))
+        # feats is already pooled to (B, d_model), apply remaining classifier layers
+        logits = self.classifier[3:](feats.to(device))  # Linear -> ELU -> Dropout -> Linear
         if self.is_multilabel_task:
             logits = logits.reshape(feats.shape[0], self.num_classes, -1)
         return logits
