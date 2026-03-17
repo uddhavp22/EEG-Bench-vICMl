@@ -377,6 +377,10 @@ class REVEClinicalModel(AbstractModel):
 
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
+        if self.model is None:
+            print("[Warning] REVE model was not trained (fit may have been skipped). Returning empty predictions.")
+            return np.array([])
+
         task_name = meta[0]["task_name"]
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, self.chunk_len_s, is_train=False, use_cache=True
