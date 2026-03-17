@@ -14,6 +14,14 @@ from ....utils.utils import get_multilabel_tasks
 from ...lejepa_preprocessing import apply_defossez_scaling, process_lejepa_raw
 
 
+def _zscore_normalize(signals: np.ndarray) -> np.ndarray:
+    """Per-channel z-score normalization. signals shape: (n_channels, n_timepoints)."""
+    mean = np.mean(signals, axis=1, keepdims=True)
+    std = np.std(signals, axis=1, keepdims=True)
+    std = np.where(std < 1e-6, 1.0, std)
+    return (signals - mean) / std
+
+
 channel_mapping = { "FP1": ["FP1", "FZ"],
                     "FP2": ["FP2", "FZ"],
                     "F7": ["F7", "FC3"],
@@ -415,8 +423,17 @@ def process_one_abnormal(parameters, output_queue):
         if raw.times[-1] > max_duration_s:
             raw.crop(tmax=max_duration_s)
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
-        raw = process_filter(raw, out_freq)
+        # CBraMod uses 0.3-75 Hz bandpass; others use 0.1-75 Hz
+        l_freq = 0.3 if model_name == "CBraModModel" else 0.1
+        raw.load_data()
+        raw.set_eeg_reference("average")
+        raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
+        raw.notch_filter([50.0, 60.0])
+        raw.resample(out_freq)
         signals = raw.get_data(units="uV")
+        # Per-channel z-score normalization (required by CBraMod and LUNA papers)
+        if model_name in ("LUNAModel", "CBraModModel"):
+            signals = _zscore_normalize(signals)
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
         return
@@ -477,8 +494,17 @@ def process_one_epilepsy(parameters, output_queue):
         if raw.times[-1] > max_duration_s:
             raw.crop(tmax=max_duration_s)
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
-        raw = process_filter(raw, out_freq)
+        # CBraMod uses 0.3-75 Hz bandpass; others use 0.1-75 Hz
+        l_freq = 0.3 if model_name == "CBraModModel" else 0.1
+        raw.load_data()
+        raw.set_eeg_reference("average")
+        raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
+        raw.notch_filter([50.0, 60.0])
+        raw.resample(out_freq)
         signals = raw.get_data(units="uV")
+        # Per-channel z-score normalization (required by CBraMod and LUNA papers)
+        if model_name in ("LUNAModel", "CBraModModel"):
+            signals = _zscore_normalize(signals)
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
         logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
         return
@@ -597,8 +623,17 @@ def process_one_multilabel(parameters, output_queue):
             print(f"WARN: No channels match standard channels for {model_name}. Keeping original")
             t_channels = list(raw.ch_names)
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
-        raw = process_filter(raw, out_freq)
+        # CBraMod uses 0.3-75 Hz bandpass; others use 0.1-75 Hz
+        l_freq = 0.3 if model_name == "CBraModModel" else 0.1
+        raw.load_data()
+        raw.set_eeg_reference("average")
+        raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
+        raw.notch_filter([50.0, 60.0])
+        raw.resample(out_freq)
         signals = raw.get_data(units="uV")
+        # Per-channel z-score normalization (required by CBraMod and LUNA papers)
+        if model_name in ("LUNAModel", "CBraModModel"):
+            signals = _zscore_normalize(signals)
         out_channels = list(raw.ch_names)
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, out_channels))
         logging.info(f"Processed recording {idx} with label {label} ({model_name} multilabel)")
@@ -786,18 +821,24 @@ def process_one_cli_unm(parameters, output_queue):
         if signals.shape[1] > int(max_duration_s * sfreq):
             signals = signals[:, : int(max_duration_s * sfreq)]
 
+        # CBraMod uses 0.3-75 Hz bandpass (per Wang et al. 2025); others use 0.1-75 Hz
+        model_l_freq = 0.3 if model_name == "CBraModModel" else l_freq
         signals = filter_data(
             signals.astype(np.float64),
             sfreq=sfreq,
-            l_freq=l_freq,
+            l_freq=model_l_freq,
             h_freq=h_freq,
             method="fir",
             verbose=False,
         )
-        signals = notch_filter(signals, Fs=sfreq, freqs=50, verbose=False)
+        signals = notch_filter(signals, Fs=sfreq, freqs=[50, 60], verbose=False)
 
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
         signals = resample(signals.astype(np.float32), sfreq, out_freq, axis=1, filter="kaiser_best")
+
+        # Per-channel z-score normalization (required by both CBraMod and LUNA papers)
+        if model_name in ("LUNAModel", "CBraModModel"):
+            signals = _zscore_normalize(signals)
 
         output_queue.put((idx, signals, label, chunk_len_s, out_freq, target_channels))
         logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(target_channels)})")

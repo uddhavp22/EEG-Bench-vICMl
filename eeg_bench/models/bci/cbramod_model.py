@@ -347,7 +347,7 @@ class CBraModBCIModel(AbstractModel):
         task_name = meta_data["task_name"]
         n_classes = n_unique_labels(task_name)
 
-        # 2. Preprocess data using CBraMod-specific pipeline (200 Hz, 0.5-40 Hz bandpass, z-score)
+        # 2. Preprocess data using CBraMod-specific pipeline (200 Hz, 0.3-75 Hz bandpass, z-score)
         logger.info("[CBraMod] Applying CBraMod-specific preprocessing...")
         datasets = [
             make_dataset_cbramod(
@@ -423,7 +423,7 @@ class CBraModBCIModel(AbstractModel):
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False)
             for batch in pbar:
                 data = batch["data"].to(self.device)
-                target = batch["label"].to(self.device)
+                target = batch["labels"].to(self.device)
 
                 optimizer.zero_grad()
                 output = self.model(data)
@@ -465,10 +465,23 @@ class CBraModBCIModel(AbstractModel):
 
         # Get metadata
         meta_data = meta[0]
-        sfreq = meta_data["sampling_frequency"]
+        task_name = meta_data["task_name"]
 
-        # Concatenate and reshape to patches
-        X_all = np.concatenate(X, axis=0)
+        # Preprocess test data with same pipeline as training
+        logger.info("[CBraMod] Preprocessing test data...")
+        datasets = [
+            make_dataset_cbramod(
+                X_, None, task_name,
+                m_["sampling_frequency"],
+                m_["channel_names"],
+                train=False,
+            )
+            for X_, m_ in zip(X, meta)
+        ]
+        dataset_list = [d for d in datasets if len(d) > 0]
+        X_all = np.concatenate([d.data for d in dataset_list], axis=0)
+
+        sfreq = 200  # CBraMod always resamples to 200 Hz
         X_patched = self._reshape_to_patches(X_all, sfreq)
 
         test_dataset = SimpleDataset(X_patched, y=None)

@@ -171,10 +171,11 @@ def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str,
                       l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1,
                       patch_size: int = 40):
     """
-    LUNA preprocessing:
+    LUNA preprocessing (per BioFoundation paper):
     - Bandpass: 0.1-75 Hz
-    - Notch: 50 Hz
+    - Notch: 50 + 60 Hz
     - Resample: 256 Hz
+    - Per-channel z-score normalization
     - Patch-size alignment for tokenization
     """
     print(f"\n[LUNA] Processing data with shape: {data.shape}")
@@ -195,7 +196,7 @@ def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str,
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     data = filter_data(data, sfreq=sampling_rate, l_freq=l_freq, h_freq=h_freq, method='fir', verbose=False)
-    data = notch_filter(data, Fs=sampling_rate, freqs=50, verbose=False)
+    data = notch_filter(data, Fs=sampling_rate, freqs=[50, 60], verbose=False)
     data = resample(data, sampling_rate, target_rate, axis=2, filter='kaiser_best')
     logging.info(f"[LUNA] data shape after resampling: {data.shape}")
 
@@ -212,6 +213,13 @@ def make_dataset_luna(data: np.ndarray, labels: np.ndarray|None, task_name: str,
     if remainder != 0:
         pad = patch_size - remainder
         data = np.pad(data, ((0, 0), (0, 0), (0, pad)), mode='constant', constant_values=0)
+
+    # Per-channel z-score normalization (per LUNA/BioFoundation paper)
+    for i in range(data.shape[0]):
+        mean = np.mean(data[i], axis=1, keepdims=True)
+        std = np.std(data[i], axis=1, keepdims=True)
+        std = np.where(std < 1e-6, 1.0, std)
+        data[i] = (data[i] - mean) / std
 
     if labels is not None:
         labels = np.array([map_label(label, task_name) for label in labels])
@@ -279,13 +287,13 @@ def make_dataset_sjepa(data: np.ndarray, labels: np.ndarray|None, task_name: str
 
 def make_dataset_cbramod(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int,
                          ch_names: List[str], target_rate: int = 200, target_channels: Optional[List[str]] = None,
-                         l_freq: float = 0.5, h_freq: float = 40.0, train: bool = True, split_size=0.1):
+                         l_freq: float = 0.3, h_freq: float = 75.0, train: bool = True, split_size=0.1):
     """
-    CBraMod preprocessing:
-    - Bandpass: 0.5-40 Hz
-    - Notch: 50 Hz
+    CBraMod preprocessing (per Wang et al. 2025, ICLR):
+    - Bandpass: 0.3-75 Hz
+    - Notch: 50 + 60 Hz
     - Resample: 200 Hz
-    - Per-recording z-score normalization
+    - Per-channel z-score normalization
     """
     print(f"\n[CBraMod] Processing data with shape: {data.shape}")
     logging.info(f"[CBraMod] data shape: {data.shape}, sampling_rate: {sampling_rate} Hz")
@@ -305,7 +313,7 @@ def make_dataset_cbramod(data: np.ndarray, labels: np.ndarray|None, task_name: s
         data = data[:, [ch_names.index(ch) for ch in target_channels], :]
 
     data = filter_data(data, sfreq=sampling_rate, l_freq=l_freq, h_freq=h_freq, method='fir', verbose=False)
-    data = notch_filter(data, Fs=sampling_rate, freqs=50, verbose=False)
+    data = notch_filter(data, Fs=sampling_rate, freqs=[50, 60], verbose=False)
     data = resample(data, sampling_rate, target_rate, axis=2, filter='kaiser_best')
     logging.info(f"[CBraMod] data shape after resampling: {data.shape}")
 
@@ -318,6 +326,7 @@ def make_dataset_cbramod(data: np.ndarray, labels: np.ndarray|None, task_name: s
     elif new_n_samples < n_samples:
         data = data[:, :, :new_n_samples]
 
+    # Per-channel z-score normalization (per CBraMod paper)
     for i in range(data.shape[0]):
         mean = np.mean(data[i], axis=1, keepdims=True)
         std = np.std(data[i], axis=1, keepdims=True)
