@@ -410,6 +410,7 @@ def process_one_abnormal(parameters, output_queue):
         t_channels = [ch for ch in t_channels if ch in standard_1020]
         ch_name_pattern = "EEG {}-REF"
         chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        raw.load_data()
         raw.pick_channels(chs, ordered=True)
         sfreq = raw.info['sfreq']
         signals = raw.get_data(units="uV")
