@@ -551,7 +551,7 @@ class CBraModClinicalModel(AbstractModel):
         # Create training dataset
         dataset_train = make_dataset_2(
             X, y, meta, task_name, self.name, self.chunk_len_s,
-            is_train=True, use_cache=False
+            is_train=True, use_cache=True
         )
 
         if len(dataset_train) == 0:
@@ -663,7 +663,7 @@ class CBraModClinicalModel(AbstractModel):
         # Create test dataset
         dataset_test = make_dataset_2(
             X, None, meta, task_name, self.name, self.chunk_len_s,
-            is_train=False, use_cache=False
+            is_train=False, use_cache=True
         )
 
         if len(dataset_test) == 0:

@@ -271,7 +271,7 @@ class REVEClinicalModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         dataset_train = make_dataset_2(
-            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=False
+            X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
         )
         if len(dataset_train) == 0:
             print("[Warning] Dataset empty. Retrying without cache...")
