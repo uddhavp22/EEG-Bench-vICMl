@@ -425,7 +425,7 @@ def process_one_abnormal(parameters, output_queue):
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
         # CBraMod uses 0.3-75 Hz bandpass; others use 0.1-75 Hz
         l_freq = 0.3 if model_name == "CBraModModel" else 0.1
-        raw.load_data()
+        # reorder_channels() already loads data into memory; load_data() would fail on pickled Raw
         raw.set_eeg_reference("average")
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
         raw.notch_filter([50.0, 60.0])
@@ -496,7 +496,7 @@ def process_one_epilepsy(parameters, output_queue):
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
         # CBraMod uses 0.3-75 Hz bandpass; others use 0.1-75 Hz
         l_freq = 0.3 if model_name == "CBraModModel" else 0.1
-        raw.load_data()
+        # reorder_channels() already loads data into memory; load_data() would fail on pickled Raw
         raw.set_eeg_reference("average")
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
         raw.notch_filter([50.0, 60.0])
@@ -625,7 +625,7 @@ def process_one_multilabel(parameters, output_queue):
         out_freq = {"LUNAModel": 256, "SJEPAClinicalModel": 250}.get(model_name, 200)
         # CBraMod uses 0.3-75 Hz bandpass; others use 0.1-75 Hz
         l_freq = 0.3 if model_name == "CBraModModel" else 0.1
-        raw.load_data()
+        # reorder_channels() already loads data into memory; load_data() would fail on pickled Raw
         raw.set_eeg_reference("average")
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
         raw.notch_filter([50.0, 60.0])
