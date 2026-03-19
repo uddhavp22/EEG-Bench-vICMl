@@ -546,7 +546,7 @@ class CBraModClinicalModel(AbstractModel):
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         """Train the CBraMod model."""
         task_name = meta[0]["task_name"]
-        sfreq = meta[0]["sampling_frequency"]
+        sfreq = meta[0].get("sampling_frequency", 200)  # CBraMod resamples to 200Hz
 
         # Create training dataset
         dataset_train = make_dataset_2(
