@@ -20,8 +20,8 @@
         "biofoundation_path": null
     },
     "cbramod": {
-        "pretrained_path": null,
-        "path": null
+        "pretrained_path": "/raid/spanchavati/EEG-Bench-vICMl/checkpoints/pretrained_weights.pth",
+        "path": "/raid/spanchavati/CBraMod"
     },
     "cavanagh2018a": null,
     "cavanagh2018b": null,
