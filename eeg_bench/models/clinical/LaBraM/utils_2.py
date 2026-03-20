@@ -372,6 +372,19 @@ def process_bendr(raw):
 
     return signals[reorder_channels, :]
 
+def _pick_tuh_channels_safe(raw, base_channels):
+    """Pick available TUH channels without failing on naming differences."""
+    picks = []
+    for ch in base_channels:
+        for cand in (f"EEG {ch}-REF", f"EEG {ch}-LE", ch):
+            if cand in raw.ch_names:
+                picks.append(cand)
+                break
+    if len(picks) == 0:
+        raise ValueError("No matching EEG channels found")
+    return raw.copy().pick(picks), [p.upper().replace("EEG ", "").replace("-REF", "").replace("-LE", "") for p in picks]
+
+
 def process_lejepa(raw, chs, out_sfreq=250):
     raw = raw.reorder_channels(chs)
     # Limit the raw data to a maximum of 30 minutes
@@ -417,8 +430,9 @@ def process_one_abnormal(parameters, output_queue):
         t_channels = ['C3', 'C4', 'CZ', 'F3', 'F4', 'F7', 'F8', 'FP1', 'FP2', 'FZ', 'O1', 'O2', 'P3', 'P4', 'PZ', 'T3', 'T4', 'T5', 'T6']
         t_channels = [ch for ch in t_channels if ch in standard_1020]
         ch_name_pattern = "EEG {}-REF"
-        chs = [ch_name_pattern.format(ch) for ch in t_channels]
-        raw = raw.reorder_channels(chs)
+        # chs = [ch_name_pattern.format(ch) for ch in t_channels]
+        raw, out_channels = _pick_tuh_channels_safe(raw, t_channels)
+
         max_duration_s = 30 * 60
         if raw.times[-1] > max_duration_s:
             raw.crop(tmax=max_duration_s)
@@ -430,12 +444,12 @@ def process_one_abnormal(parameters, output_queue):
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
         raw.notch_filter([50.0, 60.0])
         raw.resample(out_freq)
-        signals = raw.get_data(units="uV")
+        signals = raw.get_data()
         # Per-channel z-score normalization (required by CBraMod and LUNA papers)
         if model_name in ("LUNAModel", "CBraModModel"):
             signals = _zscore_normalize(signals)
-        output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in t_channels]))
-        logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(t_channels)})")
+        output_queue.put((idx, signals, label, chunk_len_s, out_freq, [ch.upper() for ch in out_channels]))
+        logging.info(f"Processed recording {idx} with label {label} ({model_name} channels={len(out_channels)})")
         return
 
     else:

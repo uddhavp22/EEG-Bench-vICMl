@@ -303,11 +303,11 @@ class LUNAClinicalModel(AbstractModel):
         # Load position bank for channel coordinates (using REVE's position bank)
         try:
             self.pos_bank = AutoModel.from_pretrained(
-                "brain-bzh/reve-positions",
+                "/raid/spanchavati/EEG-Bench-vICMl/REVE_posbank",
                 trust_remote_code=True,
                 torch_dtype="auto",
             ).to(self.device)
-            logger.info("Loaded position bank from HuggingFace Hub")
+            logger.info("Loaded position bank from Local Download!")
         except Exception as e:
             logger.error(f"Failed to load position bank: {e}")
             raise

@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import os
 from multiprocessing import Pool, Process, Manager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from .utils_2 import writer_task, process_one_abnormal, process_one_cli_unm, process_one_epilepsy, process_one_multilabel, LaBraMDataset2, NeuroGPTDataset2, get_channels
 from ....config import get_config_value
@@ -32,7 +33,7 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
     output_queue = manager.Queue()
     writer = Process(target=writer_task, args=(output_queue, h5_path))
     writer.start()
-    n_jobs = os.cpu_count() - 1 #ALERT! MAJOR CHANGE!!
+    n_jobs = 10 #os.cpu_count() - 1 #ALERT! MAJOR CHANGE!!
     if n_jobs < 1:
         n_jobs = 1
 
@@ -46,10 +47,16 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
         t_channels = get_channels(task_name)
         parameters = [(i, raw, label, model_name, chunk_len_s) for i, (raw, label) in enumerate(zip(X, y))]
         worker_func = partial(process_one_abnormal, output_queue=output_queue)
-        with Pool(n_jobs) as pool:
-            list(tqdm(pool.imap(worker_func, parameters), total=len(parameters),
-                      desc="Processing abnormal data"))
-        logging.info("--------- All recordings have been processed.")
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            futures = {executor.submit(worker_func, p): p for p in parameters}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing abnormal data"):
+                p = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    idx, raw, *_ = p
+                    fname = getattr(raw, "filenames", None)
+                    raise RuntimeError(f"Failed at idx={idx}, filenames={fname}, err={e}") from e
 
     elif "epilepsy" in task_name:
         X, montage_types = X[0], meta[0]["montage_type"]
@@ -60,9 +67,16 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
         t_channels = get_channels(task_name)
         parameters = [(i, raw, label, montage, task_name, model_name, chunk_len_s) for i, (raw, label, montage) in enumerate(zip(X, y, montage_types))]
         worker_func = partial(process_one_epilepsy, output_queue=output_queue)
-        with Pool(n_jobs) as pool:
-            list(tqdm(pool.imap(worker_func, parameters), total=len(parameters),
-                      desc="Processing epilepsy data"))
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            futures = {executor.submit(worker_func, p): p for p in parameters}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing epilepsy data"):
+                p = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    idx, raw, *_ = p
+                    fname = getattr(raw, "filenames", None)
+                    raise RuntimeError(f"Failed at idx={idx}, filenames={fname}, err={e}") from e
         logging.info("--------- All recordings have been processed.")
     
     elif task_name in get_multilabel_tasks():
@@ -76,9 +90,16 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
             dataset_name = m["name"]
             parameters = [(i + last_idx, raw, label, t_channels, model_name, chunk_len_s) for i, (raw, label) in enumerate(zip(data, labels))]
             worker_func = partial(process_one_multilabel, output_queue=output_queue)
-            with Pool(n_jobs) as pool:
-                list(tqdm(pool.imap(worker_func, parameters), total=len(parameters),
-                        desc="Processing multilabel data"))
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                futures = {executor.submit(worker_func, p): p for p in parameters}
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Processing multilabel data"):
+                    p = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        idx, raw, *_ = p
+                        fname = getattr(raw, "filenames", None)
+                        raise RuntimeError(f"Failed at idx={idx}, filenames={fname}, err={e}") from e
             last_idx += len(data)
             logging.info(f"--------- All recordings from {dataset_name} have been processed.")
         logging.info("--------- All recordings have been processed.")

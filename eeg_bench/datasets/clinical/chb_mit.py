@@ -111,8 +111,8 @@ class CHBMITDataset(BaseClinicalDataset):
 
     def load_data(self) -> None:
         self._download()
-        
-        self.data, self.labels, montage_type = self.cache.cache(_load_data_chb_mit)(self.subjects, self._preload) # type: ignore
+
+        self.data, self.labels, montage_type = _load_data_chb_mit(self.subjects, self._preload) # type: ignore
         self.meta["montage_type"] = montage_type
 
     def get_data(self) -> Tuple[List[List[Raw]], List[str], Dict]:
@@ -120,4 +120,3 @@ class CHBMITDataset(BaseClinicalDataset):
         if not hasattr(self, "data") or self.data is None or not hasattr(self, "labels") or self.labels is None or self.meta is None:
             self.load_data()
         return self.data, self.labels, self.meta
-

@@ -131,8 +131,8 @@ class TUEGAbnormalDataset(BaseClinicalDataset):
 
     def load_data(self, split: Split) -> None:
         self._download()
-        
-        self.data, self.labels, montage_type = self.cache.cache(_load_data_tueg_abnormal)(self.subjects, split, self._preload) # type: ignore
+
+        self.data, self.labels, montage_type = _load_data_tueg_abnormal(self.subjects, split, self._preload) # type: ignore
         self.meta["montage_type"] = montage_type
 
     def get_data(self, split: Split) -> Tuple[List[BaseRaw], List[str], Dict]:

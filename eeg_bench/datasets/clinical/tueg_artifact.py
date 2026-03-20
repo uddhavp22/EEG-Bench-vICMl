@@ -130,8 +130,8 @@ class TUARDataset(BaseClinicalDataset):
 
     def load_data(self) -> None:
         self._download()
-        
-        self.data, self.labels, montage_type = self.cache.cache(_load_data_tuar)(self.subjects, self._preload) # type: ignore
+
+        self.data, self.labels, montage_type = _load_data_tuar(self.subjects, self._preload) # type: ignore
         self.meta["montage_type"] = montage_type
 
     def get_data(self) -> Tuple[List[List[Raw]], List[str], Dict]:
