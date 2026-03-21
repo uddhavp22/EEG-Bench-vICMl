@@ -11,15 +11,14 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import sys
-from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-from einops.layers.torch import Rearrange
 from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -27,7 +26,7 @@ from tqdm import tqdm
 from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
 from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_temp_cache_dir
-from .LaBraM.make_dataset import make_dataset_cbramod
+from .LaBraM.make_dataset import make_dataset_cbramod, _ordered_target_channels
 from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
 
 logger = logging.getLogger(__name__)
@@ -80,7 +79,6 @@ class CBraModBCIWrapper(nn.Module):
         n_channels: int,
         n_classes: int,
         patch_size: int = 200,
-        num_patches: int = 4,
         d_model: int = 200,
         dim_feedforward: int = 800,
         n_layer: int = 12,
@@ -109,13 +107,9 @@ class CBraModBCIWrapper(nn.Module):
         # Replace projection head with identity and add custom classifier
         self.backbone.proj_out = nn.Identity()
 
-        # BCI classifier: similar to the quick_example.py pattern
+        # BCI classifier: mean-pool over patches so num_patches can vary across datasets
         self.classifier = nn.Sequential(
-            Rearrange('b c s d -> b (c s d)'),
-            nn.Linear(n_channels * num_patches * d_model, num_patches * d_model),
-            nn.ELU(),
-            nn.Dropout(0.1),
-            nn.Linear(num_patches * d_model, d_model),
+            nn.Linear(n_channels * d_model, d_model),
             nn.ELU(),
             nn.Dropout(0.1),
             nn.Linear(d_model, n_classes),
@@ -159,17 +153,19 @@ class CBraModBCIWrapper(nn.Module):
         """
         x = x.to(self.device)
         feats = self.backbone(x)  # (B, C, num_patches, d_model)
+        feats = feats.mean(dim=2)  # (B, C, d_model) — pool over patches
+        feats = feats.reshape(feats.shape[0], -1)  # (B, C * d_model)
         logits = self.classifier(feats)
         return logits
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            raw_feats = self.backbone(x.to(self.device))
-            # Flatten via first classifier layer to get fixed-size features
-            return self.classifier[0](raw_feats)  # Rearrange -> (B, c*s*d)
+            feats = self.backbone(x.to(self.device))  # (B, C, num_patches, d_model)
+            feats = feats.mean(dim=2)  # (B, C, d_model) — pool over patches
+            return feats.reshape(feats.shape[0], -1)  # (B, C * d_model)
 
     def classify_features(self, feats: torch.Tensor) -> torch.Tensor:
-        return self.classifier[1:](feats.to(self.device))
+        return self.classifier(feats.to(self.device))
 
 
 class CBraModBCIModel(AbstractModel):
@@ -262,52 +258,28 @@ class CBraModBCIModel(AbstractModel):
 
         return X_patched
 
-    def _fit_linear_probe_cached(self, X_patched: np.ndarray, y_all: np.ndarray, n_epochs: int) -> None:
+    def _fit_linear_probe_on_features(self, all_feats: np.ndarray, all_labels: np.ndarray, n_epochs: int) -> None:
+        """Train only the classifier head on pre-extracted features."""
         assert self.model is not None
-
         cache_dir = create_temp_cache_dir("cbramod_bci_lp_")
         try:
-            total_samples = X_patched.shape[0]
-            sample_batch = torch.from_numpy(X_patched[:1]).float().to(self.device)
-            sample_features = self.model.extract_features(sample_batch).cpu().numpy()
-            feature_shape = sample_features.shape[1:]
-
             features = np.memmap(
                 os.path.join(cache_dir, "train_features.dat"),
-                dtype=np.float32,
-                mode="w+",
-                shape=(total_samples, *feature_shape),
+                dtype=np.float32, mode="w+", shape=all_feats.shape,
             )
             labels = np.memmap(
                 os.path.join(cache_dir, "train_labels.dat"),
-                dtype=np.int64,
-                mode="w+",
-                shape=(total_samples,),
+                dtype=np.int64, mode="w+", shape=all_labels.shape,
             )
-
-            data_loader = DataLoader(SimpleDataset(X_patched, y_all), batch_size=64, shuffle=False, num_workers=0)
-
-            idx = 0
-            self.model.eval()
-            for batch in tqdm(data_loader, desc="Cache CBraMod BCI embeddings", leave=False):
-                data = batch["data"].to(self.device)
-                target = batch["labels"].cpu().numpy()
-                feats = self.model.extract_features(data).cpu().numpy()
-                bsz = feats.shape[0]
-                features[idx:idx + bsz] = feats
-                labels[idx:idx + bsz] = target
-                idx += bsz
-
+            features[:] = all_feats
+            labels[:] = all_labels
             features.flush()
             labels.flush()
 
             feat_loader = DataLoader(
                 CachedArrayDataset(features, labels),
-                batch_size=256,
-                shuffle=True,
-                num_workers=0,
+                batch_size=256, shuffle=True, num_workers=0,
             )
-
             optimizer = torch.optim.AdamW(self.model.classifier.parameters(), lr=1e-3)
             criterion = nn.CrossEntropyLoss()
 
@@ -351,8 +323,7 @@ class CBraModBCIModel(AbstractModel):
 
         # 2. Preprocess data using CBraMod-specific pipeline (200 Hz, 0.3-75 Hz bandpass, z-score)
         logger.info("[CBraMod] Applying CBraMod-specific preprocessing...")
-        # Compute common channels across all datasets so dimensions match for concatenation
-        from .LaBraM.make_dataset import _ordered_target_channels
+        # Compute common channels across all datasets so dimensions match
         channel_sets = [set(ch.upper() for ch in m_["channel_names"]) for m_ in meta]
         common_channels = channel_sets[0]
         for cs in channel_sets[1:]:
@@ -376,33 +347,35 @@ class CBraModBCIModel(AbstractModel):
         dataset_train_list = [dataset[0] for dataset in datasets]
         dataset_train_list = [dataset for dataset in dataset_train_list if len(dataset) > 0]
 
-        # 3. Prepare preprocessed data
-        X_all = np.concatenate([d.data for d in dataset_train_list], axis=0)
-        y_all = np.concatenate([d.labels for d in dataset_train_list], axis=0)
-        # Convert one-hot back to class indices
-        if y_all.ndim > 1:
-            y_all = np.argmax(y_all, axis=1)
-            self.label_encoder = None
-        elif not np.issubdtype(y_all.dtype, np.number):
+        # 3. Patch each dataset separately (they may have different time lengths)
+        sfreq = 200  # CBraMod always resamples to 200 Hz
+        patched_list = []
+        labels_list = []
+        for d in dataset_train_list:
+            patched = self._reshape_to_patches(d.data, sfreq)
+            patched_list.append(patched)
+            lab = d.labels
+            if lab.ndim > 1:
+                lab = np.argmax(lab, axis=1)
+            labels_list.append(lab)
+
+        # Check if we need label encoding (string labels)
+        if not np.issubdtype(labels_list[0].dtype, np.number):
             self.label_encoder = LabelEncoder()
-            y_all = self.label_encoder.fit_transform(y_all)
+            all_labels = np.concatenate(labels_list)
+            self.label_encoder.fit(all_labels)
+            labels_list = [self.label_encoder.transform(lab) for lab in labels_list]
         else:
             self.label_encoder = None
 
-        # Get sampling frequency from preprocessed data (always 200 Hz for CBraMod)
-        sfreq = 200
+        _, n_channels, _, patch_size = patched_list[0].shape
 
-        # 4. Reshape to patches (now with consistent 200 Hz data)
-        X_patched = self._reshape_to_patches(X_all, sfreq)
-        _, n_channels, num_patches, patch_size = X_patched.shape
-
-        # 5. Initialize model if needed
+        # 4. Initialize model if needed
         if self.model is None:
             self.model = CBraModBCIWrapper(
                 n_channels=n_channels,
                 n_classes=n_classes,
                 patch_size=patch_size,
-                num_patches=num_patches,
                 d_model=self.d_model,
                 dim_feedforward=self.dim_feedforward,
                 n_layer=self.n_layer,
@@ -410,22 +383,34 @@ class CBraModBCIModel(AbstractModel):
                 pretrained_path=self.pretrained_path,
                 freeze_backbone=self.freeze_backbone,
             ).to(self.device)
-            logger.info(f"[CBraMod] Initialized with {n_channels} channels, {num_patches} patches of size {patch_size} (200 Hz)")
+            logger.info(f"[CBraMod] Initialized with {n_channels} channels, pool over patches, patch_size={patch_size} (200 Hz)")
 
-        # Training loop
+        # Training loop with per-dataset loaders (datasets may have different num_patches)
         n_epochs = 10
-
         logger.info(f"Starting training for {n_epochs} epochs...")
 
         if self.freeze_backbone:
-            self._fit_linear_probe_cached(X_patched, y_all, n_epochs)
+            # For linear probe, cache features per-dataset then combine
+            feat_list = []
+            lab_list = []
+            self.model.eval()
+            with torch.no_grad():
+                for X_p, y_p in zip(patched_list, labels_list):
+                    loader = DataLoader(SimpleDataset(X_p, y_p), batch_size=64, shuffle=False, num_workers=0)
+                    for batch in loader:
+                        feats = self.model.extract_features(batch["data"].to(self.device))
+                        feat_list.append(feats.cpu().numpy())
+                        lab_list.append(batch["labels"].numpy())
+            all_feats = np.concatenate(feat_list, axis=0)
+            all_labels = np.concatenate(lab_list, axis=0)
+            self._fit_linear_probe_on_features(all_feats, all_labels, n_epochs)
             logger.info("Training complete!")
             return
 
-        train_dataset = SimpleDataset(X_patched, y_all)
-        train_loader = DataLoader(
-            train_dataset, batch_size=64, shuffle=True, num_workers=0
-        )
+        train_loaders = [
+            DataLoader(SimpleDataset(X_p, y_p), batch_size=64, shuffle=True, num_workers=0)
+            for X_p, y_p in zip(patched_list, labels_list)
+        ]
 
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = torch.optim.AdamW(trainable_params, lr=1e-3)
@@ -437,29 +422,35 @@ class CBraModBCIModel(AbstractModel):
             total_loss = 0
             correct = 0
             total = 0
+            num_batches = 0
 
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False)
-            for batch in pbar:
-                data = batch["data"].to(self.device)
-                target = batch["labels"].to(self.device)
+            loader_order = list(range(len(train_loaders)))
+            random.shuffle(loader_order)
 
-                optimizer.zero_grad()
-                output = self.model(data)
-                loss = criterion(output, target)
-                loss.backward()
-                optimizer.step()
+            for li in loader_order:
+                pbar = tqdm(train_loaders[li], desc=f"Epoch {epoch+1} DS{li}", leave=False)
+                for batch in pbar:
+                    data = batch["data"].to(self.device)
+                    target = batch["labels"].to(self.device)
 
-                total_loss += loss.item()
-                _, predicted = output.max(1)
-                total += target.size(0)
-                correct += predicted.eq(target).sum().item()
+                    optimizer.zero_grad()
+                    output = self.model(data)
+                    loss = criterion(output, target)
+                    loss.backward()
+                    optimizer.step()
 
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{100.*correct/total:.2f}%'
-                })
+                    total_loss += loss.item()
+                    num_batches += 1
+                    _, predicted = output.max(1)
+                    total += target.size(0)
+                    correct += predicted.eq(target).sum().item()
 
-            epoch_loss = total_loss / len(train_loader)
+                    pbar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'acc': f'{100.*correct/total:.2f}%'
+                    })
+
+            epoch_loss = total_loss / num_batches
             epoch_acc = 100. * correct / total
 
             # Log metrics
@@ -488,7 +479,6 @@ class CBraModBCIModel(AbstractModel):
         # Preprocess test data with same pipeline as training
         logger.info("[CBraMod] Preprocessing test data...")
         # Use common channels across datasets (same as training)
-        from .LaBraM.make_dataset import _ordered_target_channels
         channel_sets = [set(ch.upper() for ch in m_["channel_names"]) for m_ in meta]
         common_channels = channel_sets[0]
         for cs in channel_sets[1:]:
@@ -506,24 +496,23 @@ class CBraModBCIModel(AbstractModel):
             for X_, m_ in zip(X, meta)
         ]
         dataset_list = [d for d in datasets if len(d) > 0]
-        X_all = np.concatenate([d.data for d in dataset_list], axis=0)
 
+        # Patch each dataset separately (different time lengths), predict per-dataset
         sfreq = 200  # CBraMod always resamples to 200 Hz
-        X_patched = self._reshape_to_patches(X_all, sfreq)
-
-        test_dataset = SimpleDataset(X_patched, y=None)
-        test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=0)
-
-        # Predict
         self.model.eval()
         predictions = []
 
         with torch.no_grad():
-            for batch in tqdm(test_loader, desc="Predicting"):
-                data = batch["data"].to(self.device)
-                output = self.model(data)
-                _, predicted = output.max(1)
-                predictions.extend(predicted.cpu().numpy())
+            for d in dataset_list:
+                X_patched = self._reshape_to_patches(d.data, sfreq)
+                test_loader = DataLoader(
+                    SimpleDataset(X_patched, y=None), batch_size=64, shuffle=False, num_workers=0
+                )
+                for batch in tqdm(test_loader, desc="Predicting", leave=False):
+                    data = batch["data"].to(self.device)
+                    output = self.model(data)
+                    _, predicted = output.max(1)
+                    predictions.extend(predicted.cpu().numpy())
 
         predictions = np.array(predictions)
         if self.label_encoder is not None:
