@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
+from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -215,6 +216,7 @@ class CBraModBCIModel(AbstractModel):
         self.pretrained_path = pretrained_path
 
         self.model: Optional[CBraModBCIWrapper] = None
+        self.label_encoder: Optional[LabelEncoder] = None
 
     def _reshape_to_patches(self, X: np.ndarray, sfreq: int) -> np.ndarray:
         """Reshape continuous EEG data into patches.
@@ -370,6 +372,12 @@ class CBraModBCIModel(AbstractModel):
         # Convert one-hot back to class indices
         if y_all.ndim > 1:
             y_all = np.argmax(y_all, axis=1)
+            self.label_encoder = None
+        elif not np.issubdtype(y_all.dtype, np.number):
+            self.label_encoder = LabelEncoder()
+            y_all = self.label_encoder.fit_transform(y_all)
+        else:
+            self.label_encoder = None
 
         # Get sampling frequency from preprocessed data (always 200 Hz for CBraMod)
         sfreq = 200
@@ -498,4 +506,7 @@ class CBraModBCIModel(AbstractModel):
                 _, predicted = output.max(1)
                 predictions.extend(predicted.cpu().numpy())
 
-        return np.array(predictions)
+        predictions = np.array(predictions)
+        if self.label_encoder is not None:
+            predictions = self.label_encoder.inverse_transform(predictions)
+        return predictions
