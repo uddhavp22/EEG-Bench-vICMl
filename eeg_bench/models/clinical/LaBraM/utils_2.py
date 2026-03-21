@@ -442,7 +442,9 @@ def process_one_abnormal(parameters, output_queue):
         raw.load_data()
         raw.set_eeg_reference("average")
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
-        raw.notch_filter([50.0, 60.0])
+        notch_freqs = [f for f in [50.0, 60.0] if f < 0.5 * raw.info['sfreq']]
+        if notch_freqs:
+            raw.notch_filter(notch_freqs)
         raw.resample(out_freq)
         signals = raw.get_data()
         # Per-channel z-score normalization (required by CBraMod and LUNA papers)
@@ -513,7 +515,9 @@ def process_one_epilepsy(parameters, output_queue):
         raw.load_data()
         raw.set_eeg_reference("average")
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
-        raw.notch_filter([50.0, 60.0])
+        notch_freqs = [f for f in [50.0, 60.0] if f < 0.5 * raw.info['sfreq']]
+        if notch_freqs:
+            raw.notch_filter(notch_freqs)
         raw.resample(out_freq)
         signals = raw.get_data(units="uV")
         # Per-channel z-score normalization (required by CBraMod and LUNA papers)
@@ -642,7 +646,9 @@ def process_one_multilabel(parameters, output_queue):
         raw.load_data()
         raw.set_eeg_reference("average")
         raw.filter(l_freq=l_freq, h_freq=75.0 if 75.0 < 0.5*raw.info['sfreq'] else None)
-        raw.notch_filter([50.0, 60.0])
+        notch_freqs = [f for f in [50.0, 60.0] if f < 0.5 * raw.info['sfreq']]
+        if notch_freqs:
+            raw.notch_filter(notch_freqs)
         raw.resample(out_freq)
         signals = raw.get_data(units="uV")
         # Per-channel z-score normalization (required by CBraMod and LUNA papers)

@@ -351,11 +351,21 @@ class CBraModBCIModel(AbstractModel):
 
         # 2. Preprocess data using CBraMod-specific pipeline (200 Hz, 0.3-75 Hz bandpass, z-score)
         logger.info("[CBraMod] Applying CBraMod-specific preprocessing...")
+        # Compute common channels across all datasets so dimensions match for concatenation
+        from .LaBraM.make_dataset import _ordered_target_channels
+        channel_sets = [set(ch.upper() for ch in m_["channel_names"]) for m_ in meta]
+        common_channels = channel_sets[0]
+        for cs in channel_sets[1:]:
+            common_channels = common_channels & cs
+        target_channels = _ordered_target_channels(list(common_channels))
+        logger.info(f"[CBraMod] Using {len(target_channels)} common channels across {len(meta)} datasets")
+
         datasets = [
             make_dataset_cbramod(
                 X_, y_, task_name,
                 m_["sampling_frequency"],
                 m_["channel_names"],
+                target_channels=target_channels,
                 train=True,
                 split_size=0.15
             )
@@ -477,11 +487,20 @@ class CBraModBCIModel(AbstractModel):
 
         # Preprocess test data with same pipeline as training
         logger.info("[CBraMod] Preprocessing test data...")
+        # Use common channels across datasets (same as training)
+        from .LaBraM.make_dataset import _ordered_target_channels
+        channel_sets = [set(ch.upper() for ch in m_["channel_names"]) for m_ in meta]
+        common_channels = channel_sets[0]
+        for cs in channel_sets[1:]:
+            common_channels = common_channels & cs
+        target_channels = _ordered_target_channels(list(common_channels))
+
         datasets = [
             make_dataset_cbramod(
                 X_, None, task_name,
                 m_["sampling_frequency"],
                 m_["channel_names"],
+                target_channels=target_channels,
                 train=False,
             )
             for X_, m_ in zip(X, meta)
