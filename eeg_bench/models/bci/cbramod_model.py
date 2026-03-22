@@ -329,6 +329,7 @@ class CBraModBCIModel(AbstractModel):
         for cs in channel_sets[1:]:
             common_channels = common_channels & cs
         target_channels = _ordered_target_channels(list(common_channels))
+        self._target_channels = target_channels  # Store for predict()
         logger.info(f"[CBraMod] Using {len(target_channels)} common channels across {len(meta)} datasets")
 
         datasets = [
@@ -478,12 +479,8 @@ class CBraModBCIModel(AbstractModel):
 
         # Preprocess test data with same pipeline as training
         logger.info("[CBraMod] Preprocessing test data...")
-        # Use common channels across datasets (same as training)
-        channel_sets = [set(ch.upper() for ch in m_["channel_names"]) for m_ in meta]
-        common_channels = channel_sets[0]
-        for cs in channel_sets[1:]:
-            common_channels = common_channels & cs
-        target_channels = _ordered_target_channels(list(common_channels))
+        # Use the same channels that were used during training
+        target_channels = self._target_channels
 
         datasets = [
             make_dataset_cbramod(
