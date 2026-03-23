@@ -317,6 +317,10 @@ class LUNAClinicalModel(AbstractModel):
     def _get_channel_coords(self, ch_names: List[str]) -> torch.Tensor:
         """Get 3D channel coordinates from position bank.
 
+        For bipolar channels (e.g. "F3-C3") the position is approximated as
+        the midpoint of the two constituent electrodes.  Non-electrode channels
+        (e.g. "EOGh") that the position bank cannot resolve are dropped.
+
         Args:
             ch_names: List of channel names
 
@@ -326,21 +330,70 @@ class LUNAClinicalModel(AbstractModel):
         # Clean channel names (remove 'EEG' prefix if present)
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
 
-        # Get positions from position bank
-        positions = self.pos_bank(clean_names)
+        # Check if any bipolar channels are present
+        has_bipolar = any("-" in name for name in clean_names)
 
-        # Handle different output formats from position bank
-        if isinstance(positions, dict):
-            positions = positions.get(
+        if not has_bipolar:
+            # All unipolar — fast path
+            positions = self.pos_bank(clean_names)
+            if isinstance(positions, dict):
+                positions = positions.get(
+                    "positions",
+                    positions.get("coords", positions.get("last_hidden_state"))
+                )
+            if positions.dim() == 3:
+                positions = positions.squeeze(0)
+            return positions.float().to(self.device)
+
+        # Mixed or all-bipolar: resolve each unique electrode individually
+        all_electrodes: set = set()
+        for name in clean_names:
+            if "-" in name:
+                a, b = name.split("-", 1)
+                all_electrodes.update([a.strip(), b.strip()])
+            else:
+                all_electrodes.add(name)
+
+        unique_electrodes = sorted(all_electrodes)
+        raw_positions = self.pos_bank(unique_electrodes)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
                 "positions",
-                positions.get("coords", positions.get("last_hidden_state"))
+                raw_positions.get("coords", raw_positions.get("last_hidden_state"))
             )
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
+        raw_positions = raw_positions.float()
 
-        # Ensure correct shape: [C, 3]
-        if positions.dim() == 3:
-            positions = positions.squeeze(0)
+        elec_to_pos = {e: raw_positions[j] for j, e in enumerate(unique_electrodes)}
 
-        return positions.float().to(self.device)
+        # Build position tensor — bipolar channels get the midpoint
+        positions = torch.zeros(len(clean_names), 3)
+        for i, name in enumerate(clean_names):
+            if "-" in name:
+                a, b = name.split("-", 1)
+                positions[i] = (elec_to_pos[a.strip()] + elec_to_pos[b.strip()]) / 2.0
+            else:
+                positions[i] = elec_to_pos[name]
+
+        return positions.to(self.device)
+
+    @staticmethod
+    def _actual_ch_names(dataset) -> List[str]:
+        """Return the actual channel names stored per-recording in the dataset.
+
+        ``LaBraMDataset2.ch_names`` is set to the *task-level* target channels
+        from ``get_channels()``, which can differ from the channels actually
+        written to the HDF5 file (e.g. after intersecting with
+        ``standard_1020`` in the multilabel preprocessing path).  This helper
+        reads the first recording to discover the true channel list so that
+        coordinate tensors match the data dimension.
+        """
+        _, _, first_ch = dataset[0]
+        if isinstance(first_ch, list) and len(first_ch) > 0:
+            return first_ch
+        # Fallback: trust dataset-level attribute
+        return dataset.ch_names
 
     def _init_model(self, sample: np.ndarray) -> None:
         """Initialize the LUNA model based on sample data shape.
@@ -887,8 +940,8 @@ class LUNAClinicalModel(AbstractModel):
         )
 
         # Get channel coordinates
-        coords_train = self._get_channel_coords(dataset_train.ch_names)
-        coords_val = self._get_channel_coords(dataset_val.ch_names)
+        coords_train = self._get_channel_coords(self._actual_ch_names(dataset_train))
+        coords_val = self._get_channel_coords(self._actual_ch_names(dataset_val))
 
         if self.linear_probe:
             self._fit_linear_probe_cached(dataset_train, dataset_val, coords_train, coords_val, class_weights)
@@ -1000,7 +1053,7 @@ class LUNAClinicalModel(AbstractModel):
         )
 
         # Get channel coordinates
-        coords = self._get_channel_coords(dataset_test.ch_names)
+        coords = self._get_channel_coords(self._actual_ch_names(dataset_test))
         self.model.eval()
 
         # Collect predictions
