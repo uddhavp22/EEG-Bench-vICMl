@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # Full benchmark run: LUNA, LaBraM, CBraMod
-# All 14 tasks, 5 seeds, data percentages 0.1-1.0
+# All 14 tasks
+# Phase 1: data efficiency curve (0.1-0.75) with single seed
+# Phase 2: full data (1.0) with 5 seeds for variance
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -19,14 +21,27 @@ echo "Started: $(date)"
 echo "Log dir: $LOG_DIR"
 echo "============================================================"
 
+echo ""
+echo "--- Phase 1: Data efficiency (single seed) ---"
 python run_experiments.py \
     --models luna labram cbramod \
-    --percentages 0.1 0.25 0.5 0.75 1.0 \
-    --seeds 100 200 300 400 500 \
+    --percentages 0.1 0.25 0.5 0.75 \
+    --seeds 100 \
     --gpus 3 \
     --workers-per-gpu 2 \
     --log-dir "$LOG_DIR" \
     2>&1 | tee "$SUMMARY_LOG"
+
+echo ""
+echo "--- Phase 2: Full data, 5 seeds for variance ---"
+python run_experiments.py \
+    --models luna labram cbramod \
+    --percentages 1.0 \
+    --seeds 100 200 300 400 500 \
+    --gpus 3 \
+    --workers-per-gpu 2 \
+    --log-dir "$LOG_DIR" \
+    2>&1 | tee -a "$SUMMARY_LOG"
 
 echo ""
 echo "============================================================"
