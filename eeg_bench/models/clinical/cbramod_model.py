@@ -254,6 +254,38 @@ class CBraModClinicalModel(AbstractModel):
         self.pretrained_path = pretrained_path
 
         self.model: Optional[CBraModClinicalWrapper] = None
+        self.supports_full_dataset_cache = self.freeze_backbone
+
+    @staticmethod
+    def _parse_recording_index(name: str) -> int:
+        for token in name.split("_")[1:]:
+            if token.isdigit():
+                return int(token)
+        return -1
+
+    def _filter_dataset_to_subset(self, dataset, X, subset_indices):
+        """Filter dataset recordings to only those in subset_indices."""
+        global_indices = set()
+        offset = 0
+        for ds_idx, ds in enumerate(X):
+            for idx in subset_indices[ds_idx]:
+                global_indices.add(offset + idx)
+            offset += len(ds)
+        dataset.recording_names = [
+            name for name in dataset.recording_names
+            if self._parse_recording_index(name) in global_indices
+        ]
+        return dataset
+
+    @staticmethod
+    def _gather_subset_labels(labels, subset_indices):
+        subset = []
+        for ds_labels, idxs in zip(labels, subset_indices):
+            if isinstance(ds_labels, np.ndarray):
+                subset.append(ds_labels[idxs])
+            else:
+                subset.append([ds_labels[i] for i in idxs])
+        return subset
 
     def _init_model(self, sample: np.ndarray, sfreq: int) -> None:
         """Initialize the CBraMod model based on sample data shape.
@@ -543,12 +575,14 @@ class CBraModClinicalModel(AbstractModel):
         finally:
             cleanup_temp_cache_dir(cache_dir)
 
-    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
+    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict],
+            subset_fraction: float = 1.0, subset_seed: Optional[int] = None,
+            subset_indices: Optional[List[List[int]]] = None) -> None:
         """Train the CBraMod model."""
         task_name = meta[0]["task_name"]
         sfreq = meta[0].get("sampling_frequency", 200)  # CBraMod resamples to 200Hz
 
-        # Create training dataset
+        # Create training dataset (always from full X for cache hit)
         dataset_train = make_dataset_2(
             X, y, meta, task_name, self.name, self.chunk_len_s,
             is_train=True, use_cache=True
@@ -565,6 +599,13 @@ class CBraModClinicalModel(AbstractModel):
             logger.warning("Dataset empty after retries. Skipping training.")
             return
 
+        # Filter to subset if provided (supports_full_dataset_cache path)
+        if subset_indices is not None:
+            self._filter_dataset_to_subset(dataset_train, X, subset_indices)
+            y_for_weights = self._gather_subset_labels(y, subset_indices)
+        else:
+            y_for_weights = y
+
         # Split into train/val
         val_split = 0.15
         dataset_train, dataset_val = dataset_train.split_train_val(val_split)
@@ -575,7 +616,7 @@ class CBraModClinicalModel(AbstractModel):
             self._init_model(sample_data, sfreq)
 
         # Setup loss function with class weights
-        class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
+        class_weights = torch.tensor(calc_class_weights(y_for_weights, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
         # Create data loaders
