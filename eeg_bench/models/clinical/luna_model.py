@@ -131,10 +131,12 @@ class LUNAClinicalWrapper(nn.Module):
         if pretrained_path is not None:
             self._load_pretrained_weights(pretrained_path, freeze_backbone)
 
+        self.num_labels_per_chunk = num_labels_per_chunk
         self.linear_probe_head = None
         if linear_probe:
             print("Using linear probe!!")
-            self.linear_probe_head = nn.Linear(self.feature_dim, num_classes).to(self.device)
+            out_dim = num_classes * (num_labels_per_chunk or 1)
+            self.linear_probe_head = nn.Linear(self.feature_dim, out_dim).to(self.device)
             self._freeze_backbone(keep_classifier=False)
         elif freeze_backbone:
             self._freeze_backbone(keep_classifier=True)
@@ -314,7 +316,7 @@ class LUNAClinicalModel(AbstractModel):
 
         self.model: Optional[LUNAClinicalWrapper] = None
 
-    def _get_channel_coords(self, ch_names: List[str]) -> torch.Tensor:
+    def _get_channel_coords(self, ch_names: List[str]):
         """Get 3D channel coordinates from position bank.
 
         For bipolar channels (e.g. "F3-C3") the position is approximated as
@@ -325,7 +327,10 @@ class LUNAClinicalModel(AbstractModel):
             ch_names: List of channel names
 
         Returns:
-            positions: Tensor of shape [C, 3] with 3D coordinates
+            Tuple of (positions [C, 3], kept_channel_indices) where
+            kept_channel_indices is None when all channels resolved, or a
+            list of int indices into the original ch_names for the channels
+            that survived position-bank lookup.
         """
         # Clean channel names (remove 'EEG' prefix if present)
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
@@ -334,7 +339,7 @@ class LUNAClinicalModel(AbstractModel):
         has_bipolar = any("-" in name for name in clean_names)
 
         if not has_bipolar:
-            # All unipolar — fast path
+            # All unipolar — fast path (assume position bank knows them all)
             positions = self.pos_bank(clean_names)
             if isinstance(positions, dict):
                 positions = positions.get(
@@ -343,7 +348,7 @@ class LUNAClinicalModel(AbstractModel):
                 )
             if positions.dim() == 3:
                 positions = positions.squeeze(0)
-            return positions.float().to(self.device)
+            return positions.float().to(self.device), None
 
         # Mixed or all-bipolar: resolve each unique electrode individually
         all_electrodes: set = set()
@@ -354,29 +359,48 @@ class LUNAClinicalModel(AbstractModel):
             else:
                 all_electrodes.add(name)
 
-        unique_electrodes = sorted(all_electrodes)
-        raw_positions = self.pos_bank(unique_electrodes)
-        if isinstance(raw_positions, dict):
-            raw_positions = raw_positions.get(
-                "positions",
-                raw_positions.get("coords", raw_positions.get("last_hidden_state"))
-            )
-        if raw_positions.dim() == 3:
-            raw_positions = raw_positions.squeeze(0)
-        raw_positions = raw_positions.float()
+        # Query position bank one electrode at a time so we can detect
+        # which ones the bank doesn't know (it silently drops unknowns).
+        elec_to_pos: dict = {}
+        for elec in sorted(all_electrodes):
+            pos = self.pos_bank([elec])
+            if isinstance(pos, dict):
+                pos = pos.get("positions", pos.get("coords", pos.get("last_hidden_state")))
+            if pos.dim() == 3:
+                pos = pos.squeeze(0)
+            if pos.shape[0] == 1:
+                elec_to_pos[elec] = pos[0].float()
+            else:
+                logger.warning("Position bank has no entry for electrode '%s' — dropping channels that use it", elec)
 
-        elec_to_pos = {e: raw_positions[j] for j, e in enumerate(unique_electrodes)}
-
-        # Build position tensor — bipolar channels get the midpoint
-        positions = torch.zeros(len(clean_names), 3)
+        # Keep only channels whose electrodes all resolved
+        kept = []  # (original_index, name)
         for i, name in enumerate(clean_names):
             if "-" in name:
                 a, b = name.split("-", 1)
-                positions[i] = (elec_to_pos[a.strip()] + elec_to_pos[b.strip()]) / 2.0
+                if a.strip() in elec_to_pos and b.strip() in elec_to_pos:
+                    kept.append((i, name))
+                else:
+                    logger.warning("Dropping bipolar channel '%s' — electrode(s) not in position bank", name)
             else:
-                positions[i] = elec_to_pos[name]
+                if name in elec_to_pos:
+                    kept.append((i, name))
+                else:
+                    logger.warning("Dropping channel '%s' — not in position bank", name)
 
-        return positions.to(self.device)
+        if not kept:
+            raise ValueError("No channels could be resolved by the position bank")
+
+        # Build position tensor for kept channels only
+        positions = torch.zeros(len(kept), 3)
+        for out_i, (_, name) in enumerate(kept):
+            if "-" in name:
+                a, b = name.split("-", 1)
+                positions[out_i] = (elec_to_pos[a.strip()] + elec_to_pos[b.strip()]) / 2.0
+            else:
+                positions[out_i] = elec_to_pos[name]
+
+        return positions.to(self.device), [idx for idx, _ in kept]
 
     @staticmethod
     def _actual_ch_names(dataset) -> List[str]:
@@ -468,6 +492,9 @@ class LUNAClinicalModel(AbstractModel):
         yb: torch.Tensor,
         coords: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Drop channels the position bank couldn't resolve
+        if getattr(self, '_ch_keep', None) is not None:
+            x = x[:, self._ch_keep, :]
         if not self.use_internal_chunking:
             x = self._ensure_patch_multiple(x)
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -495,6 +522,9 @@ class LUNAClinicalModel(AbstractModel):
         indices: torch.Tensor,
         coords: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Drop channels the position bank couldn't resolve
+        if getattr(self, '_ch_keep', None) is not None:
+            x = x[:, self._ch_keep, :]
         if not self.use_internal_chunking:
             x = self._ensure_patch_multiple(x)
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -683,7 +713,15 @@ class LUNAClinicalModel(AbstractModel):
 
                     optimizer.zero_grad()
                     logits = self.model.linear_probe_head(feats)
-                    loss = criterion(logits, yb)
+
+                    # Multilabel: reshape [B, L*C] -> [B*L, C] and flatten labels
+                    if self.model.is_multilabel_task and self.model.num_labels_per_chunk:
+                        L = self.model.num_labels_per_chunk
+                        logits_flat = logits.view(-1, self.model.num_classes)
+                        yb_flat = yb.view(-1).long()
+                        loss = criterion(logits_flat, yb_flat)
+                    else:
+                        loss = criterion(logits, yb)
                     loss.backward()
                     optimizer.step()
                     scheduler.step()
@@ -692,7 +730,11 @@ class LUNAClinicalModel(AbstractModel):
                     total_loss += loss.item() * batch_samples
                     total_samples += batch_samples
 
-                    if logits.dim() == 2:
+                    if self.model.is_multilabel_task and self.model.num_labels_per_chunk:
+                        preds = logits.view(-1, self.model.num_classes).argmax(dim=1)
+                        correct += (preds == yb.view(-1).long()).sum().item()
+                        total_acc_samples += batch_samples * self.model.num_labels_per_chunk
+                    elif logits.dim() == 2:
                         preds = torch.argmax(logits, dim=1)
                         target = yb if yb.dim() == 1 else yb.argmax(dim=1)
                         correct += (preds == target).sum().item()
@@ -715,14 +757,24 @@ class LUNAClinicalModel(AbstractModel):
                             if not self.model.is_multilabel_task and yb.dim() > 1:
                                 yb = yb.argmax(dim=1)
                             logits = self.model.linear_probe_head(feats)
-                            loss = criterion(logits, yb)
-                            batch_samples = feats.size(0)
-                            val_total += loss.item() * batch_samples
-                            val_samples += batch_samples
-                            if logits.dim() == 2:
-                                preds = torch.argmax(logits, dim=1)
-                                target = yb if yb.dim() == 1 else yb.argmax(dim=1)
-                                val_correct += (preds == target).sum().item()
+                            if self.model.is_multilabel_task and self.model.num_labels_per_chunk:
+                                logits_flat = logits.view(-1, self.model.num_classes)
+                                yb_flat = yb.view(-1).long()
+                                loss = criterion(logits_flat, yb_flat)
+                                preds = logits_flat.argmax(dim=1)
+                                val_correct += (preds == yb_flat).sum().item()
+                                batch_samples = feats.size(0)
+                                val_total += loss.item() * batch_samples
+                                val_samples += batch_samples * self.model.num_labels_per_chunk
+                            else:
+                                loss = criterion(logits, yb)
+                                batch_samples = feats.size(0)
+                                val_total += loss.item() * batch_samples
+                                val_samples += batch_samples
+                                if logits.dim() == 2:
+                                    preds = torch.argmax(logits, dim=1)
+                                    target = yb if yb.dim() == 1 else yb.argmax(dim=1)
+                                    val_correct += (preds == target).sum().item()
                     val_loss = val_total / val_samples if val_samples > 0 else 0.0
                     val_acc = val_correct / val_samples if val_samples > 0 else 0.0
 
@@ -939,9 +991,10 @@ class LUNAClinicalModel(AbstractModel):
             **loader_kwargs
         )
 
-        # Get channel coordinates
-        coords_train = self._get_channel_coords(self._actual_ch_names(dataset_train))
-        coords_val = self._get_channel_coords(self._actual_ch_names(dataset_val))
+        # Get channel coordinates; drop channels the position bank can't resolve
+        coords_train, ch_keep = self._get_channel_coords(self._actual_ch_names(dataset_train))
+        coords_val, _ = self._get_channel_coords(self._actual_ch_names(dataset_val))
+        self._ch_keep = ch_keep  # None when all channels survived, else list of indices
 
         if self.linear_probe:
             self._fit_linear_probe_cached(dataset_train, dataset_val, coords_train, coords_val, class_weights)
@@ -1053,7 +1106,7 @@ class LUNAClinicalModel(AbstractModel):
         )
 
         # Get channel coordinates
-        coords = self._get_channel_coords(self._actual_ch_names(dataset_test))
+        coords, _ = self._get_channel_coords(self._actual_ch_names(dataset_test))
         self.model.eval()
 
         # Collect predictions
@@ -1066,7 +1119,12 @@ class LUNAClinicalModel(AbstractModel):
             batch_x, batch_idx, cb = self._prepare_inference_batch(x, idx, coords)
 
             logits = self.model(batch_x, cb)
-            pred = torch.argmax(logits, dim=1)
+            if self.model.is_multilabel_task and self.model.num_labels_per_chunk:
+                # Reshape [B, L*C] -> [B, L, C] -> argmax per label -> [B, L]
+                L = self.model.num_labels_per_chunk
+                pred = logits.view(-1, L, self.model.num_classes).argmax(dim=2)
+            else:
+                pred = torch.argmax(logits, dim=1)
             predictions.append(pred.cpu())
             indices.append(batch_idx.cpu())
 
