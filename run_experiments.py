@@ -16,8 +16,8 @@ Usage:
     # Custom configuration
     python run_experiments.py --models labram lejepa --tasks left_right parkinsons --percentages 0.1 0.5 1.0
 
-    # Skip cache pre-warming (if already cached)
-    python run_experiments.py --skip-prewarm
+    # Run with specific seeds
+    python run_experiments.py --seeds 100 200
 
     # Adjust parallelism
     python run_experiments.py --gpus 3 --workers-per-gpu 3  # 9 parallel jobs
@@ -43,7 +43,8 @@ CLINICAL_TASKS = [
     "abnormal", "sleep_stages", "seizure", "binary_artifact", "multiclass_artifact"
 ]
 ALL_TASKS = BCI_TASKS + CLINICAL_TASKS
-DEFAULT_PERCENTAGES = [0.25, 0.5, 0.75, 1.0] #0.01, 0.1, 
+DEFAULT_PERCENTAGES = [0.25, 0.5, 0.75, 1.0] #0.01, 0.1,
+DEFAULT_SEEDS = [100, 200, 300, 400, 500]
 
 TASK_NAME_MAP = {
     "Left Hand vs Right Hand MI": "left_right",
@@ -83,7 +84,7 @@ def get_completed_experiments(results_dir="results/raw"):
 
 def run_experiment(args):
     """Run a single experiment in a subprocess."""
-    model, task, pct, log_dir, dry_run, gpu_queue = args
+    model, task, pct, seed, log_dir, dry_run, gpu_queue = args
     gpu_id = gpu_queue.get()
 
     env = os.environ.copy()
@@ -94,17 +95,18 @@ def run_experiment(args):
         "--model", model,
         "--task", task,
         "--data-percentages", str(pct),
+        "--seed", str(seed),
         "--linear-probe",
         "--no-wandb"
     ]
 
-    log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_gpu{gpu_id}.log")
+    log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_seed{seed}_gpu{gpu_id}.log")
 
     start_time = time.time()
     try:
         if dry_run:
             print(f"[DRY RUN] GPU {gpu_id}: {' '.join(cmd)}")
-            return (model, task, pct, 0, "dry_run")
+            return (model, task, pct, seed, 0, "dry_run")
 
         with open(log_file, "w") as f:
             f.write(f"Command: {' '.join(cmd)}\n")
@@ -128,32 +130,11 @@ def run_experiment(args):
             f.write(f"Return code: {result.returncode}\n")
 
         status = "success" if result.returncode == 0 else "failed"
-        return (model, task, pct, result.returncode, status)
+        return (model, task, pct, seed, result.returncode, status)
     except Exception as e:
-        return (model, task, pct, -1, str(e))
+        return (model, task, pct, seed, -1, str(e))
     finally:
         gpu_queue.put(gpu_id)
-
-
-def prewarm_cache(tasks, models, log_dir):
-    """
-    Pre-warm the cache by running one experiment per task sequentially.
-    This ensures all datasets are cached before parallel execution.
-    """
-    print("\n=== Pre-warming cache ===")
-    print("Running one experiment per task to populate cache...")
-
-    # Run smallest percentage for each task with first model
-    model = models[0]
-    pct = 0.01  # Smallest percentage = fastest
-
-    for i, task in enumerate(tasks):
-        print(f"  [{i+1}/{len(tasks)}] Caching {task}...")
-        result = run_experiment((model, task, pct, 0, log_dir, False))
-        if result[3] != 0:
-            print(f"    Warning: Cache warm-up failed for {task}")
-
-    print("Cache pre-warming complete.\n")
 
 
 def main():
@@ -172,8 +153,8 @@ def main():
                         help="Tasks to run (default: all 14 tasks)")
     parser.add_argument("--percentages", nargs="+", type=float, default=DEFAULT_PERCENTAGES,
                         help=f"Data percentages to test (default: {DEFAULT_PERCENTAGES})")
-    parser.add_argument("--skip-prewarm", action="store_true",
-                        help="Skip cache pre-warming phase")
+    parser.add_argument("--seeds", nargs="+", type=int, default=DEFAULT_SEEDS,
+                        help=f"Random seeds to run (default: {DEFAULT_SEEDS})")
     parser.add_argument("--resume", action="store_true",
                         help="Skip already-completed experiments (checks results/raw/)")
     parser.add_argument("--dry-run", action="store_true",
@@ -197,18 +178,19 @@ def main():
     print(f"Tasks: {len(args.tasks)} ({len([t for t in args.tasks if t in BCI_TASKS])} BCI, "
           f"{len([t for t in args.tasks if t in CLINICAL_TASKS])} Clinical)")
     print(f"Percentages: {args.percentages}")
+    print(f"Seeds: {args.seeds}")
     print(f"GPUs: {args.gpus}, Workers/GPU: {args.workers_per_gpu}, Total workers: {total_workers}")
     print(f"Linear probe: {'No' if args.no_linear_probe else 'Yes'}")
     print("=" * 60)
 
     # Generate all experiment combinations
-    all_experiments = list(product(args.models, args.tasks, args.percentages))
+    all_experiments = list(product(args.models, args.tasks, args.percentages, args.seeds))
     print(f"\nTotal experiments: {len(all_experiments)}")
 
     # Check for completed experiments
     if args.resume:
         completed = get_completed_experiments()
-        experiments = [(m, t, p) for m, t, p in all_experiments if (m, t, p) not in completed]
+        experiments = [(m, t, p, s) for m, t, p, s in all_experiments if (m, t, p) not in completed]
         print(f"Already completed: {len(all_experiments) - len(experiments)}")
         print(f"Remaining: {len(experiments)}")
     else:
@@ -218,15 +200,11 @@ def main():
         print("No experiments to run!")
         return
 
-    # Pre-warm cache
-    if not args.skip_prewarm and not args.dry_run:
-        prewarm_cache(args.tasks, args.models, args.log_dir)
-
     # Run larger percentages first to reduce tail time
     experiments = sorted(experiments, key=lambda x: x[2], reverse=True)
 
     gpu_slots = [gpu_id for gpu_id in range(args.gpus) for _ in range(args.workers_per_gpu)]
-    jobs = [(model, task, pct, args.log_dir, args.dry_run) for model, task, pct in experiments]
+    jobs = [(model, task, pct, seed, args.log_dir, args.dry_run) for model, task, pct, seed in experiments]
 
     # Run experiments in parallel
     print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
@@ -248,8 +226,8 @@ def main():
     elapsed = time.time() - start_time
 
     # Report results
-    successes = [r for r in results if r[3] == 0]
-    failures = [r for r in results if r[3] != 0]
+    successes = [r for r in results if r[4] == 0]
+    failures = [r for r in results if r[4] != 0]
 
     print("\n" + "=" * 60)
     print("RESULTS")
@@ -259,8 +237,8 @@ def main():
 
     if failures:
         print(f"\nFailed experiments ({len(failures)}):")
-        for model, task, pct, code, status in failures:
-            print(f"  - {model}/{task}/pct{int(pct*100)}: {status} (code {code})")
+        for model, task, pct, seed, code, status in failures:
+            print(f"  - {model}/{task}/pct{int(pct*100)}/seed{seed}: {status} (code {code})")
         print(f"\nCheck logs in {args.log_dir}/ for details.")
     else:
         print("\nAll experiments completed successfully!")

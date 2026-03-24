@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Full benchmark run: LUNA, LaBraM, CBraMod
+# All 14 tasks, 5 seeds, data percentages 0.1-1.0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR="logs/experiments_${TIMESTAMP}"
+SUMMARY_LOG="logs/run_summary_${TIMESTAMP}.log"
+
+mkdir -p "$LOG_DIR" results/raw
+
+echo "============================================================"
+echo "EEG-Bench Full Benchmark Run"
+echo "Started: $(date)"
+echo "Log dir: $LOG_DIR"
+echo "============================================================"
+
+python run_experiments.py \
+    --models luna labram cbramod \
+    --percentages 0.1 0.25 0.5 0.75 1.0 \
+    --seeds 100 200 300 400 500 \
+    --gpus 3 \
+    --workers-per-gpu 2 \
+    --log-dir "$LOG_DIR" \
+    2>&1 | tee "$SUMMARY_LOG"
+
+echo ""
+echo "============================================================"
+echo "Run complete: $(date)"
+echo "============================================================"
+
+# Summarize failures from logs
+FAILED=$(grep -rl "Return code: [^0]" "$LOG_DIR" 2>/dev/null || true)
+if [ -n "$FAILED" ]; then
+    echo ""
+    echo "FAILED EXPERIMENTS:"
+    echo "$FAILED" | while read -r logfile; do
+        echo "  - $(basename "$logfile")"
+        grep "^Command:" "$logfile" | head -1 | sed 's/^/    /'
+        grep "Return code:" "$logfile" | tail -1 | sed 's/^/    /'
+    done
+    echo ""
+    echo "Failed log files saved in: $LOG_DIR"
+else
+    echo "All experiments completed successfully!"
+fi
+
+# Count results
+N_RESULTS=$(find results/raw -name "*.json" -newer "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
+echo "New result files: $N_RESULTS"
+echo "Summary log: $SUMMARY_LOG"
