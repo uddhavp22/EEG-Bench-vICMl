@@ -85,9 +85,12 @@ class CBraModBCIWrapper(nn.Module):
         nhead: int = 8,
         pretrained_path: Optional[str] = None,
         freeze_backbone: bool = True,
+        linear_probe: bool = False,
     ):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.linear_probe = linear_probe
+        self.feature_dim = d_model
 
         # Build CBraMod backbone
         self.backbone = CBraMod(
@@ -107,16 +110,20 @@ class CBraModBCIWrapper(nn.Module):
         # Replace projection head with identity and add custom classifier
         self.backbone.proj_out = nn.Identity()
 
-        # BCI classifier: mean-pool over patches so num_patches can vary across datasets
-        self.classifier = nn.Sequential(
-            nn.Linear(n_channels * d_model, d_model),
-            nn.ELU(),
-            nn.Dropout(0.1),
-            nn.Linear(d_model, n_classes),
-        ).to(self.device)
+        if linear_probe:
+            # Linear probe: single linear layer on pooled features (B, d_model)
+            self.classifier = nn.Linear(d_model, n_classes).to(self.device)
+        else:
+            # MLP classifier: mean-pool over patches so num_patches can vary across datasets
+            self.classifier = nn.Sequential(
+                nn.Linear(n_channels * d_model, d_model),
+                nn.ELU(),
+                nn.Dropout(0.1),
+                nn.Linear(d_model, n_classes),
+            ).to(self.device)
 
         # Freeze backbone if requested
-        if freeze_backbone:
+        if freeze_backbone or linear_probe:
             self._freeze_backbone()
 
     def _load_pretrained_weights(self, pretrained_path: str):
@@ -153,16 +160,22 @@ class CBraModBCIWrapper(nn.Module):
         """
         x = x.to(self.device)
         feats = self.backbone(x)  # (B, C, num_patches, d_model)
-        feats = feats.mean(dim=2)  # (B, C, d_model) — pool over patches
-        feats = feats.reshape(feats.shape[0], -1)  # (B, C * d_model)
+        if self.linear_probe:
+            feats = feats.mean(dim=2).mean(dim=1)  # (B, d_model)
+        else:
+            feats = feats.mean(dim=2)  # (B, C, d_model) — pool over patches
+            feats = feats.reshape(feats.shape[0], -1)  # (B, C * d_model)
         logits = self.classifier(feats)
         return logits
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             feats = self.backbone(x.to(self.device))  # (B, C, num_patches, d_model)
-            feats = feats.mean(dim=2)  # (B, C, d_model) — pool over patches
-            return feats.reshape(feats.shape[0], -1)  # (B, C * d_model)
+            if self.linear_probe:
+                return feats.mean(dim=2).mean(dim=1)  # (B, d_model)
+            else:
+                feats = feats.mean(dim=2)  # (B, C, d_model) — pool over patches
+                return feats.reshape(feats.shape[0], -1)  # (B, C * d_model)
 
     def classify_features(self, feats: torch.Tensor) -> torch.Tensor:
         return self.classifier(feats.to(self.device))
@@ -181,6 +194,7 @@ class CBraModBCIModel(AbstractModel):
         n_layer: int = 12,
         nhead: int = 8,
         freeze_backbone: bool = True,
+        linear_probe: bool = True,
     ):
         """Initialize CBraMod BCI model.
 
@@ -193,10 +207,12 @@ class CBraModBCIModel(AbstractModel):
             n_layer: Number of transformer layers
             nhead: Number of attention heads
             freeze_backbone: Whether to freeze backbone weights
+            linear_probe: Whether to use a linear probe (single nn.Linear) instead of MLP
         """
         super().__init__("CBraModModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.freeze_backbone = freeze_backbone
+        self.linear_probe = linear_probe
 
         # Model architecture parameters
         self.patch_size = patch_size
@@ -383,6 +399,7 @@ class CBraModBCIModel(AbstractModel):
                 nhead=self.nhead,
                 pretrained_path=self.pretrained_path,
                 freeze_backbone=self.freeze_backbone,
+                linear_probe=self.linear_probe,
             ).to(self.device)
             logger.info(f"[CBraMod] Initialized with {n_channels} channels, pool over patches, patch_size={patch_size} (200 Hz)")
 

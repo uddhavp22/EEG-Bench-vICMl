@@ -79,6 +79,7 @@ class CBraModClinicalWrapper(nn.Module):
         nhead: int = 8,
         pretrained_path: Optional[str] = None,
         freeze_backbone: bool = True,
+        linear_probe: bool = False,
     ):
         super().__init__()
         self.is_multilabel_task = num_labels_per_chunk is not None
@@ -86,6 +87,8 @@ class CBraModClinicalWrapper(nn.Module):
         self.n_channels = n_channels
         self.patch_size = patch_size
         self.num_patches = num_patches
+        self.linear_probe = linear_probe
+        self.feature_dim = d_model
 
         # Build CBraMod backbone
         self.backbone = CBraMod(
@@ -102,23 +105,31 @@ class CBraModClinicalWrapper(nn.Module):
         if pretrained_path is not None:
             self._load_pretrained_weights(pretrained_path)
 
-        # Replace projection head with identity and add custom classifier
+        # Replace projection head with identity
         self.backbone.proj_out = nn.Identity()
 
-        # Classifier: use adaptive pooling to handle variable number of patches
-        # Output shape from backbone: (batch, channels, patches, d_model)
-        self.classifier = nn.Sequential(
+        # Pooling: adaptive pool over channels and patches → (B, d_model)
+        self.pool = nn.Sequential(
             Rearrange('b c s d -> b d c s'),  # [B, d_model, channels, patches]
             nn.AdaptiveAvgPool2d((1, 1)),      # [B, d_model, 1, 1]
             nn.Flatten(),                       # [B, d_model]
-            nn.Linear(d_model, d_model),
-            nn.ELU(),
-            nn.Dropout(0.1),
-            nn.Linear(d_model, num_classes if not self.is_multilabel_task else num_classes * num_labels_per_chunk),
         ).to(device)
 
+        out_dim = num_classes if not self.is_multilabel_task else num_classes * num_labels_per_chunk
+        if linear_probe:
+            # Linear probe: single linear layer
+            self.classifier = nn.Linear(d_model, out_dim).to(device)
+        else:
+            # MLP classifier
+            self.classifier = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.ELU(),
+                nn.Dropout(0.1),
+                nn.Linear(d_model, out_dim),
+            ).to(device)
+
         # Freeze backbone if requested
-        if freeze_backbone:
+        if freeze_backbone or linear_probe:
             self._freeze_backbone()
 
         self.loss_fn = nn.CrossEntropyLoss()
@@ -147,6 +158,16 @@ class CBraModClinicalWrapper(nn.Module):
         self.backbone.eval()
         logger.info("Froze backbone parameters, keeping classifier trainable")
 
+    def _reshape_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Reshape 3D input [B, C, T] to 4D [B, C, num_patches, patch_size]."""
+        if x.ndim == 3:
+            batch_size, n_channels, total_samples = x.shape
+            num_patches = total_samples // self.patch_size
+            trimmed_samples = num_patches * self.patch_size
+            x = x[:, :, :trimmed_samples]
+            x = x.reshape(batch_size, n_channels, num_patches, self.patch_size)
+        return x
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through CBraMod.
 
@@ -156,23 +177,10 @@ class CBraModClinicalWrapper(nn.Module):
         Returns:
             logits: Classification logits
         """
-        x = x.to(device)
-
-        # If input is 3D [B, C, T], reshape to 4D [B, C, num_patches, patch_size]
-        if x.ndim == 3:
-            batch_size, n_channels, total_samples = x.shape
-            # Calculate how many complete patches we can extract
-            num_patches = total_samples // self.patch_size
-            # Trim to multiple of patch_size
-            trimmed_samples = num_patches * self.patch_size
-            x = x[:, :, :trimmed_samples]
-            # Reshape to [B, C, num_patches, patch_size]
-            x = x.reshape(batch_size, n_channels, num_patches, self.patch_size)
-
-        # Backbone forward
+        x = self._reshape_input(x.to(device))
         feats = self.backbone(x)  # (B, C, num_patches, d_model)
-        # Classify
-        logits = self.classifier(feats)
+        pooled = self.pool(feats)  # (B, d_model)
+        logits = self.classifier(pooled)
 
         if self.is_multilabel_task:
             logits = logits.reshape(x.shape[0], self.num_classes, -1)
@@ -180,22 +188,13 @@ class CBraModClinicalWrapper(nn.Module):
         return logits
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.to(device)
-        if x.ndim == 3:
-            batch_size, n_channels, total_samples = x.shape
-            num_patches = total_samples // self.patch_size
-            trimmed_samples = num_patches * self.patch_size
-            x = x[:, :, :trimmed_samples]
-            x = x.reshape(batch_size, n_channels, num_patches, self.patch_size)
+        x = self._reshape_input(x.to(device))
         with torch.no_grad():
             raw_feats = self.backbone(x)
-            # Apply pooling layers (first 3 of classifier) to get fixed-size features
-            pooled = self.classifier[:3](raw_feats)  # Rearrange -> AdaptiveAvgPool2d -> Flatten -> (B, d_model)
-            return pooled
+            return self.pool(raw_feats)  # (B, d_model)
 
     def classify_features(self, feats: torch.Tensor) -> torch.Tensor:
-        # feats is already pooled to (B, d_model), apply remaining classifier layers
-        logits = self.classifier[3:](feats.to(device))  # Linear -> ELU -> Dropout -> Linear
+        logits = self.classifier(feats.to(device))
         if self.is_multilabel_task:
             logits = logits.reshape(feats.shape[0], self.num_classes, -1)
         return logits
@@ -217,6 +216,7 @@ class CBraModClinicalModel(AbstractModel):
         n_layer: int = 12,
         nhead: int = 8,
         freeze_backbone: bool = True,
+        linear_probe: bool = True,
     ):
         """Initialize CBraMod clinical model.
 
@@ -232,6 +232,7 @@ class CBraModClinicalModel(AbstractModel):
             n_layer: Number of transformer layers
             nhead: Number of attention heads
             freeze_backbone: Whether to freeze backbone weights
+            linear_probe: Whether to use a linear probe (single nn.Linear) instead of MLP
         """
         super().__init__("CBraModModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -239,6 +240,7 @@ class CBraModClinicalModel(AbstractModel):
         self.num_labels_per_chunk = num_labels_per_chunk
         self.chunk_len_s = chunk_len_s if chunk_len_s is not None else (16 if num_labels_per_chunk else None)
         self.freeze_backbone = freeze_backbone
+        self.linear_probe = linear_probe
 
         # Model architecture parameters
         self.patch_size = patch_size
@@ -320,6 +322,7 @@ class CBraModClinicalModel(AbstractModel):
             nhead=self.nhead,
             pretrained_path=self.pretrained_path,
             freeze_backbone=self.freeze_backbone,
+            linear_probe=self.linear_probe,
         ).to(self.device)
 
         logger.info(f"Initialized CBraMod model with {n_channels} channels, {num_patches} patches of size {patch_size}, d_model={self.d_model}, sfreq={sfreq}Hz")
