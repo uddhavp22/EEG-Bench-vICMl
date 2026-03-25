@@ -27,7 +27,7 @@ from ..abstract_model import AbstractModel
 from ...utils import wandb_utils
 from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_temp_cache_dir
 from .LaBraM.make_dataset import make_dataset_cbramod, _ordered_target_channels
-from .LaBraM.utils_2 import n_unique_labels, calc_class_weights
+from .LaBraM.utils_2 import n_unique_labels, calc_class_weights, reverse_map_label
 
 logger = logging.getLogger(__name__)
 
@@ -531,4 +531,8 @@ class CBraModBCIModel(AbstractModel):
         predictions = np.array(predictions)
         if self.label_encoder is not None:
             predictions = self.label_encoder.inverse_transform(predictions)
+        else:
+            predictions = np.array([
+                reverse_map_label(int(pred_label), task_name) for pred_label in predictions
+            ])
         return predictions
