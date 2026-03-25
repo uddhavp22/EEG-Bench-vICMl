@@ -302,14 +302,16 @@ class LUNABCIModel(AbstractModel):
         self.channel_names: List[str] = []
         self.target_timepoints: Optional[int] = None
 
-    def _get_channel_coords(self, channel_names: List[str]) -> torch.Tensor:
+    def _get_channel_coords(self, channel_names: List[str]) -> tuple:
         """Get 3D channel coordinates from position bank.
 
         Args:
             channel_names: List of channel names
 
         Returns:
-            positions: Tensor of shape [C, 3] with 3D coordinates
+            Tuple of (positions [C, 3], ch_keep) where ch_keep is None
+            when all channels resolved, or a list of int indices for the
+            channels that the position bank recognized.
         """
         # Get positions from position bank
         raw_positions = self.pos_bank(channel_names)
@@ -328,7 +330,37 @@ class LUNABCIModel(AbstractModel):
         # Important: keep positions on CPU. This collate_fn runs inside
         # DataLoader worker processes, and touching CUDA there can trigger
         # "CUDA error: initialization error".
-        return raw_positions.detach().float().cpu()
+        positions = raw_positions.detach().float().cpu()
+
+        # The position bank silently drops unknown channels. Verify that
+        # we got exactly as many positions as input channels.
+        if positions.shape[0] == len(channel_names):
+            return positions, None
+
+        # Mismatch — resolve per-channel to find which were kept
+        logger.warning(
+            "Position bank returned %d positions for %d channels — "
+            "resolving per-channel to identify kept channels",
+            positions.shape[0], len(channel_names),
+        )
+        kept_indices = []
+        kept_positions = []
+        for i, name in enumerate(channel_names):
+            pos = self.pos_bank([name])
+            if isinstance(pos, dict):
+                pos = pos.get("positions", pos.get("coords", pos.get("last_hidden_state")))
+            if pos.dim() == 3:
+                pos = pos.squeeze(0)
+            if pos.shape[0] == 1:
+                kept_indices.append(i)
+                kept_positions.append(pos[0].detach().float().cpu())
+            else:
+                logger.warning("Dropping channel '%s' — not in position bank", name)
+
+        if not kept_indices:
+            raise ValueError("No channels could be resolved by the position bank")
+
+        return torch.stack(kept_positions), kept_indices
 
     def _get_collate_fn(self, channel_names: List[str]):
         """Creates the collate function for LUNA that includes position embeddings.
@@ -340,11 +372,15 @@ class LUNABCIModel(AbstractModel):
             collate function that batches data with position embeddings
         """
         # Get embeddings for the specific channels of this task
-        raw_positions = self._get_channel_coords(channel_names)
+        raw_positions, ch_keep = self._get_channel_coords(channel_names)
 
-        def collate(batch, positions):
+        def collate(batch, positions, ch_keep):
             # Stack data: [Batch, Channels, Time]
             x_data = torch.stack([x["data"] for x in batch])
+
+            # Filter to channels the position bank recognized
+            if ch_keep is not None:
+                x_data = x_data[:, ch_keep, :]
 
             # Repeat positions for the batch: [Batch, Channels, 3]
             batch_positions = positions.repeat(len(batch), 1, 1)
@@ -360,7 +396,7 @@ class LUNABCIModel(AbstractModel):
 
             return batch_dict
 
-        return partial(collate, positions=raw_positions)
+        return partial(collate, positions=raw_positions, ch_keep=ch_keep)
 
     def _derive_target_layout(
         self,

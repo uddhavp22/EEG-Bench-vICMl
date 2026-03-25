@@ -371,7 +371,7 @@ class LUNAClinicalModel(AbstractModel):
         has_bipolar = any("-" in name for name in clean_names)
 
         if not has_bipolar:
-            # All unipolar — fast path (assume position bank knows them all)
+            # All unipolar — try fast path (position bank for all at once)
             positions = self.pos_bank(clean_names)
             if isinstance(positions, dict):
                 positions = positions.get(
@@ -380,7 +380,17 @@ class LUNAClinicalModel(AbstractModel):
                 )
             if positions.dim() == 3:
                 positions = positions.squeeze(0)
-            return positions.float().to(self.device), None
+            # The position bank silently drops unknown channels, so verify
+            # that we got exactly as many positions as input channels.
+            if positions.shape[0] == len(clean_names):
+                return positions.float().to(self.device), None
+            # Mismatch — fall through to per-channel resolution below
+            logger.warning(
+                "Position bank returned %d positions for %d channels — "
+                "falling back to per-channel resolution",
+                positions.shape[0], len(clean_names),
+            )
+            has_bipolar = True  # force per-channel path
 
         # Mixed or all-bipolar: resolve each unique electrode individually
         all_electrodes: set = set()
