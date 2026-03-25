@@ -96,10 +96,11 @@ class REVEWrapper(nn.Module):
 
 
 class REVEBenchmarkModel(AbstractModel):
-    def __init__(self, freeze_backbone: bool = True):
+    def __init__(self, freeze_backbone: bool = True, linear_probe: bool = False):
         super().__init__("REVEModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.freeze_backbone = freeze_backbone
+        self.linear_probe = linear_probe
+        self.freeze_backbone = freeze_backbone or linear_probe
 
         # Load the position bank once
         self.pos_bank = AutoModel.from_pretrained(
@@ -107,7 +108,76 @@ class REVEBenchmarkModel(AbstractModel):
             trust_remote_code=True,
             torch_dtype="auto",
         )
+
+        # Build case-insensitive lookup from the bank's own vocabulary
+        bank_names = self.pos_bank.get_all_positions()
+        self._bank_vocab = set(bank_names)
+        self._upper_to_bank = {name.upper(): name for name in bank_names}
+
         self.model = None
+
+    def _normalize_ch_name(self, name: str) -> str:
+        """Map a channel/electrode name to the position bank's expected casing."""
+        if name in self._bank_vocab:
+            return name
+        return self._upper_to_bank.get(name.upper(), name)
+
+    def _get_channel_coords(self, ch_names: List[str]):
+        """Get 3D channel coordinates from position bank.
+
+        Handles bipolar channels via midpoint averaging and drops unresolvable channels.
+
+        Returns:
+            Tuple of (positions [C, 3], kept_channel_indices) where
+            kept_channel_indices is None when all channels resolved, or a
+            list of int indices into the original ch_names.
+        """
+        clean_names = [c.replace("EEG", "").strip() for c in ch_names]
+
+        kept = []
+        query_names = []
+
+        for i, name in enumerate(clean_names):
+            if "-" in name:
+                parts = [p.strip() for p in name.split("-", 1)]
+                normed = [self._normalize_ch_name(p) for p in parts]
+                if all(n in self._bank_vocab for n in normed):
+                    kept.append((i, normed))
+                    query_names.extend(normed)
+                else:
+                    missing = [p for p, n in zip(parts, normed) if n not in self._bank_vocab]
+                    print(f"[REVE BCI] Dropping bipolar channel '{name}' — electrode(s) {missing} not in position bank")
+            else:
+                normed = self._normalize_ch_name(name)
+                if normed in self._bank_vocab:
+                    kept.append((i, [normed]))
+                    query_names.append(normed)
+                else:
+                    print(f"[REVE BCI] Dropping channel '{name}' — not in position bank")
+
+        if not kept:
+            raise ValueError("No channels could be resolved by the position bank")
+
+        unique_names = list(dict.fromkeys(query_names))
+        raw_positions = self.pos_bank(unique_names)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
+                "positions", raw_positions.get("coords", raw_positions.get("last_hidden_state"))
+            )
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
+
+        elec_to_pos = {name: raw_positions[j].float() for j, name in enumerate(unique_names)}
+
+        positions = torch.zeros(len(kept), 3)
+        for out_i, (_, electrodes) in enumerate(kept):
+            if len(electrodes) == 2:
+                positions[out_i] = (elec_to_pos[electrodes[0]] + elec_to_pos[electrodes[1]]) / 2.0
+            else:
+                positions[out_i] = elec_to_pos[electrodes[0]]
+
+        ch_keep = [idx for idx, _ in kept] if len(kept) < len(clean_names) else None
+        return positions, ch_keep
 
     def _fit_linear_probe_cached(self, train_loader, n_epochs=10):
         assert self.model is not None
@@ -181,133 +251,103 @@ class REVEBenchmarkModel(AbstractModel):
         finally:
             cleanup_temp_cache_dir(cache_dir)
 
-    def _get_collate_fn(self, channel_names):
-        """
-        Creates the specific collate function required by REVE.
-        Maps channel names -> REVE Position Embeddings.
-        """
-        # Get embeddings for the specific channels of this task
-        # shape: [1, n_channels, embed_dim]
-        raw_positions = self.pos_bank(channel_names)
-        if isinstance(raw_positions, dict):
-            raw_positions = raw_positions.get(
-                "positions", raw_positions.get("coords", raw_positions.get("last_hidden_state"))
-            )
-        if raw_positions.dim() == 3:
-            raw_positions = raw_positions.squeeze(0)
-        
+    def _get_collate_fn(self, positions):
+        """Creates the collate function using pre-computed position embeddings."""
         def collate(batch, positions):
-            # Stack data: [Batch, Channels, Time]
             x_data = torch.stack([x["data"] for x in batch])
-            
-            # Repeat positions for the batch: [Batch, Channels, EmbedDim]
             batch_positions = positions.repeat(len(batch), 1, 1)
-            
             batch_dict = {
                 "sample": x_data,
                 "pos": batch_positions
             }
-            
             if "labels" in batch[0]:
                 y_label = torch.tensor([x["labels"] for x in batch])
                 batch_dict["label"] = y_label.long()
-                
             return batch_dict
 
-        return partial(collate, positions=raw_positions)
+        return partial(collate, positions=positions)
 
     def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
         print("Initializing REVE Fit...")
-        
-        # 1. Determine Input Shapes and Classes
-        # We assume all datasets in the list have the same basic shape/channels for the task
+
         sample_X = X[0]
-        sample_y = y[0]
         meta_data = meta[0]
-        
+
         n_samples, n_channels, n_timepoints = sample_X.shape
-        # Assuming y contains class indices 0..N-1
-        # You might need np.unique(np.concatenate(y)) if indices are sparse
         n_classes = len(np.unique(np.concatenate(y)))
-        
+
         channel_names = meta_data["channel_names"]
 
-        # Get position embeddings for channel names
-        raw_positions = self.pos_bank(channel_names)
-        if isinstance(raw_positions, dict):
-            raw_positions = raw_positions.get(
-                "positions", raw_positions.get("coords", raw_positions.get("last_hidden_state"))
-            )
-        if raw_positions.dim() == 3:
-            raw_positions = raw_positions.squeeze(0)
+        # Get robust channel coordinates (handles bipolar + drops unresolvable)
+        positions, ch_keep = self._get_channel_coords(channel_names)
+        self._ch_keep = ch_keep
 
-        # 2. Initialize Model
+        # Filter channels if some were dropped
+        if ch_keep is not None:
+            X = [x[:, ch_keep, :] for x in X]
+            n_channels = len(ch_keep)
+            print(f"[REVE BCI] Kept {n_channels} of {sample_X.shape[1]} channels")
+
+        # Initialize Model
         self.model = REVEWrapper(
             n_channels=n_channels,
             n_timepoints=n_timepoints,
             n_classes=n_classes,
             freeze_backbone=self.freeze_backbone,
-            coords=raw_positions,
+            coords=positions,
         ).to(self.device)
-        
-        # 3. Prepare DataLoaders
-        # Concatenate all datasets for training (or keep separate if you prefer epoch-loops)
-        # Here we concatenate for simplicity as done in standard ML, 
-        # but you can loop over list like LaBraM if needed.
+
+        # Prepare DataLoaders
         X_all = np.concatenate(X, axis=0)
         y_all = np.concatenate(y, axis=0)
-        
+
         train_dataset = SimpleDataset(X_all, y_all)
-        collate_fn = self._get_collate_fn(channel_names)
-        
+        collate_fn = self._get_collate_fn(positions)
+
         train_loader = DataLoader(
-            train_dataset, 
-            batch_size=64, 
-            shuffle=True, 
+            train_dataset,
+            batch_size=64,
+            shuffle=True,
             collate_fn=collate_fn,
-            num_workers=0 # Set >0 if on Linux/Mac
+            num_workers=0
         )
-        
-        # 4. Optimizer
-        # Only optimize the classifier head (model.classifier)
+
+        # Optimizer
         optimizer = torch.optim.AdamW(self.model.classifier.parameters(), lr=1e-3)
         criterion = nn.CrossEntropyLoss()
-        
-        # 5. Training Loop
+
         n_epochs = 10
         print(f"Starting training for {n_epochs} epochs on {self.device}...")
 
-        if self.freeze_backbone:
+        if self.linear_probe:
             self._fit_linear_probe_cached(train_loader, n_epochs=n_epochs)
             return
 
         self.model.train()
-        self.model.backbone.eval()
+        if self.freeze_backbone:
+            self.model.backbone.eval()
         for epoch in range(n_epochs):
             total_loss = 0
             correct = 0
             total = 0
-            
+
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False)
             for batch in pbar:
                 data = batch["sample"].to(self.device)
                 pos = batch["pos"].to(self.device)
                 target = batch["label"].to(self.device)
-                
+
                 optimizer.zero_grad()
-                
-                # REVE forward pass requires (data, pos)
                 output = self.model(data, pos)
-                
                 loss = criterion(output, target)
                 loss.backward()
                 optimizer.step()
-                
+
                 total_loss += loss.item()
                 preds = torch.argmax(output, dim=1)
                 correct += (preds == target).sum().item()
                 total += target.size(0)
-                
+
                 pbar.set_postfix({'loss': total_loss/total})
 
             avg_loss = total_loss / len(train_loader)
@@ -326,28 +366,30 @@ class REVEBenchmarkModel(AbstractModel):
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
         self.model.eval()
         all_preds = []
-        
-        # We iterate over the list because meta might differ (though unlikely for one task)
-        # or just to handle memory chunks
+
         for i, (dataset_X, dataset_meta) in enumerate(zip(X, meta)):
-            
+            # Filter channels to match training
+            if getattr(self, '_ch_keep', None) is not None:
+                dataset_X = dataset_X[:, self._ch_keep, :]
+
             dataset = SimpleDataset(dataset_X, y=None)
-            collate_fn = self._get_collate_fn(dataset_meta["channel_names"])
-            
+            positions, _ = self._get_channel_coords(dataset_meta["channel_names"])
+            collate_fn = self._get_collate_fn(positions)
+
             loader = DataLoader(
-                dataset, 
-                batch_size=64, 
-                shuffle=False, 
+                dataset,
+                batch_size=64,
+                shuffle=False,
                 collate_fn=collate_fn
             )
-            
+
             with torch.no_grad():
                 for batch in tqdm(loader, desc=f"Predicting batch {i}", leave=False):
                     data = batch["sample"].to(self.device)
                     pos = batch["pos"].to(self.device)
-                    
+
                     output = self.model(data, pos)
                     preds = torch.argmax(output, dim=1).cpu().numpy()
                     all_preds.append(preds)
-                    
+
         return np.concatenate(all_preds, axis=0)

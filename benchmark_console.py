@@ -567,10 +567,11 @@ def main():
             num_classes=num_classes,
             num_labels_per_chunk=num_labels_per_chunk,
             freeze_backbone=True,
+            linear_probe=args.linear_probe,
         )
 
     def make_reve_bci():
-        return REVEBci(freeze_backbone=True)
+        return REVEBci(freeze_backbone=True, linear_probe=args.linear_probe)
 
     def make_luna_clinical(num_classes=2, num_labels_per_chunk=None):
         return LUNAClinical(

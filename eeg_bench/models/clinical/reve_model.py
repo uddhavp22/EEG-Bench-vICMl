@@ -92,6 +92,7 @@ class REVEClinicalModel(AbstractModel):
         num_labels_per_chunk: Optional[int] = None,
         chunk_len_s: Optional[int] = None,
         freeze_backbone: bool = True,
+        linear_probe: bool = False,
     ):
         super().__init__("REVEModel")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -101,23 +102,125 @@ class REVEClinicalModel(AbstractModel):
             self.chunk_len_s = 16
         else:
             self.chunk_len_s = chunk_len_s
-        self.freeze_backbone = freeze_backbone
+        self.linear_probe = linear_probe
+        self.freeze_backbone = freeze_backbone or linear_probe
 
         self.pos_bank = AutoModel.from_pretrained(
             "brain-bzh/reve-positions", trust_remote_code=True
         ).to(self.device)
-        self.model: Optional[REVEClinicalWrapper] = None
 
-    def _coords(self, ch_names: List[str]) -> torch.Tensor:
+        # Build case-insensitive lookup from the bank's own vocabulary
+        bank_names = self.pos_bank.get_all_positions()
+        self._bank_vocab = set(bank_names)
+        self._upper_to_bank = {name.upper(): name for name in bank_names}
+
+        self.model: Optional[REVEClinicalWrapper] = None
+        self._ch_keep = None
+        self.supports_full_dataset_cache = self.freeze_backbone
+
+    def _normalize_ch_name(self, name: str) -> str:
+        """Map a channel/electrode name to the position bank's expected casing."""
+        if name in self._bank_vocab:
+            return name
+        return self._upper_to_bank.get(name.upper(), name)
+
+    def _get_channel_coords(self, ch_names: List[str]):
+        """Get 3D channel coordinates from position bank.
+
+        For bipolar channels (e.g. "FPZ-CZ") the position is approximated as
+        the midpoint of the two constituent electrodes.  Non-electrode channels
+        that the position bank cannot resolve are dropped.
+
+        Returns:
+            Tuple of (positions [C, 3], kept_channel_indices) where
+            kept_channel_indices is None when all channels resolved, or a
+            list of int indices into the original ch_names.
+        """
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
-        positions = self.pos_bank(clean_names)
-        if isinstance(positions, dict):
-            positions = positions.get(
-                "positions", positions.get("coords", positions.get("last_hidden_state"))
+
+        kept = []
+        query_names = []
+
+        for i, name in enumerate(clean_names):
+            if "-" in name:
+                parts = [p.strip() for p in name.split("-", 1)]
+                normed = [self._normalize_ch_name(p) for p in parts]
+                if all(n in self._bank_vocab for n in normed):
+                    kept.append((i, normed))
+                    query_names.extend(normed)
+                else:
+                    missing = [p for p, n in zip(parts, normed) if n not in self._bank_vocab]
+                    print(f"[REVE] Dropping bipolar channel '{name}' — electrode(s) {missing} not in position bank")
+            else:
+                normed = self._normalize_ch_name(name)
+                if normed in self._bank_vocab:
+                    kept.append((i, [normed]))
+                    query_names.append(normed)
+                else:
+                    print(f"[REVE] Dropping channel '{name}' — not in position bank")
+
+        if not kept:
+            raise ValueError("No channels could be resolved by the position bank")
+
+        unique_names = list(dict.fromkeys(query_names))
+        raw_positions = self.pos_bank(unique_names)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
+                "positions", raw_positions.get("coords", raw_positions.get("last_hidden_state"))
             )
-        if positions.dim() == 3:
-            positions = positions.squeeze(0)
-        return positions.float().to(self.device)
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
+
+        elec_to_pos = {name: raw_positions[j].float() for j, name in enumerate(unique_names)}
+
+        positions = torch.zeros(len(kept), 3)
+        for out_i, (_, electrodes) in enumerate(kept):
+            if len(electrodes) == 2:
+                positions[out_i] = (elec_to_pos[electrodes[0]] + elec_to_pos[electrodes[1]]) / 2.0
+            else:
+                positions[out_i] = elec_to_pos[electrodes[0]]
+
+        ch_keep = [idx for idx, _ in kept] if len(kept) < len(clean_names) else None
+        return positions.to(self.device), ch_keep
+
+    @staticmethod
+    def _actual_ch_names(dataset) -> List[str]:
+        """Return the actual channel names stored per-recording in the dataset."""
+        _, _, first_ch = dataset[0]
+        if isinstance(first_ch, list) and len(first_ch) > 0:
+            return first_ch
+        return dataset.ch_names
+
+    @staticmethod
+    def _parse_recording_index(name: str) -> int:
+        for token in name.split("_")[1:]:
+            if token.isdigit():
+                return int(token)
+        return -1
+
+    def _filter_dataset_to_subset(self, dataset, X, subset_indices):
+        """Filter dataset recordings to only those in subset_indices."""
+        global_indices = set()
+        offset = 0
+        for ds_idx, ds in enumerate(X):
+            for idx in subset_indices[ds_idx]:
+                global_indices.add(offset + idx)
+            offset += len(ds)
+        dataset.recording_names = [
+            name for name in dataset.recording_names
+            if self._parse_recording_index(name) in global_indices
+        ]
+        return dataset
+
+    @staticmethod
+    def _gather_subset_labels(labels, subset_indices):
+        subset = []
+        for ds_labels, idxs in zip(labels, subset_indices):
+            if isinstance(ds_labels, np.ndarray):
+                subset.append(ds_labels[idxs])
+            else:
+                subset.append([ds_labels[i] for i in idxs])
+        return subset
 
     def _init_model(self, sample: np.ndarray, coords: torch.Tensor) -> None:
         n_channels, n_timepoints = sample.shape[0], sample.shape[1]
@@ -156,6 +259,8 @@ class REVEClinicalModel(AbstractModel):
             self.model.eval()
             for x, yb, _ in tqdm(train_loader, desc="Cache REVE clinical train", leave=False):
                 x, yb = x.to(self.device), yb.to(self.device)
+                if self._ch_keep is not None:
+                    x = x[:, self._ch_keep, :]
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -185,6 +290,8 @@ class REVEClinicalModel(AbstractModel):
             idx = 0
             for x, yb, _ in tqdm(val_loader, desc="Cache REVE clinical val", leave=False):
                 x, yb = x.to(self.device), yb.to(self.device)
+                if self._ch_keep is not None:
+                    x = x[:, self._ch_keep, :]
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
                 cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -215,6 +322,11 @@ class REVEClinicalModel(AbstractModel):
             optimizer = optim.AdamW(trainable_params, lr=1e-3)
 
             num_epochs = 30
+            patience = 10
+            patience_counter = 0
+            best_val_loss = float("inf")
+            best_model_state = None
+
             for epoch in range(num_epochs):
                 self.model.classifier.train()
                 total_loss = 0.0
@@ -237,6 +349,10 @@ class REVEClinicalModel(AbstractModel):
                         correct += (preds == target).sum().item()
                         total_acc_samples += feats.size(0)
 
+                train_loss = total_loss / total_samples if total_samples else 0.0
+                train_acc = correct / total_acc_samples if total_acc_samples else 0.0
+
+                # Validation
                 val_loss = 0.0
                 val_samples = 0
                 val_correct = 0
@@ -255,21 +371,47 @@ class REVEClinicalModel(AbstractModel):
                             val_correct += (preds == target).sum().item()
                             val_acc_samples += feats.size(0)
 
+                avg_val_loss = val_loss / val_samples if val_samples else 0.0
+                val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+
+                # Early stopping
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                print(f"[Epoch {epoch + 1:02d}/{num_epochs}] "
+                      f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                      f"val_loss={avg_val_loss:.4f} val_acc={val_acc:.4f} | "
+                      f"patience={patience_counter}/{patience}")
+
                 if self.wandb_run and total_samples:
-                    metrics = {f"{self.name}/train_loss": total_loss / total_samples}
+                    metrics = {f"{self.name}/train_loss": train_loss}
                     if total_acc_samples:
-                        metrics[f"{self.name}/train_acc"] = correct / total_acc_samples
+                        metrics[f"{self.name}/train_acc"] = train_acc
                     if val_samples:
-                        metrics[f"{self.name}/val_loss"] = val_loss / val_samples
+                        metrics[f"{self.name}/val_loss"] = avg_val_loss
                         if val_acc_samples:
-                            metrics[f"{self.name}/val_acc"] = val_correct / val_acc_samples
+                            metrics[f"{self.name}/val_acc"] = val_acc
                     wandb_utils.log(metrics, step=epoch + 1)
+
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered at epoch {epoch + 1} (patience={patience})")
+                    break
+
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
         finally:
             cleanup_temp_cache_dir(cache_dir)
 
-    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict]) -> None:
+    def fit(self, X: List[np.ndarray], y: List[np.ndarray], meta: List[Dict],
+            subset_fraction: float = 1.0, subset_seed: Optional[int] = None,
+            subset_indices: Optional[List[List[int]]] = None) -> None:
         task_name = meta[0]["task_name"]
 
+        # Create training dataset (always from full X for cache hit)
         dataset_train = make_dataset_2(
             X, y, meta, task_name, self.name, self.chunk_len_s, is_train=True, use_cache=True
         )
@@ -282,19 +424,30 @@ class REVEClinicalModel(AbstractModel):
             print("[Warning] Dataset empty after retries. Skipping training.")
             return
 
-        dataset_train, dataset_val = dataset_train.split_train_val(0.2)
+        # Filter to subset if provided (supports_full_dataset_cache path)
+        if subset_indices is not None:
+            self._filter_dataset_to_subset(dataset_train, X, subset_indices)
+            y_for_weights = self._gather_subset_labels(y, subset_indices)
+        else:
+            y_for_weights = y
+
+        dataset_train, dataset_val = dataset_train.split_train_val(0.15)
         if len(dataset_train) == 0:
             print("[Warning] Training split is empty. Skipping training.")
             return
 
-        coords_train = self._coords(dataset_train.ch_names)
-        coords_val = self._coords(dataset_val.ch_names)
+        # Get channel coordinates; drop channels the position bank can't resolve
+        coords_train, ch_keep = self._get_channel_coords(self._actual_ch_names(dataset_train))
+        coords_val, _ = self._get_channel_coords(self._actual_ch_names(dataset_val))
+        self._ch_keep = ch_keep
 
         sample_data, _, _ = dataset_train[0]
+        if self._ch_keep is not None:
+            sample_data = sample_data[self._ch_keep, :]
         if self.model is None:
             self._init_model(sample_data, coords_train)
 
-        class_weights = torch.tensor(calc_class_weights(y, task_name)).to(self.device)
+        class_weights = torch.tensor(calc_class_weights(y_for_weights, task_name)).to(self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
         train_loader = DataLoader(
@@ -304,18 +457,24 @@ class REVEClinicalModel(AbstractModel):
             dataset_val, batch_size=64, shuffle=False, num_workers=8, pin_memory=True
         )
 
-
-        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        optimizer = optim.AdamW(trainable_params, lr=1e-3)
-
-        if self.freeze_backbone:
+        if self.linear_probe:
             self._fit_linear_probe_cached(train_loader, val_loader, coords_train, coords_val)
             return
 
+        # Training loop with early stopping
+        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+        optimizer = optim.AdamW(trainable_params, lr=1e-3)
+
         num_epochs = 30
+        patience = 10
+        patience_counter = 0
+        best_val_loss = float("inf")
+        best_model_state = None
+
         for epoch in range(num_epochs):
             self.model.train()
-            self.model.backbone.eval()
+            if self.freeze_backbone:
+                self.model.backbone.eval()
             total_loss = 0.0
             total_samples = 0
             correct = 0
@@ -323,6 +482,8 @@ class REVEClinicalModel(AbstractModel):
 
             for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
                 x, yb = x.to(self.device), yb.to(self.device)
+                if self._ch_keep is not None:
+                    x = x[:, self._ch_keep, :]
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -342,14 +503,20 @@ class REVEClinicalModel(AbstractModel):
                     correct += (preds == target).sum().item()
                     total_acc_samples += x.size(0)
 
+            train_loss = total_loss / total_samples if total_samples else 0.0
+            train_acc = correct / total_acc_samples if total_acc_samples else 0.0
+
+            # Validation
             val_loss = 0.0
             val_samples = 0
             val_correct = 0
             val_acc_samples = 0
             self.model.eval()
             with torch.no_grad():
-                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}"):
+                for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}", leave=False):
                     x, yb = x.to(self.device), yb.to(self.device)
+                    if self._ch_keep is not None:
+                        x = x[:, self._ch_keep, :]
                     if not self.model.is_multilabel_task and yb.dim() > 1:
                         yb = yb.argmax(dim=1)
                     cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -365,15 +532,39 @@ class REVEClinicalModel(AbstractModel):
                         val_correct += (preds == target).sum().item()
                         val_acc_samples += x.size(0)
 
+            avg_val_loss = val_loss / val_samples if val_samples else 0.0
+            val_acc = val_correct / val_acc_samples if val_acc_samples else 0.0
+
+            # Early stopping check
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            print(f"[Epoch {epoch + 1:02d}/{num_epochs}] "
+                  f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                  f"val_loss={avg_val_loss:.4f} val_acc={val_acc:.4f} | "
+                  f"patience={patience_counter}/{patience}")
+
             if self.wandb_run and total_samples:
-                metrics = {f"{self.name}/train_loss": total_loss / total_samples}
+                metrics = {f"{self.name}/train_loss": train_loss}
                 if total_acc_samples:
-                    metrics[f"{self.name}/train_acc"] = correct / total_acc_samples
+                    metrics[f"{self.name}/train_acc"] = train_acc
                 if val_samples:
-                    metrics[f"{self.name}/val_loss"] = val_loss / val_samples
+                    metrics[f"{self.name}/val_loss"] = avg_val_loss
                     if val_acc_samples:
-                        metrics[f"{self.name}/val_acc"] = val_correct / val_acc_samples
+                        metrics[f"{self.name}/val_acc"] = val_acc
                 wandb_utils.log(metrics, step=epoch + 1)
+
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch + 1} (patience={patience})")
+                break
+
+        # Restore best model
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
 
     @torch.no_grad()
     def predict(self, X: List[np.ndarray], meta: List[Dict]) -> np.ndarray:
@@ -392,13 +583,15 @@ class REVEClinicalModel(AbstractModel):
         test_loader = DataLoader(
             dataset_test, batch_size=64 if self.chunk_len_s else 1, shuffle=False, num_workers=0
         )
-        coords = self._coords(dataset_test.ch_names)
+        coords, _ = self._get_channel_coords(self._actual_ch_names(dataset_test))
         self.model.eval()
 
         predictions = []
         indices = []
         for x, idx, _ in tqdm(test_loader, desc="Predicting"):
             x = x.to(self.device)
+            if self._ch_keep is not None:
+                x = x[:, self._ch_keep, :]
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
             logits = self.model(x, cb)
             pred = torch.argmax(logits, dim=1)
