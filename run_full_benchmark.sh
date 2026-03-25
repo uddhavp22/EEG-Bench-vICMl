@@ -30,6 +30,7 @@ python run_experiments.py \
     --gpus 3 \
     --workers-per-gpu 2 \
     --log-dir "$LOG_DIR" \
+    --resume \
     2>&1 | tee "$SUMMARY_LOG"
 
 echo ""
@@ -41,6 +42,7 @@ python run_experiments.py \
     --gpus 3 \
     --workers-per-gpu 2 \
     --log-dir "$LOG_DIR" \
+    --resume \
     2>&1 | tee -a "$SUMMARY_LOG"
 
 echo ""
