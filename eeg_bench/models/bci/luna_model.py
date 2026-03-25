@@ -298,69 +298,62 @@ class LUNABCIModel(AbstractModel):
             logger.error(f"Failed to load position bank: {e}")
             raise
 
+        # Build case-insensitive lookup for position bank vocabulary
+        bank_names = self.pos_bank.get_all_positions()
+        self._bank_vocab = set(bank_names)
+        self._upper_to_bank = {name.upper(): name for name in bank_names}
+
         self.model: Optional[LUNABCIWrapper] = None
         self.channel_names: List[str] = []
         self.target_timepoints: Optional[int] = None
 
+    def _normalize_ch_name(self, name: str) -> str:
+        """Map a channel name to the position bank's expected casing."""
+        if name in self._bank_vocab:
+            return name
+        return self._upper_to_bank.get(name.upper(), name)
+
     def _get_channel_coords(self, channel_names: List[str]) -> tuple:
         """Get 3D channel coordinates from position bank.
 
-        Args:
-            channel_names: List of channel names
+        Uses vocabulary-based pre-checking: names are normalized to the
+        position bank's expected casing and checked against its vocabulary
+        *before* any queries, avoiding silent drops or crashes.
 
         Returns:
             Tuple of (positions [C, 3], ch_keep) where ch_keep is None
             when all channels resolved, or a list of int indices for the
             channels that the position bank recognized.
         """
-        # Get positions from position bank
-        raw_positions = self.pos_bank(channel_names)
-
-        # Handle different output formats from position bank
-        if isinstance(raw_positions, dict):
-            raw_positions = raw_positions.get(
-                "positions",
-                raw_positions.get("coords", raw_positions.get("last_hidden_state"))
-            )
-
-        # Ensure correct shape: [C, 3]
-        if raw_positions.dim() == 3:
-            raw_positions = raw_positions.squeeze(0)
-
-        # Important: keep positions on CPU. This collate_fn runs inside
-        # DataLoader worker processes, and touching CUDA there can trigger
-        # "CUDA error: initialization error".
-        positions = raw_positions.detach().float().cpu()
-
-        # The position bank silently drops unknown channels. Verify that
-        # we got exactly as many positions as input channels.
-        if positions.shape[0] == len(channel_names):
-            return positions, None
-
-        # Mismatch — resolve per-channel to find which were kept
-        logger.warning(
-            "Position bank returned %d positions for %d channels — "
-            "resolving per-channel to identify kept channels",
-            positions.shape[0], len(channel_names),
-        )
+        # Normalize and pre-check each channel against bank vocabulary
         kept_indices = []
-        kept_positions = []
+        query_names = []
         for i, name in enumerate(channel_names):
-            pos = self.pos_bank([name])
-            if isinstance(pos, dict):
-                pos = pos.get("positions", pos.get("coords", pos.get("last_hidden_state")))
-            if pos.dim() == 3:
-                pos = pos.squeeze(0)
-            if pos.shape[0] == 1:
+            normed = self._normalize_ch_name(name)
+            if normed in self._bank_vocab:
                 kept_indices.append(i)
-                kept_positions.append(pos[0].detach().float().cpu())
+                query_names.append(normed)
             else:
                 logger.warning("Dropping channel '%s' — not in position bank", name)
 
         if not kept_indices:
             raise ValueError("No channels could be resolved by the position bank")
 
-        return torch.stack(kept_positions), kept_indices
+        # Batch-query only known names (guaranteed no drops)
+        raw_positions = self.pos_bank(query_names)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
+                "positions",
+                raw_positions.get("coords", raw_positions.get("last_hidden_state"))
+            )
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
+
+        # Keep on CPU — collate_fn runs in DataLoader workers
+        positions = raw_positions.detach().float().cpu()
+
+        ch_keep = kept_indices if len(kept_indices) < len(channel_names) else None
+        return positions, ch_keep
 
     def _get_collate_fn(self, channel_names: List[str]):
         """Creates the collate function for LUNA that includes position embeddings.

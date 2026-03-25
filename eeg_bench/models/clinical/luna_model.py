@@ -314,6 +314,11 @@ class LUNAClinicalModel(AbstractModel):
             logger.error(f"Failed to load position bank: {e}")
             raise
 
+        # Build case-insensitive lookup from the bank's own vocabulary
+        bank_names = self.pos_bank.get_all_positions()
+        self._bank_vocab = set(bank_names)
+        self._upper_to_bank = {name.upper(): name for name in bank_names}
+
         self.model: Optional[LUNAClinicalWrapper] = None
         self.supports_full_dataset_cache = self.freeze_backbone
 
@@ -348,101 +353,80 @@ class LUNAClinicalModel(AbstractModel):
                 subset.append([ds_labels[i] for i in idxs])
         return subset
 
+    def _normalize_ch_name(self, name: str) -> str:
+        """Map a channel/electrode name to the position bank's expected casing."""
+        if name in self._bank_vocab:
+            return name
+        return self._upper_to_bank.get(name.upper(), name)
+
     def _get_channel_coords(self, ch_names: List[str]):
         """Get 3D channel coordinates from position bank.
 
-        For bipolar channels (e.g. "F3-C3") the position is approximated as
+        For bipolar channels (e.g. "FPZ-CZ") the position is approximated as
         the midpoint of the two constituent electrodes.  Non-electrode channels
         (e.g. "EOGh") that the position bank cannot resolve are dropped.
 
-        Args:
-            ch_names: List of channel names
+        Uses vocabulary-based pre-checking: electrode names are normalized to
+        the position bank's expected casing and checked against its vocabulary
+        *before* any queries, avoiding silent drops or crashes.
 
         Returns:
             Tuple of (positions [C, 3], kept_channel_indices) where
             kept_channel_indices is None when all channels resolved, or a
-            list of int indices into the original ch_names for the channels
-            that survived position-bank lookup.
+            list of int indices into the original ch_names.
         """
         # Clean channel names (remove 'EEG' prefix if present)
         clean_names = [c.replace("EEG", "").strip() for c in ch_names]
 
-        # Check if any bipolar channels are present
-        has_bipolar = any("-" in name for name in clean_names)
+        # For each channel, extract electrodes, normalize, and pre-check
+        kept = []          # (original_index, normalized_electrodes)
+        query_names = []   # flat list of electrode names to batch-query
 
-        if not has_bipolar:
-            # All unipolar — try fast path (position bank for all at once)
-            positions = self.pos_bank(clean_names)
-            if isinstance(positions, dict):
-                positions = positions.get(
-                    "positions",
-                    positions.get("coords", positions.get("last_hidden_state"))
-                )
-            if positions.dim() == 3:
-                positions = positions.squeeze(0)
-            # The position bank silently drops unknown channels, so verify
-            # that we got exactly as many positions as input channels.
-            if positions.shape[0] == len(clean_names):
-                return positions.float().to(self.device), None
-            # Mismatch — fall through to per-channel resolution below
-            logger.warning(
-                "Position bank returned %d positions for %d channels — "
-                "falling back to per-channel resolution",
-                positions.shape[0], len(clean_names),
-            )
-            has_bipolar = True  # force per-channel path
-
-        # Mixed or all-bipolar: resolve each unique electrode individually
-        all_electrodes: set = set()
-        for name in clean_names:
-            if "-" in name:
-                a, b = name.split("-", 1)
-                all_electrodes.update([a.strip(), b.strip()])
-            else:
-                all_electrodes.add(name)
-
-        # Query position bank one electrode at a time so we can detect
-        # which ones the bank doesn't know (it silently drops unknowns).
-        elec_to_pos: dict = {}
-        for elec in sorted(all_electrodes):
-            pos = self.pos_bank([elec])
-            if isinstance(pos, dict):
-                pos = pos.get("positions", pos.get("coords", pos.get("last_hidden_state")))
-            if pos.dim() == 3:
-                pos = pos.squeeze(0)
-            if pos.shape[0] == 1:
-                elec_to_pos[elec] = pos[0].float()
-            else:
-                logger.warning("Position bank has no entry for electrode '%s' — dropping channels that use it", elec)
-
-        # Keep only channels whose electrodes all resolved
-        kept = []  # (original_index, name)
         for i, name in enumerate(clean_names):
             if "-" in name:
-                a, b = name.split("-", 1)
-                if a.strip() in elec_to_pos and b.strip() in elec_to_pos:
-                    kept.append((i, name))
+                parts = [p.strip() for p in name.split("-", 1)]
+                normed = [self._normalize_ch_name(p) for p in parts]
+                if all(n in self._bank_vocab for n in normed):
+                    kept.append((i, normed))
+                    query_names.extend(normed)
                 else:
-                    logger.warning("Dropping bipolar channel '%s' — electrode(s) not in position bank", name)
+                    missing = [p for p, n in zip(parts, normed) if n not in self._bank_vocab]
+                    logger.warning("Dropping bipolar channel '%s' — electrode(s) %s not in position bank", name, missing)
             else:
-                if name in elec_to_pos:
-                    kept.append((i, name))
+                normed = self._normalize_ch_name(name)
+                if normed in self._bank_vocab:
+                    kept.append((i, [normed]))
+                    query_names.append(normed)
                 else:
                     logger.warning("Dropping channel '%s' — not in position bank", name)
 
         if not kept:
             raise ValueError("No channels could be resolved by the position bank")
 
-        # Build position tensor for kept channels only
-        positions = torch.zeros(len(kept), 3)
-        for out_i, (_, name) in enumerate(kept):
-            if "-" in name:
-                a, b = name.split("-", 1)
-                positions[out_i] = (elec_to_pos[a.strip()] + elec_to_pos[b.strip()]) / 2.0
-            else:
-                positions[out_i] = elec_to_pos[name]
+        # Batch-query only unique known electrode names (guaranteed no drops)
+        unique_names = list(dict.fromkeys(query_names))  # preserve order, dedupe
+        raw_positions = self.pos_bank(unique_names)
+        if isinstance(raw_positions, dict):
+            raw_positions = raw_positions.get(
+                "positions",
+                raw_positions.get("coords", raw_positions.get("last_hidden_state"))
+            )
+        if raw_positions.dim() == 3:
+            raw_positions = raw_positions.squeeze(0)
 
-        return positions.to(self.device), [idx for idx, _ in kept]
+        # Map electrode name → position vector
+        elec_to_pos = {name: raw_positions[j].float() for j, name in enumerate(unique_names)}
+
+        # Build position tensor for kept channels
+        positions = torch.zeros(len(kept), 3)
+        for out_i, (_, electrodes) in enumerate(kept):
+            if len(electrodes) == 2:
+                positions[out_i] = (elec_to_pos[electrodes[0]] + elec_to_pos[electrodes[1]]) / 2.0
+            else:
+                positions[out_i] = elec_to_pos[electrodes[0]]
+
+        ch_keep = [idx for idx, _ in kept] if len(kept) < len(clean_names) else None
+        return positions.to(self.device), ch_keep
 
     @staticmethod
     def _actual_ch_names(dataset) -> List[str]:
