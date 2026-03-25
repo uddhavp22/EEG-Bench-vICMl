@@ -98,6 +98,7 @@ class ExperimentConfig:
     linear_probe: bool
     attentive_probe: bool
     eval_noise_config: Optional[Dict[str, Any]] = None
+    seed: Optional[int] = 42  # Default seed for reproducibility
 
     def to_cmd_args(self) -> List[str]:
         """Convert to benchmark_console.py CLI arguments."""
@@ -109,6 +110,7 @@ class ExperimentConfig:
             "--no-wandb",
             "--result-prefix", self.model_name,
             "--checkpoint-id", self.checkpoint_id,
+            "--seed", str(self.seed)
         ]
         if self.linear_probe:
             args.extend(["--linear-probe", "--lejepa-freeze-encoder"])
@@ -276,6 +278,9 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
     # Remove epoch_sweep_tasks from final_only to avoid duplicates
     final_only_tasks = [t for t in final_only_tasks if t not in epoch_sweep_tasks]
 
+    #get seeds
+    seeds = config["training"].get("seeds", [42])  # Default to
+
     print(f"\nTask configuration:")
     print(f"  Epoch sweep tasks ({len(epoch_sweep_tasks)}): {epoch_sweep_tasks}")
     print(f"  Final only tasks ({len(final_only_tasks)}): {final_only_tasks}")
@@ -311,33 +316,37 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
         for task in epoch_sweep_tasks:
             for ckpt_id, ckpt_path in epoch_checkpoints.items():
                 for pct in config["training"]["data_percentages"]:
-                    experiments.append(ExperimentConfig(
-                        model_name=model_name,
-                        base_path=base_path,
-                        checkpoint_path=ckpt_path,
-                        checkpoint_id=ckpt_id,
-                        task=task,
-                        percentage=pct,
-                        linear_probe=config["training"]["linear_probe"],
-                        attentive_probe=config["training"]["attentive_probe"],
-                        eval_noise_config=config.get("eval_noise"),
-                    ))
+                    for seed in seeds:
+                        experiments.append(ExperimentConfig(
+                            model_name=model_name,
+                            base_path=base_path,
+                            checkpoint_path=ckpt_path,
+                            checkpoint_id=ckpt_id,
+                            task=task,
+                            percentage=pct,
+                            linear_probe=config["training"]["linear_probe"],
+                            attentive_probe=config["training"]["attentive_probe"],
+                            eval_noise_config=config.get("eval_noise"),
+                            seed=seed
+                        ))
 
         # Generate experiments for final_only tasks (last.ckpt only)
         for task in final_only_tasks:
             for ckpt_id, ckpt_path in last_only.items():
                 for pct in config["training"]["data_percentages"]:
-                    experiments.append(ExperimentConfig(
-                        model_name=model_name,
-                        base_path=base_path,
-                        checkpoint_path=ckpt_path,
-                        checkpoint_id=ckpt_id,
-                        task=task,
-                        percentage=pct,
-                        linear_probe=config["training"]["linear_probe"],
-                        attentive_probe=config["training"]["attentive_probe"],
-                        eval_noise_config=config.get("eval_noise") if pct == 1.0 else None,
-                    ))
+                    for seed in seeds:
+                        experiments.append(ExperimentConfig(
+                            model_name=model_name,
+                            base_path=base_path,
+                            checkpoint_path=ckpt_path,
+                            checkpoint_id=ckpt_id,
+                            task=task,
+                            percentage=pct,
+                            linear_probe=config["training"]["linear_probe"],
+                            attentive_probe=config["training"]["attentive_probe"],
+                            eval_noise_config=config.get("eval_noise") if pct == 1.0 else None,
+                            seed=seed
+                        ))
 
     # Sort experiments to maximize cache hits:
     # 1. Group by checkpoint (same embeddings)
@@ -368,8 +377,12 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
         filename = os.path.basename(f)
         
         # Match pattern: *_LeJEPA{Type}_ckpt_{checkpoint_id}[_pctXX][_LP]_{timestamp}.json
+        # match = re.match(
+        #     r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_ATTN)?_(\d{8}_\d{6})\.json",
+        #     filename
+        # )
         match = re.match(
-            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_ATTN)?_(\d{8}_\d{6})\.json",
+            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_ATTN)?_(\d{8}_\d{6})\.json",
             filename
         )
         if match:

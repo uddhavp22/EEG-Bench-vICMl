@@ -1,0 +1,94 @@
+# Full Benchmark - Compare multiple model sizes across all tasks
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/full_benchmark.yaml
+#
+# This config runs the full benchmark with multiple model sizes,
+# using only the final checkpoint for each model.
+
+models:
+  # lejepa_base_global_proj: #technically this is the old version!
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+  #   version: 0
+  # lejepa_base_global_projv2:  
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+  #   version: 2
+  lejepa_base_global_projv2_smallds: #laya -s 
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+    version: 4
+  # lejeba_base_global_projv2_smallds_20k: #laya -s with more steps (not reported)
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_10pct
+  #   version: 3
+  
+  lejepa_base_global_projv2_02sig_FULL: #Laya -b reported in first submission 
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_02sigreg/
+    version: 0
+
+  lejepa_base_global_projv2_02sig_FULL: #Laya -b reported in first submission 
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_02sigreg/
+    version: 2
+
+  # lejepa_base_global_projv2_02sig_FULL_v2: #laya-b updated
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_02_longrun/
+  #   version: 4
+
+  # lejepa_base_global_projv2_05sig_FULL_v2: #laya-b updated
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_05_longrun/
+  #   version: 0
+  
+  # lejepa_vitb_global_proj_05sig_FULL_v2: #laya-b updated
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_vitb_proj_longrun/
+  #   version: 2
+
+  # lejepa_base_global_projv2_05sig_FULL_v2_longer: #500K steps
+  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_05_longrun/
+  #   version: 2
+
+  lejepa_base_global_projv2_05sig_FULL_v3: #laya-b updated with weight decay setup
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v3_lejepa_pretraining_global_v2mixer_proj_05_longrun/
+    version: 0
+
+  lejepa_base_global_projv2_05sig_FULL_v2_bigger_pred: #laya-b updated with bigger predictor
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_05_longrun_biggerpred/
+    version: 0
+
+  lejepa_base_global_projv2_05sig_FULL_v2_bigger_pred: #laya-b updated with bigger predictor
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v3_lejepa_pretraining_global_v2mixer_proj_05_longrun_biggerpred/
+    version: 0
+
+  
+  # Add more model sizes as needed:
+  # lejepa_large:
+  #   base_path: /path/to/your/lejepa_large
+  #   version: 0 
+
+checkpoints:
+  steps: [10000, 20000, 30000]
+  include_last: true
+
+tasks:
+  epoch_sweep: #[]
+    # - abnormal      # Clinical task
+    - all  # Run all 14 tasks
+  final_only:
+    - all  # Run all 14 tasks
+
+training:
+  linear_probe: true
+  data_percentages: [1.0] #, 0.1, 0.25, 0.5]
+  seeds: [42, 123, 456, 789, 101]
+
+execution:
+  gpus: 1
+  workers_per_gpu: 1
+  log_dir: final_logs/lejepa_full_benchmark/rerunning_laya
+  results_dir: results_new/rerunning_laya
+
+# eval_noise:
+#   noise_types: [gaussian, one_over_f, emg, channel_dropout]
+#   levels_db: [30, 20, 10, 0]
+#   channel_dropout_prob: 0.1
+#   sfreq: 200
+#   one_over_f_band: [0.5, 40]
+#   emg_band: [30, 100]
+#   seed: 123
+#   include_clean: true

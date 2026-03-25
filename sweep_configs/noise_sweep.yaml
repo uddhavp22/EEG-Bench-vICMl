@@ -1,15 +1,41 @@
 # sweep_configs/noise_sweep.yaml
+# models:
+#   lejepa_base_global_projv2_smallds:
+#     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
+#     version: 4
+#   lejepa_base_global_projv2_02sig_FULL:
+#     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_02sigreg/
+#     version: 2
+# checkpoints:
+#   steps: []
+#   include_last: true
+#   auto_discover: false
+
+
 models:
-  lejepa_base_global_projv2_smallds:
+  lejepa_base_global_projv2_smallds: #laya -s 
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj/
     version: 4
-  lejepa_base_global_projv2_02sig_FULL:
+
+  lejepa_base_global_projv2_02sig_FULL_v0: #first half of laya-b reported in first submission
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_02sigreg/
+    version: 0
+
+  lejepa_base_global_projv2_02sig_FULL_v2: #Laya -b reported in first submission 
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_02sigreg/
     version: 2
+
+  lejepa_base_global_projv2_05sig_FULL_v3: #laya-b updated with weight decay setup
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v3_lejepa_pretraining_global_v2mixer_proj_05_longrun/
+    version: 0
+
+  lejepa_base_global_projv2_05sig_FULL_v2_bigger_pred: #laya-b updated with bigger predictor
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_v2/v2_lejepa_pretraining_global_v2mixer_proj_05_longrun_biggerpred/
+    version: 0
+
 checkpoints:
-  steps: []
+  steps: [10000, 20000, 30000]
   include_last: true
-  auto_discover: false
 
 tasks:
   epoch_sweep: []
@@ -23,7 +49,7 @@ training:
 execution:
   gpus: 2
   workers_per_gpu: 2
-  log_dir: logs/lejepa_noise_sweep
+  log_dir: rebuttal_logs/lejepa_noise_sweep
 
 # Run one noise type at a time by editing noise_types below
 eval_noise:
