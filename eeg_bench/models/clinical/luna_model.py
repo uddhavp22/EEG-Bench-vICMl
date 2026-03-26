@@ -205,6 +205,12 @@ class LUNAClinicalWrapper(nn.Module):
             x_latent = self.backbone.norm(x_tokens)
             return x_latent.mean(dim=1)
 
+    def classify_features(self, features: torch.Tensor) -> torch.Tensor:
+        """Classify pre-extracted features using whichever head is active."""
+        if self.linear_probe and self.linear_probe_head is not None:
+            return self.linear_probe_head(features)
+        return self.backbone.classifier(features)
+
     def forward(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Forward pass through LUNA model.
 
@@ -572,7 +578,7 @@ class LUNAClinicalModel(AbstractModel):
             torch.cat(chunked_cb, dim=0),
         )
 
-    def _fit_linear_probe_cached(
+    def _fit_cached(
         self,
         dataset_train,
         dataset_val,
@@ -580,7 +586,7 @@ class LUNAClinicalModel(AbstractModel):
         coords_val: torch.Tensor,
         class_weights: torch.Tensor,
     ) -> None:
-        assert self.model is not None and self.model.linear_probe_head is not None
+        assert self.model is not None
 
         # configure_torch_backend_for_speed()
 
@@ -706,7 +712,8 @@ class LUNAClinicalModel(AbstractModel):
                     num_workers=0
                 )
 
-            optimizer = optim.AdamW(self.model.linear_probe_head.parameters(), lr=1e-6, weight_decay=0.01)
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
             criterion = nn.CrossEntropyLoss(weight=class_weights)
             max_epochs = 30
             steps_per_epoch = max(1, len(train_feat_loader))
@@ -725,7 +732,8 @@ class LUNAClinicalModel(AbstractModel):
             best_model_state = None
 
             for epoch in range(1, max_epochs + 1):
-                self.model.linear_probe_head.train()
+                self.model.train()
+                self.model.backbone.eval()  # keep backbone frozen
                 total_loss = 0.0
                 total_samples = 0
                 correct = 0
@@ -738,7 +746,7 @@ class LUNAClinicalModel(AbstractModel):
                         yb = yb.argmax(dim=1)
 
                     optimizer.zero_grad()
-                    logits = self.model.linear_probe_head(feats)
+                    logits = self.model.classify_features(feats)
 
                     # Multilabel: reshape [B, L*C] -> [B*L, C] and flatten labels
                     if self.model.is_multilabel_task and self.model.num_labels_per_chunk:
@@ -772,7 +780,7 @@ class LUNAClinicalModel(AbstractModel):
                 val_loss = 0.0
                 val_acc = 0.0
                 if val_feat_loader is not None:
-                    self.model.linear_probe_head.eval()
+                    self.model.eval()
                     val_total = 0
                     val_correct = 0
                     val_samples = 0
@@ -782,7 +790,7 @@ class LUNAClinicalModel(AbstractModel):
                             yb = yb.to(self.device)
                             if not self.model.is_multilabel_task and yb.dim() > 1:
                                 yb = yb.argmax(dim=1)
-                            logits = self.model.linear_probe_head(feats)
+                            logits = self.model.classify_features(feats)
                             if self.model.is_multilabel_task and self.model.num_labels_per_chunk:
                                 logits_flat = logits.view(-1, self.model.num_classes)
                                 yb_flat = yb.view(-1).long()
@@ -1034,8 +1042,8 @@ class LUNAClinicalModel(AbstractModel):
         coords_val, _ = self._get_channel_coords(self._actual_ch_names(dataset_val))
         self._ch_keep = ch_keep  # None when all channels survived, else list of indices
 
-        if self.linear_probe:
-            self._fit_linear_probe_cached(dataset_train, dataset_val, coords_train, coords_val, class_weights)
+        if self.freeze_backbone:
+            self._fit_cached(dataset_train, dataset_val, coords_train, coords_val, class_weights)
             return
 
         # Setup optimizer and scheduler (following EEGLejepa pattern)
