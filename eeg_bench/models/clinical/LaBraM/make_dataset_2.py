@@ -18,11 +18,20 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
         f"{task_name}_{model_name}_{meta[0]['name'].replace(' ', '_')}_{chunk_len_s}_{split_key}_{sum(len(obj) for obj in X)}.h5",
     )
     if os.path.exists(h5_path) and use_cache:
-        print(f"[Info] Dataset already exists at {h5_path}. Loading existing dataset.")
-        if model_name == "NeuroGPTModel":
-            return NeuroGPTDataset2(h5_path, is_train, get_channels(task_name), **kwargs)
+        # Validate h5 file is not corrupted before trusting cache
+        try:
+            with h5py.File(h5_path, 'r') as hf:
+                if '/recordings' not in hf or len(hf['/recordings']) == 0:
+                    raise ValueError("Empty or missing /recordings group")
+        except Exception as e:
+            print(f"[Warning] Cached h5 is corrupted ({e}). Deleting and rebuilding: {h5_path}")
+            os.remove(h5_path)
         else:
-            return LaBraMDataset2(h5_path, is_train, get_channels(task_name))
+            print(f"[Info] Dataset already exists at {h5_path}. Loading existing dataset.")
+            if model_name == "NeuroGPTModel":
+                return NeuroGPTDataset2(h5_path, is_train, get_channels(task_name), **kwargs)
+            else:
+                return LaBraMDataset2(h5_path, is_train, get_channels(task_name))
 
     if not os.path.exists(h5_folder):
         os.makedirs(h5_folder)

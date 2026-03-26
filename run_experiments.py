@@ -203,25 +203,45 @@ def main():
     # Run larger percentages first to reduce tail time
     experiments = sorted(experiments, key=lambda x: x[2], reverse=True)
 
+    # Split into Phase 1 (cache population) and Phase 2 (remaining seeds).
+    # Phase 1 runs one seed per (model, task, pct) to build h5 caches.
+    # Phase 2 runs remaining seeds — all caches are warm, safe to parallelize.
+    seen_combos = set()
+    phase1 = []
+    phase2 = []
+    for exp in experiments:
+        model, task, pct, seed = exp
+        combo = (model, task, pct)
+        if combo not in seen_combos:
+            seen_combos.add(combo)
+            phase1.append(exp)
+        else:
+            phase2.append(exp)
+
     gpu_slots = [gpu_id for gpu_id in range(args.gpus) for _ in range(args.workers_per_gpu)]
-    jobs = [(model, task, pct, seed, args.log_dir, args.dry_run) for model, task, pct, seed in experiments]
-
-    # Run experiments in parallel
-    print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
     start_time = time.time()
+    results = []
 
-    with Manager() as manager:
-        gpu_queue = manager.Queue()
-        for gpu_id in gpu_slots:
-            gpu_queue.put(gpu_id)
-        with Pool(total_workers) as pool:
-            results = []
-            for result in tqdm(
-                pool.imap_unordered(run_experiment, [job + (gpu_queue,) for job in jobs]),
-                total=len(jobs),
-                desc="Experiments",
-            ):
-                results.append(result)
+    def run_phase(phase_experiments, phase_name):
+        if not phase_experiments:
+            return
+        jobs = [(model, task, pct, seed, args.log_dir, args.dry_run)
+                for model, task, pct, seed in phase_experiments]
+        print(f"\n=== {phase_name}: {len(jobs)} experiments with {total_workers} workers ===\n")
+        with Manager() as manager:
+            gpu_queue = manager.Queue()
+            for gpu_id in gpu_slots:
+                gpu_queue.put(gpu_id)
+            with Pool(total_workers) as pool:
+                for result in tqdm(
+                    pool.imap_unordered(run_experiment, [job + (gpu_queue,) for job in jobs]),
+                    total=len(jobs),
+                    desc=phase_name,
+                ):
+                    results.append(result)
+
+    run_phase(phase1, "Phase 1 (cache population)")
+    run_phase(phase2, "Phase 2 (remaining seeds)")
 
     elapsed = time.time() - start_time
 
