@@ -14,10 +14,6 @@ from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_te
 
 
 
-
-# Assuming AbstractModel is available in your path
-# from abstract_model import AbstractModel 
-
 class SimpleDataset(Dataset):
     """
     A simple wrapper to convert List[np.ndarray] into a Torch Dataset.
