@@ -84,7 +84,7 @@ def get_completed_experiments(results_dir="results/raw"):
 
 def run_experiment(args):
     """Run a single experiment in a subprocess."""
-    model, task, pct, seed, log_dir, dry_run, gpu_queue = args
+    model, task, pct, seed, log_dir, dry_run, no_linear_probe, gpu_queue = args
     gpu_id = gpu_queue.get()
 
     env = os.environ.copy()
@@ -96,9 +96,10 @@ def run_experiment(args):
         "--task", task,
         "--data-percentages", str(pct),
         "--seed", str(seed),
-        "--linear-probe",
         "--no-wandb"
     ]
+    if not no_linear_probe:
+        cmd.append("--linear-probe")
 
     log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_seed{seed}_gpu{gpu_id}.log")
 
@@ -225,7 +226,7 @@ def main():
     def run_phase(phase_experiments, phase_name):
         if not phase_experiments:
             return
-        jobs = [(model, task, pct, seed, args.log_dir, args.dry_run)
+        jobs = [(model, task, pct, seed, args.log_dir, args.dry_run, args.no_linear_probe)
                 for model, task, pct, seed in phase_experiments]
         print(f"\n=== {phase_name}: {len(jobs)} experiments with {total_workers} workers ===\n")
         with Manager() as manager:
