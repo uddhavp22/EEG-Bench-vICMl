@@ -99,6 +99,7 @@ class ConcreteLeJEPABCI(nn.Module):
         if config_path is not None:
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
+                pretrain_config['model']['name'] = 'EEGLEJEPA' #force for MAE.
             cfg = EEGLEJEPAConfig(**pretrain_config["model"])
             print("[LeJEPABCI] Loaded Config!")
         else:
