@@ -64,6 +64,8 @@ class LaBraMDataset2(Dataset):
         self.is_train_set = is_train_set
         self.ch_names = channels
         self.sfreq = sfreq
+        # Lazily opened per-worker HDF5 handle (opened on first __getitem__ in each worker)
+        self._hf = None
 
         if recording_names is None:
             # Get list of all recording names from the HDF5 file
@@ -74,17 +76,30 @@ class LaBraMDataset2(Dataset):
 
     def __len__(self):
         return len(self.recording_names)
-    
+
+    def _get_hf(self):
+        if self._hf is None:
+            # Important: open lazily so each worker gets its own file handle post-fork.
+            self._hf = h5py.File(self.h5_path, 'r')
+        return self._hf
+
+    def __del__(self):
+        try:
+            if self._hf is not None:
+                self._hf.close()
+        except Exception:
+            pass
+
     def __getitem__(self, idx):
         rec_name = self.recording_names[idx]
-        
+
         channels = -1
-        with h5py.File(self.h5_path, 'r') as hf:
-            recording_grp = hf[f'/recordings/{rec_name}']
-            data = recording_grp['data'][:]
-            label = recording_grp['label'][()] if 'label' in recording_grp else None
-            if 'channels' in recording_grp:
-                channels = [ch.decode().upper() for ch in recording_grp['channels']]
+        hf = self._get_hf()
+        recording_grp = hf[f'/recordings/{rec_name}']
+        data = recording_grp['data'][:]
+        label = recording_grp['label'][()] if 'label' in recording_grp else None
+        if 'channels' in recording_grp:
+            channels = [ch.decode().upper() for ch in recording_grp['channels']]
         
         if self.is_train_set:        
             # If the recording is longer than 128 seconds (24000 samples at 200Hz),
@@ -142,32 +157,49 @@ class NeuroGPTDataset2(EEGDataset):
         self.h5_path = h5_path
         self.is_train_set = is_train_set
         self.ch_names = channels
+        # Lazily opened per-worker HDF5 handle
+        self._hf = None
 
         # Get list of all recording names
-        with h5py.File(h5_path, 'r') as hf:
-            self.recording_names = sorted(list(hf['/recordings'].keys()))
+        if recording_names is None:
+            with h5py.File(h5_path, 'r') as hf:
+                self.recording_names = sorted(list(hf['/recordings'].keys()))
+        else:
+            self.recording_names = recording_names
 
     def __len__(self):
         return len(self.recording_names)
     
+    def _get_hf(self):
+        if self._hf is None:
+            self._hf = h5py.File(self.h5_path, 'r')
+        return self._hf
+
+    def __del__(self):
+        try:
+            if self._hf is not None:
+                self._hf.close()
+        except Exception:
+            pass
+
     def __getitem__(self, idx):
         rec_name = self.recording_names[idx]
+
+        hf = self._get_hf()
+        recording_grp = hf[f'/recordings/{rec_name}']
+        data = recording_grp['data'][:]
+        label = recording_grp['label'][()] if 'label' in recording_grp else None
+        # if self.is_train_set:
+        #     label = np.eye(2)[label]
+
+        # Convert to torch tensor
+        #data = torch.from_numpy(data).float()
+        if not self.is_train_set:
+            return self.preprocess_sample(data, self.num_chunks, None)
+        else:
+            return self.preprocess_sample(data, self.num_chunks, label)
         
-        with h5py.File(self.h5_path, 'r') as hf:
-            recording_grp = hf[f'/recordings/{rec_name}']
-            data = recording_grp['data'][:]
-            label = recording_grp['label'][()] if 'label' in recording_grp else None
-            # if self.is_train_set:
-            #     label = np.eye(2)[label]
-                    
-            # Convert to torch tensor
-            #data = torch.from_numpy(data).float()
-            if not self.is_train_set:
-                return self.preprocess_sample(data, self.num_chunks, None)
-            else:
-                return self.preprocess_sample(data, self.num_chunks, label)
-        
-    def split_train_val(self, val_split=0.1):
+    def split_train_val(self, val_split=0.1, return_indices = False):
         """
         Split the dataset into training and validation sets.
         Args:
@@ -200,6 +232,8 @@ class NeuroGPTDataset2(EEGDataset):
         train_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=train_recordings)
         val_dataset = NeuroGPTDataset2(self.h5_path, True, self.ch_names, self.sample_keys, chunk_len=self.chunk_len, num_chunks=self.num_chunks, ovlp=self.ovlp, root_path="", gpt_only=self.gpt_only, recording_names=val_recordings) if val_recordings else None
 
+        if return_indices:
+            return train_dataset, val_dataset, train_indices, val_indices
         return train_dataset, val_dataset
     
 

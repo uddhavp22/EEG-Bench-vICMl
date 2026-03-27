@@ -41,7 +41,7 @@ def filter_resample_array(
         signals.astype(np.float64),
         sfreq=sfreq,
         l_freq=l_freq,
-        h_freq=h_freq,
+        h_freq=h_freq if sfreq//2>100 else 75,
         method="fir",
         verbose=False,
     )

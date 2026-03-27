@@ -49,7 +49,7 @@ class LaBraMBCIModel(nn.Module):
     def __init__(self, num_classes, freeze_encoder: bool = True):
         super().__init__()
 
-        checkpoint = torch.load(check_and_download_pretrained_model())
+        checkpoint = torch.load(check_and_download_pretrained_model(), weights_only=False)
         new_checkpoint = {}
         for k,v in checkpoint['model'].items():
             if k.startswith('student.'):
@@ -69,9 +69,11 @@ class LaBraMBCIModel(nn.Module):
                                 use_abs_pos_emb=True,
                                 init_values=0.1,)
         model.load_state_dict(new_checkpoint, strict=False)
-        for blk in model.blocks:
-            for p in blk.parameters():
-                p.requires_grad = not freeze_encoder
+        if freeze_encoder:
+            # 1. Turn off gradients for EVERYTHING
+            for param in model.parameters():
+                param.requires_grad = False
+            model.eval()
         self.feature = model
         self.head = nn.Linear(200, num_classes)
         self.loss_fn = nn.CrossEntropyLoss()
@@ -91,6 +93,7 @@ class LaBraMBCIModel(nn.Module):
 
 def train_epoch(model, dataloader, optimizer, scheduler, device, input_chans):
     model.train()
+    model.feature.eval() 
     running_loss, running_corrects, total_samples = 0.0, 0, 0
     
     for batch in tqdm(dataloader, desc="Training", leave=False):
