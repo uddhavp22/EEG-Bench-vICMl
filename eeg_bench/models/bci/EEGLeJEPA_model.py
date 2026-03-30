@@ -57,6 +57,25 @@ def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
 
 EMBED_CACHE_VERSION = os.getenv("EEG_BENCH_EMBED_CACHE_VERSION", "v2")
 
+
+def build_probe_head(dim: int, out_dim: int, probe_head: str) -> nn.Module:
+    if probe_head == "linear":
+        return nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, out_dim),
+        )
+    if probe_head == "mlp":
+        return nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.ELU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim, out_dim),
+        )
+    if probe_head == "attentive":
+        raise ValueError("Attentive probe is not supported for LeJEPA BCI")
+    raise ValueError(f"Unsupported LeJEPA probe head: {probe_head}")
+
 class ConcreteLeJEPABCI(nn.Module):
     def __init__(
         self,
@@ -66,6 +85,7 @@ class ConcreteLeJEPABCI(nn.Module):
         freeze_encoder: bool = True,
         config_path: Path | None = None,
         pretrained_path: Path | None = None,
+        probe_head: str = "linear",
     ):
         super().__init__()
 
@@ -176,10 +196,7 @@ class ConcreteLeJEPABCI(nn.Module):
                 p.requires_grad = True
             self.backbone.train()
 
-        self.head = nn.Sequential(
-            nn.LayerNorm(DIM),
-            nn.Linear(DIM, num_classes)
-        )
+        self.head = build_probe_head(DIM, num_classes, probe_head)
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x, coords):
@@ -205,6 +222,7 @@ class EEGLeJEPABCIModel(AbstractModel):
         super().__init__("LeJEPABCI")
         assert torch.cuda.is_available(), "CUDA is not available"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.probe_head = "linear"
 
         # Handle config vs legacy parameters
         if config is not None:
@@ -235,6 +253,7 @@ class EEGLeJEPABCIModel(AbstractModel):
                 self.config_path = None
                 self.pretrained_path = None
             self.freeze_encoder = config.freeze_encoder
+            self.probe_head = config.probe_head
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
@@ -244,8 +263,12 @@ class EEGLeJEPABCIModel(AbstractModel):
             self.version = version
             self.config_path = None
             self.freeze_encoder = freeze_encoder
-            pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
-            eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
+            lejepa_config = get_config_value("lejepa", {})
+            pos_bank_path = lejepa_config.get("pos_bank_path", "./REVE_posbank")
+            eegfm_path = lejepa_config.get("eegfm_path")
+            self.probe_head = lejepa_config.get("probe_head", "linear")
+            if "probe_head" not in lejepa_config and lejepa_config.get("attentive_probe", False):
+                self.probe_head = "attentive"
 
         # Setup eegfm imports
         _setup_eegfm_imports(eegfm_path)
@@ -514,6 +537,7 @@ class EEGLeJEPABCIModel(AbstractModel):
             freeze_encoder=self.freeze_encoder,
             config_path=self.config_path,
             pretrained_path=self.pretrained_path,
+            probe_head=self.probe_head,
         ).to(self.device)
 
         datasets = [self.cache.cache(make_dataset_lejepa)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)

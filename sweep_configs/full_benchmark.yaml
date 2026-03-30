@@ -64,7 +64,7 @@ models:
 
 checkpoints:
   steps: [10000, 20000, 30000]
-  include_last: true
+  include_last: false #usually true
 
 tasks:
   epoch_sweep: #[]

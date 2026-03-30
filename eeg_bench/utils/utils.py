@@ -260,7 +260,12 @@ def save_results(
     ckpt_str = f"_ckpt_{checkpoint_id}" if checkpoint_id else ""
     pct_str = f"_pct{int(data_percentage * 100)}" if data_percentage < 1.0 else ""
     lp_str = "_LP" if linear_probe else ""
-    probe_str = "_ATTN" if probe_type == "attentive" else ""
+    if probe_type == "attentive":
+        probe_str = "_ATTN"
+    elif probe_type == "mlp":
+        probe_str = "_MLP"
+    else:
+        probe_str = ""
     filename = os.path.join(get_config_value("results"), "raw", f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}{probe_str}_{timestamp}.json")
 
     if task_name in get_multilabel_tasks():

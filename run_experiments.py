@@ -61,30 +61,44 @@ def normalize_task_name(task_name):
     return task_name
 
 
+def effective_probe_head(model: str, probe_head: str) -> str:
+    return probe_head if model == "lejepa" else "linear"
+
+
 def get_completed_experiments(results_dir="results/raw"):
     """Check which experiments have already completed based on result files."""
     completed = set()
     if not os.path.exists(results_dir):
         return completed
 
-    # Pattern: task_model_pctXX_LP_timestamp.json
+    # Pattern: task_model_pctXX[_LP][_ATTN|_MLP]_timestamp.json
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
         filename = filename.replace("_clinical", "")
-        # Extract model, task, percentage from filename
-        match = re.match(r"^(.+)_(\w+Model)(?:_pct(\d+))?(?:_LP)?_\d{8}_\d{6}\.json$", filename)
+        match = re.match(
+            r"^(.+)_(\w+Model)(?:_pct(\d+))?(?:_(LP))?(?:_(ATTN|MLP))?_\d{8}_\d{6}\.json$",
+            filename,
+        )
         if match:
-            task_name, model_name, pct = match.groups()
+            task_name, model_name, pct, linear_probe_tag, probe_suffix = match.groups()
             task_name = normalize_task_name(task_name)
             pct = int(pct) / 100 if pct else 1.0
-            completed.add((model_name.lower().replace("model", ""), task_name, pct))
+            linear_probe = linear_probe_tag == "LP"
+            probe_head = {
+                "ATTN": "attentive",
+                "MLP": "mlp",
+            }.get(probe_suffix, "linear")
+            completed.add((model_name.lower().replace("model", ""), task_name, pct, linear_probe, probe_head))
     return completed
 
 
 def run_experiment(args):
     """Run a single experiment in a subprocess."""
-    model, task, pct, log_dir, dry_run, gpu_queue = args
-    gpu_id = gpu_queue.get()
+    model, task, pct, log_dir, dry_run, linear_probe, lejepa_probe_head, gpu_queue = args
+    if hasattr(gpu_queue, "get"):
+        gpu_id = gpu_queue.get()
+    else:
+        gpu_id = int(gpu_queue)
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -94,9 +108,11 @@ def run_experiment(args):
         "--model", model,
         "--task", task,
         "--data-percentages", str(pct),
-        "--linear-probe",
+        "--lejepa-probe-head", lejepa_probe_head,
         "--no-wandb"
     ]
+    if linear_probe:
+        cmd.append("--linear-probe")
 
     log_file = os.path.join(log_dir, f"{model}_{task}_pct{int(pct*100)}_gpu{gpu_id}.log")
 
@@ -132,7 +148,8 @@ def run_experiment(args):
     except Exception as e:
         return (model, task, pct, -1, str(e))
     finally:
-        gpu_queue.put(gpu_id)
+        if hasattr(gpu_queue, "put"):
+            gpu_queue.put(gpu_id)
 
 
 def prewarm_cache(tasks, models, log_dir):
@@ -149,7 +166,7 @@ def prewarm_cache(tasks, models, log_dir):
 
     for i, task in enumerate(tasks):
         print(f"  [{i+1}/{len(tasks)}] Caching {task}...")
-        result = run_experiment((model, task, pct, 0, log_dir, False))
+        result = run_experiment((model, task, pct, log_dir, False, True, "linear", 0))
         if result[3] != 0:
             print(f"    Warning: Cache warm-up failed for {task}")
 
@@ -182,6 +199,8 @@ def main():
                         help="Directory for log files (default: logs/experiments)")
     parser.add_argument("--no-linear-probe", action="store_true",
                         help="Run without --linear-probe flag (full fine-tuning)")
+    parser.add_argument("--lejepa-probe-head", choices=["linear", "mlp", "attentive"], default="linear",
+                        help="LeJEPA head type to pass through to benchmark_console.py")
     args = parser.parse_args()
 
     # Setup
@@ -199,6 +218,7 @@ def main():
     print(f"Percentages: {args.percentages}")
     print(f"GPUs: {args.gpus}, Workers/GPU: {args.workers_per_gpu}, Total workers: {total_workers}")
     print(f"Linear probe: {'No' if args.no_linear_probe else 'Yes'}")
+    print(f"LeJEPA probe head: {args.lejepa_probe_head}")
     print("=" * 60)
 
     # Generate all experiment combinations
@@ -208,7 +228,12 @@ def main():
     # Check for completed experiments
     if args.resume:
         completed = get_completed_experiments()
-        experiments = [(m, t, p) for m, t, p in all_experiments if (m, t, p) not in completed]
+        linear_probe = not args.no_linear_probe
+        experiments = [
+            (m, t, p)
+            for m, t, p in all_experiments
+            if (m, t, p, linear_probe, effective_probe_head(m, args.lejepa_probe_head)) not in completed
+        ]
         print(f"Already completed: {len(all_experiments) - len(experiments)}")
         print(f"Remaining: {len(experiments)}")
     else:
@@ -226,11 +251,35 @@ def main():
     experiments = sorted(experiments, key=lambda x: x[2], reverse=True)
 
     gpu_slots = [gpu_id for gpu_id in range(args.gpus) for _ in range(args.workers_per_gpu)]
-    jobs = [(model, task, pct, args.log_dir, args.dry_run) for model, task, pct in experiments]
+    jobs = [
+        (model, task, pct, args.log_dir, args.dry_run, not args.no_linear_probe, args.lejepa_probe_head)
+        for model, task, pct in experiments
+    ]
 
     # Run experiments in parallel
     print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
     start_time = time.time()
+
+    if args.dry_run:
+        results = []
+        for idx, job in enumerate(jobs):
+            gpu_id = gpu_slots[idx % len(gpu_slots)] if gpu_slots else 0
+            results.append(run_experiment(job + (gpu_id,)))
+        elapsed = time.time() - start_time
+        successes = [r for r in results if r[3] == 0]
+        failures = [r for r in results if r[3] != 0]
+        print("\n" + "=" * 60)
+        print("RESULTS")
+        print("=" * 60)
+        print(f"Total time: {elapsed/60:.1f} minutes")
+        print(f"Successful: {len(successes)}/{len(results)}")
+        if failures:
+            print(f"\nFailed experiments ({len(failures)}):")
+            for model, task, pct, code, status in failures:
+                print(f"  - {model}/{task}/pct{int(pct*100)}: {status} (code {code})")
+        else:
+            print("\nAll experiments completed successfully!")
+        return
 
     with Manager() as manager:
         gpu_queue = manager.Queue()

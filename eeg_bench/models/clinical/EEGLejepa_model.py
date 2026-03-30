@@ -126,6 +126,22 @@ class AttentiveProbe(nn.Module):
         pooled = self.norm(pooled)
         return self.head(pooled)
 
+
+def build_probe_head(dim: int, out_dim: int, probe_head: str) -> nn.Module:
+    if probe_head == "linear":
+        return nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, out_dim))
+    if probe_head == "mlp":
+        return nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.ELU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim, out_dim),
+        )
+    if probe_head == "attentive":
+        return AttentiveProbe(dim, out_dim)
+    raise ValueError(f"Unsupported LeJEPA probe head: {probe_head}")
+
 class ShardedEmbeddingDataset(Dataset):
     def __init__(self, index_path: Path):
         with open(index_path, "r") as f:
@@ -217,12 +233,13 @@ class ConcreteLeJEPAClinical(nn.Module):
         freeze_encoder=True,
         config_path: Optional[Path] = None,
         pretrained_path: Optional[Path] = None,
-        attentive_probe: bool = False,
+        probe_head: str = "linear",
     ):
         super().__init__()
 
         self.is_multilabel_task = num_labels_per_chunk is not None
-        self.attentive_probe = attentive_probe
+        self.probe_head = probe_head
+        self.attentive_probe = probe_head == "attentive"
 
         # ------------------------------------------------------------
         # Pretrained config / checkpoint resolution (SAFE)
@@ -310,10 +327,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             self.backbone.train()
 
         out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
-        if self.attentive_probe:
-            self.head = AttentiveProbe(DIM, out_dim)
-        else:
-            self.head = nn.Sequential(nn.LayerNorm(DIM), nn.Linear(DIM, out_dim))
+        self.head = build_probe_head(DIM, out_dim, self.probe_head)
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
 
@@ -381,6 +395,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.chunk_len_s = None if num_labels_per_chunk is None else 16
         self.num_labels_per_chunk = num_labels_per_chunk
         self.freeze_encoder = freeze_encoder  # Store for use in fit()
+        self.probe_head = "linear"
         self.attentive_probe = False
 
         # Handle config vs legacy parameters
@@ -413,13 +428,19 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 self.pretrained_path = None  # Store as instance variable
             freeze_encoder = config.freeze_encoder
             self.freeze_encoder = freeze_encoder
-            self.attentive_probe = config.attentive_probe
+            self.probe_head = config.probe_head
+            self.attentive_probe = self.probe_head == "attentive"
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
             # Legacy mode - use parameters directly (with old defaults if not provided)
-            pos_bank_path = get_config_value("lejepa", {}).get("pos_bank_path", "./REVE_posbank")
-            eegfm_path = get_config_value("lejepa", {}).get("eegfm_path")
+            lejepa_config = get_config_value("lejepa", {})
+            pos_bank_path = lejepa_config.get("pos_bank_path", "./REVE_posbank")
+            eegfm_path = lejepa_config.get("eegfm_path")
+            self.probe_head = lejepa_config.get("probe_head", "linear")
+            if "probe_head" not in lejepa_config and lejepa_config.get("attentive_probe", False):
+                self.probe_head = "attentive"
+            self.attentive_probe = self.probe_head == "attentive"
             config_path = None
             self.pretrained_path = None  # Store as instance variable
 
@@ -437,7 +458,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             freeze_encoder=freeze_encoder,
             config_path=config_path,
             pretrained_path=self.pretrained_path,
-            attentive_probe=self.attentive_probe,
+            probe_head=self.probe_head,
         ).to(self.device)
         self._eval_noise_config: Optional[Dict] = None
 

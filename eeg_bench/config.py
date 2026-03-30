@@ -13,7 +13,7 @@ class LeJEPAConfig:
     eegfm_path: Optional[str] = None
     pos_bank_path: str = "./REVE_posbank"
     freeze_encoder: bool = True
-    attentive_probe: bool = False
+    probe_head: str = "linear"
     # Checkpoint resolution (shared by BCI and Clinical)
     checkpoint_base_path: Optional[str] = None
     checkpoint_version: Optional[int] = None
@@ -94,7 +94,7 @@ def load_lejepa_config(config_file_override: Optional[str] = None) -> dict:
         "eegfm_path": None,
         "pos_bank_path": "./REVE_posbank",
         "freeze_encoder": True,
-        "attentive_probe": False,
+        "probe_head": "linear",
         "checkpoint": {
             "base_path": None,
             "version": None,
@@ -135,11 +135,14 @@ def merge_lejepa_config_with_cli(base_config: dict, cli_args) -> LeJEPAConfig:
         eegfm_path=base_config.get("eegfm_path"),
         pos_bank_path=base_config.get("pos_bank_path", "./REVE_posbank"),
         freeze_encoder=base_config.get("freeze_encoder", True),
-        attentive_probe=base_config.get("attentive_probe", False),
+        probe_head=base_config.get("probe_head", "linear"),
         checkpoint_base_path=checkpoint_config.get("base_path"),
         checkpoint_version=checkpoint_config.get("version"),
         checkpoint_full_path=checkpoint_config.get("full_path"),
     )
+
+    if "probe_head" not in base_config and base_config.get("attentive_probe", False):
+        config.probe_head = "attentive"
 
     # Override with CLI args (if provided)
     if getattr(cli_args, "lejepa_checkpoint_base_path", None):
@@ -154,8 +157,11 @@ def merge_lejepa_config_with_cli(base_config: dict, cli_args) -> LeJEPAConfig:
     if getattr(cli_args, "lejepa_pos_bank_path", None):
         config.pos_bank_path = cli_args.lejepa_pos_bank_path
 
+    if getattr(cli_args, "lejepa_probe_head", None):
+        config.probe_head = cli_args.lejepa_probe_head
+
     if getattr(cli_args, "lejepa_attentive_probe", False):
-        config.attentive_probe = True
+        config.probe_head = "attentive"
 
     # Handle freeze_encoder boolean flags
     if getattr(cli_args, "lejepa_freeze_encoder", False):

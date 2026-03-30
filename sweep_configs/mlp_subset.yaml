@@ -1,9 +1,7 @@
-# Full Benchmark - Compare multiple model sizes across all tasks
+# LeJEPA MLP subset run for selected BCI + clinical tasks.
 #
-# Usage: python run_lejepa_sweep.py --config sweep_configs/full_benchmark.yaml
-#
-# This config runs the full benchmark with multiple model sizes,
-# using only the final checkpoint for each model.
+# Usage:
+#   python run_lejepa_sweep.py --config sweep_configs/mlp_subset.yaml
 
 models:
   lejepa_base_global_projv2_smallds: #laya -s 
@@ -29,10 +27,14 @@ tasks:
 
 training:
   linear_probe: true
-  probe_head: attentive
+  probe_head: mlp
   data_percentages: [1.0]
+  seeds: [42]
 
 execution:
-  gpus: 2
+  gpus: 1
   workers_per_gpu: 1
-  log_dir: results_rebuttal/lejepa_attn_subset
+  log_dir: rebuttal_logs/lejepa_mlp_subset
+  results_dir: results_rebuttal/lejepa_mlp_subset
+
+eval_noise: {}

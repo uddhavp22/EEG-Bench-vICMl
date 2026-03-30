@@ -517,6 +517,13 @@ def main():
         action="store_true",
         help="Use an attentive pooling probe head for LeJEPA"
     )
+    parser.add_argument(
+        "--lejepa-probe-head",
+        type=str,
+        choices=["linear", "mlp", "attentive"],
+        default=None,
+        help="LeJEPA classification head type. Defaults to linear."
+    )
 
     # Result file naming (for sweep scripts)
     parser.add_argument(
@@ -566,7 +573,7 @@ def main():
     if args.linear_probe and not getattr(args, 'lejepa_no_freeze_encoder', False):
         lejepa_config.freeze_encoder = True
 
-    probe_type = "attentive" if args.lejepa_attentive_probe else ("linear" if args.linear_probe else "finetune")
+    probe_type = lejepa_config.probe_head
 
     # Factory functions for LeJEPA models (to inject config)
     def make_lejepa_clinical(num_classes=2, num_labels_per_chunk=None):
@@ -675,6 +682,7 @@ def main():
                 "all": args.all,
                 "data_percentages": args.data_percentages,
                 "linear_probe": args.linear_probe,
+                "lejepa_probe_head": lejepa_config.probe_head,
             },
         )
         wandb_utils.set_run(wandb_run)

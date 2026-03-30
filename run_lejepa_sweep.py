@@ -96,7 +96,7 @@ class ExperimentConfig:
     task: str
     percentage: float
     linear_probe: bool
-    attentive_probe: bool
+    probe_head: str = "linear"
     eval_noise_config: Optional[Dict[str, Any]] = None
     seed: Optional[int] = 42  # Default seed for reproducibility
 
@@ -106,18 +106,17 @@ class ExperimentConfig:
             "--model", "lejepa",
             "--task", self.task,
             "--lejepa-checkpoint-full-path", self.checkpoint_path,
-            "--data-percentage", str(self.percentage),  # Changed from --data-percentages
+            "--data-percentages", str(self.percentage),
             "--no-wandb",
             "--result-prefix", self.model_name,
             "--checkpoint-id", self.checkpoint_id,
-            "--seed", str(self.seed)
+            "--seed", str(self.seed),
+            "--lejepa-probe-head", self.probe_head,
         ]
         if self.linear_probe:
             args.extend(["--linear-probe", "--lejepa-freeze-encoder"])
         else:
             args.append("--lejepa-no-freeze-encoder")
-        if self.attentive_probe:
-            args.append("--lejepa-attentive-probe")
 
         noise_cfg = self.eval_noise_config or {}
         noise_types = noise_cfg.get("noise_types") or []
@@ -254,7 +253,8 @@ def load_config(config_path: str) -> Dict[str, Any]:
     config.setdefault("training", {})
     config["training"].setdefault("linear_probe", True)
     config["training"].setdefault("data_percentages", [1.0])
-    config["training"].setdefault("attentive_probe", False)
+    if "probe_head" not in config["training"]:
+        config["training"]["probe_head"] = "attentive" if config["training"].get("attentive_probe", False) else "linear"
 
     config.setdefault("eval_noise", {})
 
@@ -312,6 +312,8 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
         # Get last checkpoint only for final_only tasks
         last_only = {"last": all_checkpoints["last"]} if "last" in all_checkpoints else {}
 
+        probe_head = config["training"]["probe_head"]
+
         # Generate experiments for epoch_sweep tasks (all checkpoints)
         for task in epoch_sweep_tasks:
             for ckpt_id, ckpt_path in epoch_checkpoints.items():
@@ -325,7 +327,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                             task=task,
                             percentage=pct,
                             linear_probe=config["training"]["linear_probe"],
-                            attentive_probe=config["training"]["attentive_probe"],
+                            probe_head=probe_head,
                             eval_noise_config=config.get("eval_noise"),
                             seed=seed
                         ))
@@ -343,7 +345,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
                             task=task,
                             percentage=pct,
                             linear_probe=config["training"]["linear_probe"],
-                            attentive_probe=config["training"]["attentive_probe"],
+                            probe_head=probe_head,
                             eval_noise_config=config.get("eval_noise") if pct == 1.0 else None,
                             seed=seed
                         ))
@@ -361,13 +363,13 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     """
     Check which experiments have already completed based on result files.
 
-    Returns set of (model_name, task, checkpoint_id, percentage, attentive_probe) tuples.
+    Returns set of (model_name, task, checkpoint_id, percentage, probe_head) tuples.
     """
     completed = set()
     if not os.path.exists(results_dir):
         return completed
 
-    # Pattern: {model_name}_{task}_{ModelClass}_ckpt_{checkpoint_id}[_pctXX][_LP][_ATTN]_{timestamp}.json
+    # Pattern: {model_name}_{task}_{ModelClass}_ckpt_{checkpoint_id}[_pctXX][_LP][_{ATTN|MLP}]_{timestamp}.json
     # Examples:
     # - lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_20260124_122416.json
     # - lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_ATTN_20260124_122416.json
@@ -382,11 +384,11 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
         #     filename
         # )
         match = re.match(
-            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_ATTN)?_(\d{8}_\d{6})\.json",
+            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_(ATTN|MLP))?_(\d{8}_\d{6})\.json",
             filename
         )
         if match:
-            prefix, model_class, ckpt_id, pct_str, timestamp = match.groups()
+            prefix, model_class, ckpt_id, pct_str, probe_suffix, timestamp = match.groups()
             
             # Split prefix into model_name and task
             # Try to find a known task at the end of prefix
@@ -422,8 +424,11 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
             
             if model_name is not None and task:
                 pct = int(pct_str) / 100 if pct_str else 1.0
-                attentive_probe = "_ATTN_" in filename or "attnprob" in model_name.lower()
-                completed.add((model_name, task, ckpt_id, pct, attentive_probe))
+                probe_head = {
+                    "ATTN": "attentive",
+                    "MLP": "mlp",
+                }.get(probe_suffix, "linear")
+                completed.add((model_name, task, ckpt_id, pct, probe_head))
     return completed
 
 
@@ -553,7 +558,7 @@ def main():
     print(f"Checkpoints: steps={config['checkpoints']['steps']}, "
           f"include_last={config['checkpoints']['include_last']}")
     print(f"Linear probe: {config['training']['linear_probe']}")
-    print(f"Attentive probe: {config['training']['attentive_probe']}")
+    print(f"LeJEPA probe head: {config['training']['probe_head']}")
     print(f"Data percentages: {config['training']['data_percentages']}")
     print(f"Results dir: {results_dir}")
     print(f"GPUs: {gpus}, Workers/GPU: {workers_per_gpu}, Total workers: {total_workers}")
@@ -569,7 +574,7 @@ def main():
         original_count = len(experiments)
         experiments = [
             e for e in experiments
-            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.attentive_probe) not in completed
+            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.probe_head) not in completed
         ]
         print(f"Already completed: {original_count - len(experiments)}")
         print(f"Remaining: {len(experiments)}")
