@@ -44,7 +44,15 @@ def check_and_download_pretrained_model():
     return encoder_path
 
 class LaBraMBCIModel(nn.Module):
-    def __init__(self, num_classes, num_labels_per_chunk, device, chunks, freeze_encoder: bool = True):
+    def __init__(
+        self,
+        num_classes,
+        num_labels_per_chunk,
+        device,
+        chunks,
+        freeze_encoder: bool = True,
+        linear_probe: bool = False,
+    ):
         super().__init__()
         self.device = device
         self.chunks = chunks
@@ -78,7 +86,16 @@ class LaBraMBCIModel(nn.Module):
 
         self.feature = model
         self.is_multilabel_task = num_labels_per_chunk is not None
-        self.head = nn.Linear(200, num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1))
+        self.linear_probe = linear_probe
+        out_dim = num_classes * (num_labels_per_chunk if self.is_multilabel_task else 1)
+        if linear_probe:
+            self.head = nn.Linear(200, out_dim)
+        else:
+            self.head = nn.Sequential(
+                nn.Linear(200, 200),
+                nn.GELU(),
+                nn.Linear(200, out_dim),
+            )
         self.loss_fn = nn.CrossEntropyLoss()
         self.num_classes = num_classes
         self.freeze_encoder = freeze_encoder
@@ -344,6 +361,7 @@ class LaBraMModel(AbstractModel):
         num_labels_per_chunk: Optional[int] = None,
         freeze_encoder: bool = True,
         cache_encoder_outputs: bool = True,
+        linear_probe: bool = False,
     ):
         super().__init__("LaBraMModel")
         print("inside init LaBraMModel")
@@ -353,7 +371,15 @@ class LaBraMModel(AbstractModel):
         self.use_cache = True
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_labels_per_chunk = num_labels_per_chunk
-        self.model = LaBraMBCIModel(num_classes=num_classes, num_labels_per_chunk=num_labels_per_chunk, device=self.device, chunks=self.chunk_len_s, freeze_encoder=freeze_encoder).to(self.device)
+        self.linear_probe = linear_probe
+        self.model = LaBraMBCIModel(
+            num_classes=num_classes,
+            num_labels_per_chunk=num_labels_per_chunk,
+            device=self.device,
+            chunks=self.chunk_len_s,
+            freeze_encoder=freeze_encoder,
+            linear_probe=linear_probe,
+        ).to(self.device)
         self.save = False
         self.cache_encoder_outputs = cache_encoder_outputs and freeze_encoder
         if cache_encoder_outputs and not freeze_encoder:

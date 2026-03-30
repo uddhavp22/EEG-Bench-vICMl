@@ -40,7 +40,7 @@ class REVEClinicalWrapper(nn.Module):
         self.backbone = AutoModel.from_pretrained(
             "brain-bzh/reve-base",
             trust_remote_code=True,
-            torch_dtype="auto",
+            dtype="auto",
         )
 
         if freeze_backbone:
@@ -50,9 +50,10 @@ class REVEClinicalWrapper(nn.Module):
 
         # Determine input_dim dynamically via a sample forward pass
         with torch.no_grad():
-            dummy = torch.randn(1, n_channels, n_timepoints, device=next(self.backbone.parameters()).device)
+            backbone_device = next(self.backbone.parameters()).device
+            dummy = torch.randn(1, n_channels, n_timepoints, device=backbone_device)
             if coords is not None:
-                dummy_coords = coords.unsqueeze(0)
+                dummy_coords = coords.unsqueeze(0).to(backbone_device)
             else:
                 dummy_coords = torch.zeros(1, n_channels, 3, device=dummy.device)
             dummy_out = self.backbone(dummy, dummy_coords)
@@ -67,6 +68,7 @@ class REVEClinicalWrapper(nn.Module):
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x, pos):
+        pos = pos.to(x.device)
         features = self.backbone(x, pos)
         logits = self.classifier(features)
         if self.is_multilabel_task:
@@ -75,6 +77,7 @@ class REVEClinicalWrapper(nn.Module):
 
     def extract_features(self, x, pos):
         with torch.no_grad():
+            pos = pos.to(x.device)
             features = self.backbone(x, pos)
         return features.reshape(features.shape[0], -1)
 
@@ -244,7 +247,7 @@ class REVEClinicalModel(AbstractModel):
 
             train_features = np.memmap(
                 os.path.join(cache_dir, "train_features.dat"),
-                dtype=np.float32,
+                dtype=np.float16,
                 mode="w+",
                 shape=(train_count, feature_dim),
             )
@@ -264,7 +267,7 @@ class REVEClinicalModel(AbstractModel):
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
                 cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
-                feats = self.model.extract_features(x, cb).cpu().numpy()
+                feats = self.model.extract_features(x, cb).cpu().numpy().astype(np.float16)
                 labels = yb.cpu().numpy()
                 bsz = feats.shape[0]
                 train_features[idx:idx + bsz] = feats
@@ -276,7 +279,7 @@ class REVEClinicalModel(AbstractModel):
 
             val_features = np.memmap(
                 os.path.join(cache_dir, "val_features.dat"),
-                dtype=np.float32,
+                dtype=np.float16,
                 mode="w+",
                 shape=(val_count, feature_dim),
             )
@@ -295,7 +298,7 @@ class REVEClinicalModel(AbstractModel):
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
                 cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
-                feats = self.model.extract_features(x, cb).cpu().numpy()
+                feats = self.model.extract_features(x, cb).cpu().numpy().astype(np.float16)
                 labels = yb.cpu().numpy()
                 bsz = feats.shape[0]
                 val_features[idx:idx + bsz] = feats
@@ -335,7 +338,7 @@ class REVEClinicalModel(AbstractModel):
                 total_acc_samples = 0
 
                 for feats, yb in tqdm(train_feat_loader, desc=f"Epoch {epoch}", leave=False):
-                    feats, yb = feats.to(self.device), yb.to(self.device)
+                    feats, yb = feats.to(self.device).float(), yb.to(self.device)
                     optimizer.zero_grad()
                     logits = self.model.classify_features(feats)
                     loss = self.model.loss_fn(logits, yb)
@@ -360,7 +363,7 @@ class REVEClinicalModel(AbstractModel):
                 self.model.classifier.eval()
                 with torch.no_grad():
                     for feats, yb in tqdm(val_feat_loader, desc=f"Val {epoch}", leave=False):
-                        feats, yb = feats.to(self.device), yb.to(self.device)
+                        feats, yb = feats.to(self.device).float(), yb.to(self.device)
                         logits = self.model.classify_features(feats)
                         loss = self.model.loss_fn(logits, yb)
                         val_loss += loss.item() * feats.size(0)

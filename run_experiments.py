@@ -28,12 +28,12 @@ import subprocess
 import os
 import sys
 import time
+import json
 from itertools import product
 from multiprocessing import Pool, Manager
 from tqdm import tqdm
 from datetime import datetime
 import glob
-import re
 
 # Configuration
 MODELS = ["labram", "bendr", "neurogpt", "reve", "lejepa"]
@@ -62,23 +62,38 @@ def normalize_task_name(task_name):
     return task_name
 
 
-def get_completed_experiments(results_dir="results/raw"):
+def get_completed_experiments(results_dir="results/raw", linear_probe=None):
     """Check which experiments have already completed based on result files."""
     completed = set()
     if not os.path.exists(results_dir):
         return completed
 
-    # Pattern: task_model_pctXX_LP_timestamp.json
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
-        filename = filename.replace("_clinical", "")
-        # Extract model, task, percentage from filename
-        match = re.match(r"^(.+)_(\w+Model)(?:_pct(\d+))?(?:_LP)?_\d{8}_\d{6}\.json$", filename)
-        if match:
-            task_name, model_name, pct = match.groups()
+        try:
+            with open(f, "r") as fp:
+                payload = json.load(fp)
+
+            model_names = payload.get("models_names") or []
+            if not model_names:
+                continue
+
+            model_name = str(model_names[0])
+            task_name = str(payload.get("task_name", "")).replace("_clinical", "")
             task_name = normalize_task_name(task_name)
-            pct = int(pct) / 100 if pct else 1.0
-            completed.add((model_name.lower().replace("model", ""), task_name, pct))
+            pct = float(payload.get("data_percentage", 1.0))
+
+            lp_value = payload.get("linear_probe")
+            if lp_value is None:
+                lp_value = "_LP_" in filename
+            lp_value = bool(lp_value)
+
+            if linear_probe is not None and lp_value != linear_probe:
+                continue
+
+            completed.add((model_name.lower().replace("model", ""), task_name, pct, lp_value))
+        except Exception:
+            continue
     return completed
 
 
@@ -190,8 +205,13 @@ def main():
 
     # Check for completed experiments
     if args.resume:
-        completed = get_completed_experiments()
-        experiments = [(m, t, p, s) for m, t, p, s in all_experiments if (m, t, p) not in completed]
+        linear_probe_mode = not args.no_linear_probe
+        completed = get_completed_experiments(linear_probe=linear_probe_mode)
+        experiments = [
+            (m, t, p, s)
+            for m, t, p, s in all_experiments
+            if (m, t, p, linear_probe_mode) not in completed
+        ]
         print(f"Already completed: {len(all_experiments) - len(experiments)}")
         print(f"Remaining: {len(experiments)}")
     else:

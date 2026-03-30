@@ -537,10 +537,11 @@ def main():
     def make_labram_clinical(num_classes=2, num_labels_per_chunk=None):
         return LaBraMClinical(num_classes=num_classes,
                               num_labels_per_chunk=num_labels_per_chunk,
-                              freeze_encoder=True)
+                              freeze_encoder=True,
+                              linear_probe=args.linear_probe)
 
     def make_labram_bci():
-        return LaBraMBci(freeze_encoder=True)
+        return LaBraMBci(freeze_encoder=True, linear_probe=args.linear_probe)
 
     def make_bendr_clinical(num_classes=2, num_labels_per_chunk=None):
         return BENDRClinical(
@@ -608,6 +609,7 @@ def main():
             pretrained_path=cbramod_pretrained_path,
             cbramod_path=cbramod_path,
             freeze_backbone=True,
+            linear_probe=args.linear_probe,
         )
 
     def make_cbramod_bci():
@@ -615,6 +617,7 @@ def main():
             pretrained_path=cbramod_pretrained_path,
             cbramod_path=cbramod_path,
             freeze_backbone=True,
+            linear_probe=args.linear_probe,
         )
 
     # Mapping command-line strings to task classes

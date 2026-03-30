@@ -12,9 +12,10 @@
 
 set -euo pipefail
 
-MODELS="labram cbramod luna reve"
-SEEDS="100 200 300 400 500"
+MODELS="labram cbramod luna" # reve
+SEEDS="100 200 300" # 400 500
 PERCENTAGES="1.0"
+TASKS="right_feet left_right_feet_tongue abnormal seizure binary_artifact"
 GPUS=3
 WORKERS=1  # conservative to avoid h5 lock issues
 
@@ -22,15 +23,19 @@ echo "============================================"
 echo "MLP Benchmark (frozen encoder, NO linear probe)"
 echo "============================================"
 echo "Models: ${MODELS}"
+echo "Tasks:  ${TASKS}"
 echo "Seeds:  ${SEEDS}"
 echo "GPUs:   ${GPUS}, Workers/GPU: ${WORKERS}"
 echo "============================================"
 
 python run_experiments.py \
     --models ${MODELS} \
+    --tasks ${TASKS} \
     --percentages ${PERCENTAGES} \
     --seeds ${SEEDS} \
     --gpus ${GPUS} \
     --workers-per-gpu ${WORKERS} \
     --no-linear-probe \
+    --resume \
+    --log-dir "logs/mlp_benchmark" \
     "$@"

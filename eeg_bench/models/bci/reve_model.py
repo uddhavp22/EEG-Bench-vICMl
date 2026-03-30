@@ -47,7 +47,7 @@ class REVEWrapper(nn.Module):
         self.backbone = AutoModel.from_pretrained(
             "brain-bzh/reve-base",
             trust_remote_code=True,
-            torch_dtype="auto",
+            dtype="auto",
         )
 
         # Optionally freeze the backbone
@@ -56,9 +56,10 @@ class REVEWrapper(nn.Module):
 
         # Determine input_dim dynamically via a sample forward pass
         with torch.no_grad():
-            dummy = torch.randn(1, n_channels, n_timepoints, device=next(self.backbone.parameters()).device)
+            backbone_device = next(self.backbone.parameters()).device
+            dummy = torch.randn(1, n_channels, n_timepoints, device=backbone_device)
             if coords is not None:
-                dummy_coords = coords.unsqueeze(0)
+                dummy_coords = coords.unsqueeze(0).to(backbone_device)
             else:
                 dummy_coords = torch.zeros(1, n_channels, 3, device=dummy.device)
             dummy_out = self.backbone(dummy, dummy_coords)
@@ -76,6 +77,7 @@ class REVEWrapper(nn.Module):
         
         # Pass through frozen backbone
         # Note: We rely on the backbone's internal forward which likely returns the hidden states
+        pos = pos.to(x.device)
         features = self.backbone(x, pos)
         
         # Pass through classifier
@@ -84,6 +86,7 @@ class REVEWrapper(nn.Module):
 
     def extract_features(self, x, pos):
         with torch.no_grad():
+            pos = pos.to(x.device)
             features = self.backbone(x, pos)
         return features.reshape(features.shape[0], -1)
 
@@ -102,7 +105,7 @@ class REVEBenchmarkModel(AbstractModel):
         self.pos_bank = AutoModel.from_pretrained(
             "brain-bzh/reve-positions",
             trust_remote_code=True,
-            torch_dtype="auto",
+            dtype="auto",
         )
 
         # Build case-insensitive lookup from the bank's own vocabulary
@@ -185,7 +188,7 @@ class REVEBenchmarkModel(AbstractModel):
             features_path = os.path.join(cache_dir, "train_features.dat")
             labels_path = os.path.join(cache_dir, "train_labels.dat")
             train_features = np.memmap(
-                features_path, dtype=np.float32, mode="w+", shape=(total_samples, feature_dim)
+                features_path, dtype=np.float16, mode="w+", shape=(total_samples, feature_dim)
             )
             train_labels = np.memmap(
                 labels_path, dtype=np.int64, mode="w+", shape=(total_samples,)
@@ -197,7 +200,7 @@ class REVEBenchmarkModel(AbstractModel):
                 data = batch["sample"].to(self.device)
                 pos = batch["pos"].to(self.device)
                 labels = batch["label"].cpu().numpy()
-                feats = self.model.extract_features(data, pos).cpu().numpy()
+                feats = self.model.extract_features(data, pos).cpu().numpy().astype(np.float16)
                 bsz = feats.shape[0]
                 train_features[idx:idx + bsz] = feats
                 train_labels[idx:idx + bsz] = labels
@@ -222,7 +225,7 @@ class REVEBenchmarkModel(AbstractModel):
                 correct = 0
                 total = 0
                 for feats, target in tqdm(feat_loader, desc=f"Epoch {epoch+1}", leave=False):
-                    feats = feats.to(self.device)
+                    feats = feats.to(self.device).float()
                     target = target.to(self.device)
                     optimizer.zero_grad()
                     output = self.model.classify_features(feats)

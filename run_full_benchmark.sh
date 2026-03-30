@@ -24,7 +24,7 @@ echo "============================================================"
 echo ""
 echo "--- Phase 1: Data efficiency (single seed) ---"
 python run_experiments.py \
-    --models luna labram cbramod \
+    --models luna labram cbramod reve\
     --percentages 0.1 0.25 0.5 0.75 \
     --seeds 100 \
     --gpus 3 \
@@ -36,7 +36,7 @@ python run_experiments.py \
 echo ""
 echo "--- Phase 2: Full data, 5 seeds for variance ---"
 python run_experiments.py \
-    --models luna labram cbramod \
+    --models luna labram cbramod reve \
     --percentages 1.0 \
     --seeds 100 200 300 400 500 \
     --gpus 3 \

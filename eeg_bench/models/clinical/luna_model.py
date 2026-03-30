@@ -209,7 +209,7 @@ class LUNAClinicalWrapper(nn.Module):
         """Classify pre-extracted features using whichever head is active."""
         if self.linear_probe and self.linear_probe_head is not None:
             return self.linear_probe_head(features)
-        return self.backbone.classifier(features)
+        return self.backbone.classifier(features.unsqueeze(1))
 
     def forward(self, x: torch.Tensor, channel_locations: torch.Tensor) -> torch.Tensor:
         """Forward pass through LUNA model.

@@ -46,7 +46,7 @@ def check_and_download_pretrained_model():
     return encoder_path
 
 class LaBraMBCIModel(nn.Module):
-    def __init__(self, num_classes, freeze_encoder: bool = True):
+    def __init__(self, num_classes, freeze_encoder: bool = True, linear_probe: bool = False):
         super().__init__()
 
         checkpoint = torch.load(check_and_download_pretrained_model(), weights_only=False)
@@ -75,7 +75,15 @@ class LaBraMBCIModel(nn.Module):
                 param.requires_grad = False
             model.eval()
         self.feature = model
-        self.head = nn.Linear(200, num_classes)
+        self.linear_probe = linear_probe
+        if linear_probe:
+            self.head = nn.Linear(200, num_classes)
+        else:
+            self.head = nn.Sequential(
+                nn.Linear(200, 200),
+                nn.GELU(),
+                nn.Linear(200, num_classes),
+            )
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x, input_chans):
@@ -172,6 +180,7 @@ class LaBraMModel(AbstractModel):
     def __init__(
         self,
         freeze_encoder: bool = True,
+        linear_probe: bool = False,
     ):
         super().__init__("LaBraMModel")
         print("inside init of LaBraMModel")
@@ -180,6 +189,7 @@ class LaBraMModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
         self.freeze_encoder = freeze_encoder
+        self.linear_probe = linear_probe
 
     def fit(self, X: List[np.ndarray|List[BaseRaw]], y: List[np.ndarray|List[str]], meta: List[Dict]) -> None:
         print("inside fit of LaBraMModel")
@@ -187,7 +197,11 @@ class LaBraMModel(AbstractModel):
         task_name = meta[0]["task_name"]
 
         num_classes = n_unique_labels(task_name)
-        self.model = LaBraMBCIModel(num_classes=num_classes, freeze_encoder=self.freeze_encoder).to(self.device) 
+        self.model = LaBraMBCIModel(
+            num_classes=num_classes,
+            freeze_encoder=self.freeze_encoder,
+            linear_probe=self.linear_probe,
+        ).to(self.device)
 
         # --- Data Pre-processing and Splitting ---
         datasets = [self.cache.cache(make_dataset)(X_, y_, task_name, meta_["sampling_frequency"], meta_["channel_names"], train=True, split_size=0.15)
