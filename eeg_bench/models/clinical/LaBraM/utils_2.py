@@ -118,8 +118,9 @@ class LaBraMDataset2(Dataset):
                 start = np.random.randint(0, max_start + 1)
                 data = data[..., start:start+required_length]
         
-        # Convert to torch tensor
-        data = torch.from_numpy(data).float()
+        # Materialize an owned tensor so DataLoader workers do not inherit
+        # non-resizable HDF5/numpy-backed storage.
+        data = torch.tensor(data, dtype=torch.float32)
         
         return data, label, channels  # Data, label, channels for train
     

@@ -28,7 +28,7 @@ python run_experiments.py \
     --percentages 0.1 0.25 0.5 0.75 \
     --seeds 100 \
     --gpus 3 \
-    --workers-per-gpu 2 \
+    --workers-per-gpu 1 \
     --log-dir "$LOG_DIR" \
     --resume \
     2>&1 | tee "$SUMMARY_LOG"
@@ -40,7 +40,7 @@ python run_experiments.py \
     --percentages 1.0 \
     --seeds 100 200 300 400 500 \
     --gpus 3 \
-    --workers-per-gpu 2 \
+    --workers-per-gpu 1 \
     --log-dir "$LOG_DIR" \
     --resume \
     2>&1 | tee -a "$SUMMARY_LOG"

@@ -121,6 +121,31 @@ class REVEClinicalModel(AbstractModel):
         self._ch_keep = None
         self.supports_full_dataset_cache = self.freeze_backbone
 
+    @staticmethod
+    def _collate_labeled_batch(batch):
+        xs = torch.stack([item[0] for item in batch])
+        ys = [item[1] for item in batch]
+        channels = [item[2] for item in batch]
+        if ys[0] is None:
+            yb = None
+        elif isinstance(ys[0], torch.Tensor):
+            yb = torch.stack(ys)
+        else:
+            yb = torch.as_tensor(ys)
+        return xs, yb, channels
+
+    @staticmethod
+    def _collate_predict_batch(batch):
+        xs = torch.stack([item[0] for item in batch])
+        raw_indices = [item[1] for item in batch]
+        if raw_indices[0] is None:
+            indices = torch.arange(len(batch), dtype=torch.long)
+            has_explicit_indices = False
+        else:
+            indices = torch.as_tensor(raw_indices, dtype=torch.long)
+            has_explicit_indices = True
+        return xs, indices, [item[2] for item in batch], has_explicit_indices
+
     def _normalize_ch_name(self, name: str) -> str:
         """Map a channel/electrode name to the position bank's expected casing."""
         if name in self._bank_vocab:
@@ -454,10 +479,20 @@ class REVEClinicalModel(AbstractModel):
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
         train_loader = DataLoader(
-            dataset_train, batch_size=64, shuffle=True, num_workers=8, pin_memory=True
+            dataset_train,
+            batch_size=64,
+            shuffle=True,
+            num_workers=8,
+            pin_memory=True,
+            collate_fn=self._collate_labeled_batch,
         )
         val_loader = DataLoader(
-            dataset_val, batch_size=64, shuffle=False, num_workers=8, pin_memory=True
+            dataset_val,
+            batch_size=64,
+            shuffle=False,
+            num_workers=8,
+            pin_memory=True,
+            collate_fn=self._collate_labeled_batch,
         )
 
         if self.linear_probe:
@@ -584,14 +619,19 @@ class REVEClinicalModel(AbstractModel):
             return np.array([])
 
         test_loader = DataLoader(
-            dataset_test, batch_size=64 if self.chunk_len_s else 1, shuffle=False, num_workers=0
+            dataset_test,
+            batch_size=64 if self.chunk_len_s else 1,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=self._collate_predict_batch,
         )
         coords, _ = self._get_channel_coords(self._actual_ch_names(dataset_test))
         self.model.eval()
 
         predictions = []
         indices = []
-        for x, idx, _ in tqdm(test_loader, desc="Predicting"):
+        sample_offset = 0
+        for x, batch_idx, _, has_explicit_indices in tqdm(test_loader, desc="Predicting"):
             x = x.to(self.device)
             if self._ch_keep is not None:
                 x = x[:, self._ch_keep, :]
@@ -599,7 +639,11 @@ class REVEClinicalModel(AbstractModel):
             logits = self.model(x, cb)
             pred = torch.argmax(logits, dim=1)
             predictions.append(pred.cpu())
-            indices.append(idx)
+            if has_explicit_indices:
+                indices.append(batch_idx)
+            else:
+                indices.append(batch_idx + sample_offset)
+                sample_offset += x.size(0)
 
         predictions = torch.cat(predictions, dim=0).cpu().numpy()
         indices = torch.cat(indices, dim=0).cpu().numpy()

@@ -9,6 +9,7 @@ from tqdm import tqdm
 import logging
 from functools import partial
 from ..abstract_model import AbstractModel
+from .LaBraM.utils_2 import reverse_map_label
 from ...utils import wandb_utils
 from ...utils.utils import CachedArrayDataset, create_temp_cache_dir, cleanup_temp_cache_dir
 
@@ -114,6 +115,10 @@ class REVEBenchmarkModel(AbstractModel):
         self._upper_to_bank = {name.upper(): name for name in bank_names}
 
         self.model = None
+        self.common_channels = None
+        self._ch_keep = None
+        self.task_name = None
+        self.label_encoder = None
 
     def _normalize_ch_name(self, name: str) -> str:
         """Map a channel/electrode name to the position bank's expected casing."""
@@ -177,6 +182,41 @@ class REVEBenchmarkModel(AbstractModel):
 
         ch_keep = [idx for idx, _ in kept] if len(kept) < len(clean_names) else None
         return positions, ch_keep
+
+    def _build_common_channels(self, meta: List[Dict]) -> List[str]:
+        common = []
+        for dataset_meta in meta:
+            for ch in dataset_meta["channel_names"]:
+                normed = ch.replace("EEG", "").strip().upper()
+                if normed not in common:
+                    common.append(normed)
+        return common
+
+    def _align_to_channels(self, data: np.ndarray, ch_names: List[str], common_channels: List[str]) -> np.ndarray:
+        channel_to_index = {ch: idx for idx, ch in enumerate(common_channels)}
+        aligned = np.zeros((data.shape[0], len(common_channels), data.shape[2]), dtype=data.dtype)
+
+        for src_idx, ch in enumerate(ch_names):
+            normed = ch.replace("EEG", "").strip().upper()
+            dst_idx = channel_to_index.get(normed)
+            if dst_idx is not None:
+                aligned[:, dst_idx, :] = data[:, src_idx, :]
+
+        return aligned
+
+    def _encode_labels(self, labels: List[np.ndarray]):
+        all_labels = np.concatenate(labels)
+        if np.issubdtype(all_labels.dtype, np.number):
+            self.label_encoder = None
+            return labels, len(np.unique(all_labels))
+
+        classes = list(dict.fromkeys(all_labels.tolist()))
+        self.label_encoder = {label: idx for idx, label in enumerate(classes)}
+        encoded = [
+            np.asarray([self.label_encoder[label] for label in label_array], dtype=np.int64)
+            for label_array in labels
+        ]
+        return encoded, len(classes)
 
     def _fit_linear_probe_cached(self, train_loader, n_epochs=10):
         assert self.model is not None
@@ -270,22 +310,26 @@ class REVEBenchmarkModel(AbstractModel):
         print("Initializing REVE Fit...")
 
         sample_X = X[0]
-        meta_data = meta[0]
+        n_samples, _, n_timepoints = sample_X.shape
+        self.task_name = meta[0]["task_name"]
+        y, n_classes = self._encode_labels(y)
+        self.common_channels = self._build_common_channels(meta)
 
-        n_samples, n_channels, n_timepoints = sample_X.shape
-        n_classes = len(np.unique(np.concatenate(y)))
-
-        channel_names = meta_data["channel_names"]
+        # Align all datasets into a shared channel layout before filtering
+        X = [
+            self._align_to_channels(dataset_X, dataset_meta["channel_names"], self.common_channels)
+            for dataset_X, dataset_meta in zip(X, meta)
+        ]
 
         # Get robust channel coordinates (handles bipolar + drops unresolvable)
-        positions, ch_keep = self._get_channel_coords(channel_names)
+        positions, ch_keep = self._get_channel_coords(self.common_channels)
         self._ch_keep = ch_keep
+        n_channels = positions.shape[0]
 
         # Filter channels if some were dropped
         if ch_keep is not None:
             X = [x[:, ch_keep, :] for x in X]
-            n_channels = len(ch_keep)
-            print(f"[REVE BCI] Kept {n_channels} of {sample_X.shape[1]} channels")
+            print(f"[REVE BCI] Kept {n_channels} of {len(self.common_channels)} channels")
 
         # Initialize Model
         self.model = REVEWrapper(
@@ -367,12 +411,12 @@ class REVEBenchmarkModel(AbstractModel):
         all_preds = []
 
         for i, (dataset_X, dataset_meta) in enumerate(zip(X, meta)):
-            # Filter channels to match training
-            if getattr(self, '_ch_keep', None) is not None:
+            dataset_X = self._align_to_channels(dataset_X, dataset_meta["channel_names"], self.common_channels)
+            if self._ch_keep is not None:
                 dataset_X = dataset_X[:, self._ch_keep, :]
 
             dataset = SimpleDataset(dataset_X, y=None)
-            positions, _ = self._get_channel_coords(dataset_meta["channel_names"])
+            positions, _ = self._get_channel_coords(self.common_channels)
             collate_fn = self._get_collate_fn(positions)
 
             loader = DataLoader(
@@ -391,4 +435,8 @@ class REVEBenchmarkModel(AbstractModel):
                     preds = torch.argmax(output, dim=1).cpu().numpy()
                     all_preds.append(preds)
 
-        return np.concatenate(all_preds, axis=0)
+        predictions = np.concatenate(all_preds, axis=0)
+        if self.label_encoder is not None:
+            inverse = {idx: label for label, idx in self.label_encoder.items()}
+            return np.array([inverse[int(pred)] for pred in predictions])
+        return np.array([reverse_map_label(int(pred), self.task_name) for pred in predictions])
