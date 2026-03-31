@@ -299,6 +299,7 @@ def save_results(
     results,
     dataset_names,
     task_name,
+    seeds: Optional[List[int]] = None,
     data_percentage: float = 1.0,
     data_stats: Optional[Dict] = None,
     linear_probe: bool = False,
@@ -318,13 +319,14 @@ def save_results(
     prefix_str = f"{result_prefix}_" if result_prefix else ""
     ckpt_str = f"_ckpt_{checkpoint_id}" if checkpoint_id else ""
     pct_str = f"_pct{int(data_percentage * 100)}" if data_percentage < 1.0 else ""
+    seed_str = f"_seed{int(seeds[0])}" if seeds is not None and len(seeds) == 1 else ""
     lp_str = "_LP" if linear_probe else ""
     noise_tag = format_noise_tag(eval_noise_types, eval_noise_snr_db)
     noise_str = f"_{noise_tag}" if noise_tag != "clean" else ""
     filename = os.path.join(
         get_config_value("results"),
         "raw",
-        f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}{noise_str}_{timestamp}.json",
+        f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{seed_str}{lp_str}{noise_str}_{timestamp}.json",
     )
 
     if task_name in get_multilabel_tasks():
@@ -348,6 +350,8 @@ def save_results(
         "dataset_names": dataset_names,
         "task_name": task_name,
         "timestamp": timestamp,
+        "seeds": seeds,
+        "seed": int(seeds[0]) if seeds is not None and len(seeds) == 1 else None,
         "data_percentage": data_percentage,
         "data_stats": data_stats,
         "linear_probe": linear_probe,

@@ -279,6 +279,7 @@ def benchmark(
                     results,
                     dataset_names,
                     task.name,
+                    seeds=[seed + rep_idx for rep_idx in range(reps)],
                     data_percentage=percentage,
                     data_stats=data_stats,
                     linear_probe=linear_probe,

@@ -21,24 +21,24 @@ echo "Started: $(date)"
 echo "Log dir: $LOG_DIR"
 echo "============================================================"
 
-echo ""
-echo "--- Phase 1: Data efficiency (single seed) ---"
-python run_experiments.py \
-    --models luna labram cbramod reve\
-    --percentages 0.1 0.25 0.5 0.75 \
-    --seeds 100 \
-    --gpus 3 \
-    --workers-per-gpu 1 \
-    --log-dir "$LOG_DIR" \
-    --resume \
-    2>&1 | tee "$SUMMARY_LOG"
+# echo ""
+# echo "--- Phase 1: Data efficiency (single seed) ---"
+# python run_experiments.py \
+#     --models luna labram cbramod\ 
+#     --percentages 0.1 0.25 0.5 0.75 \
+#     --seeds 100 \
+#     --gpus 3 \
+#     --workers-per-gpu 1 \
+#     --log-dir "$LOG_DIR" \
+#     --resume \
+#     2>&1 | tee "$SUMMARY_LOG"
 
 echo ""
-echo "--- Phase 2: Full data, 5 seeds for variance ---"
+echo "--- Phase 2: Full data, 3 seeds for variance ---"
 python run_experiments.py \
-    --models luna labram cbramod reve \
+    --models luna labram cbramod\
     --percentages 1.0 \
-    --seeds 100 200 300 400 500 \
+    --seeds 100 200 300 \
     --gpus 3 \
     --workers-per-gpu 1 \
     --log-dir "$LOG_DIR" \

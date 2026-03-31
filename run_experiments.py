@@ -29,6 +29,7 @@ import os
 import sys
 import time
 import json
+import re
 from itertools import product
 from multiprocessing import Pool, Manager
 from tqdm import tqdm
@@ -62,11 +63,12 @@ def normalize_task_name(task_name):
     return task_name
 
 
-def get_completed_experiments(results_dir="results/raw", linear_probe=None):
+def get_completed_experiments(results_dir="results/raw", log_dir=None, linear_probe=None):
     """Check which experiments have already completed based on result files."""
-    completed = set()
+    completed = set()  # (model, task, pct, seed, lp) - full resolution
+    legacy_counts = {}  # (model, task, pct, lp) -> count of seedless results
     if not os.path.exists(results_dir):
-        return completed
+        return completed, legacy_counts
 
     for f in glob.glob(os.path.join(results_dir, "*.json")):
         filename = os.path.basename(f)
@@ -91,10 +93,56 @@ def get_completed_experiments(results_dir="results/raw", linear_probe=None):
             if linear_probe is not None and lp_value != linear_probe:
                 continue
 
-            completed.add((model_name.lower().replace("model", ""), task_name, pct, lp_value))
+            model_key = model_name.lower().replace("model", "")
+            # Try to extract seed info (new results have this)
+            seed_value = payload.get("seed")
+            if seed_value is None:
+                seeds = payload.get("seeds")
+                if isinstance(seeds, list) and len(seeds) == 1:
+                    seed_value = seeds[0]
+
+            if seed_value is None:
+                seed_match = re.search(r"_seed(\d+)", filename)
+                if seed_match:
+                    seed_value = int(seed_match.group(1))
+
+            if seed_value is not None:
+                # New-style result with seed: add to seed-aware set
+                completed.add((model_key, task_name, pct, int(seed_value), lp_value))
+            else:
+                legacy_key = (model_key, task_name, pct, lp_value)
+                legacy_counts[legacy_key] = legacy_counts.get(legacy_key, 0) + 1
         except Exception:
             continue
-    return completed
+    # Fallback for legacy result files: infer completion from successful logs.
+    # Expected format: {model}_{task}_pct{N}_seed{S}_gpu{G}.log
+    if log_dir and os.path.exists(log_dir):
+        log_pattern = re.compile(r"^(?P<model>[^_]+)_(?P<task>.+)_pct(?P<pct>\d+)_seed(?P<seed>\d+)_gpu\d+\.log$")
+        for log_path in glob.glob(os.path.join(log_dir, "*.log")):
+            match = log_pattern.match(os.path.basename(log_path))
+            if not match:
+                continue
+            try:
+                with open(log_path, "r") as log_fp:
+                    content = log_fp.read()
+
+                if "Return code: 0" not in content:
+                    continue
+
+                lp_value = "--linear-probe" in content
+                if linear_probe is not None and lp_value != linear_probe:
+                    continue
+
+                model_name = match.group("model").lower().replace("model", "")
+                task_name = normalize_task_name(match.group("task"))
+                pct = int(match.group("pct")) / 100.0
+                seed = int(match.group("seed"))
+
+                completed.add((model_name, task_name, pct, seed, lp_value))
+            except Exception:
+                continue
+
+    return completed, legacy_counts
 
 
 def run_experiment(args):
@@ -206,14 +254,33 @@ def main():
     # Check for completed experiments
     if args.resume:
         linear_probe_mode = not args.no_linear_probe
-        completed = get_completed_experiments(linear_probe=linear_probe_mode)
-        experiments = [
-            (m, t, p, s)
-            for m, t, p, s in all_experiments
-            if (m, t, p, linear_probe_mode) not in completed
-        ]
+        completed, legacy_counts = get_completed_experiments(
+            results_dir="results/raw",
+            log_dir=args.log_dir,
+            linear_probe=linear_probe_mode,
+        )
+        experiments = []
+        legacy_consumed = 0
+        for m, t, p in product(args.models, args.tasks, args.percentages):
+            seeded_present = {
+                s for s in args.seeds if (m, t, p, s, linear_probe_mode) in completed
+            }
+            missing_seeds = [s for s in args.seeds if s not in seeded_present]
+            legacy_key = (m, t, p, linear_probe_mode)
+            legacy_count = min(legacy_counts.get(legacy_key, 0), len(missing_seeds))
+            legacy_consumed += legacy_count
+
+            # Let legacy seedless runs consume the earliest missing requested seeds.
+            skipped_missing = set(missing_seeds[:legacy_count])
+
+            for s in args.seeds:
+                if s in seeded_present or s in skipped_missing:
+                    continue
+                experiments.append((m, t, p, s))
         print(f"Already completed: {len(all_experiments) - len(experiments)}")
         print(f"Remaining: {len(experiments)}")
+        if legacy_consumed:
+            print(f"Legacy seedless repetitions consumed: {legacy_consumed}")
     else:
         experiments = all_experiments
 
@@ -221,48 +288,28 @@ def main():
         print("No experiments to run!")
         return
 
-    # Run larger percentages first to reduce tail time
-    experiments = sorted(experiments, key=lambda x: x[2], reverse=True)
-
-    # Split into Phase 1 (cache population) and Phase 2 (remaining seeds).
-    # Phase 1 runs one seed per (model, task, pct) to build h5 caches.
-    # Phase 2 runs remaining seeds — all caches are warm, safe to parallelize.
-    seen_combos = set()
-    phase1 = []
-    phase2 = []
-    for exp in experiments:
-        model, task, pct, seed = exp
-        combo = (model, task, pct)
-        if combo not in seen_combos:
-            seen_combos.add(combo)
-            phase1.append(exp)
-        else:
-            phase2.append(exp)
+    # Order queue by task, then by seed.
+    # Keep a deterministic tie-break on percentage (larger first), then model.
+    experiments = sorted(experiments, key=lambda x: (x[1], x[3], -x[2], x[0]))
 
     gpu_slots = [gpu_id for gpu_id in range(args.gpus) for _ in range(args.workers_per_gpu)]
     start_time = time.time()
     results = []
 
-    def run_phase(phase_experiments, phase_name):
-        if not phase_experiments:
-            return
-        jobs = [(model, task, pct, seed, args.log_dir, args.dry_run, args.no_linear_probe)
-                for model, task, pct, seed in phase_experiments]
-        print(f"\n=== {phase_name}: {len(jobs)} experiments with {total_workers} workers ===\n")
-        with Manager() as manager:
-            gpu_queue = manager.Queue()
-            for gpu_id in gpu_slots:
-                gpu_queue.put(gpu_id)
-            with Pool(total_workers) as pool:
-                for result in tqdm(
-                    pool.imap_unordered(run_experiment, [job + (gpu_queue,) for job in jobs]),
-                    total=len(jobs),
-                    desc=phase_name,
-                ):
-                    results.append(result)
-
-    run_phase(phase1, "Phase 1 (cache population)")
-    run_phase(phase2, "Phase 2 (remaining seeds)")
+    jobs = [(model, task, pct, seed, args.log_dir, args.dry_run, args.no_linear_probe)
+            for model, task, pct, seed in experiments]
+    print(f"\n=== Running {len(jobs)} experiments with {total_workers} workers ===\n")
+    with Manager() as manager:
+        gpu_queue = manager.Queue()
+        for gpu_id in gpu_slots:
+            gpu_queue.put(gpu_id)
+        with Pool(total_workers) as pool:
+            for result in tqdm(
+                pool.imap_unordered(run_experiment, [job + (gpu_queue,) for job in jobs]),
+                total=len(jobs),
+                desc="Experiments",
+            ):
+                results.append(result)
 
     elapsed = time.time() - start_time
 
