@@ -115,6 +115,7 @@ class LUNAClinicalWrapper(nn.Module):
         self.feature_dim = embed_dim * num_queries
 
         # Build LUNA model with classification head
+        out_classes = num_classes * (num_labels_per_chunk or 1)
         self.backbone = LUNA(
             patch_size=patch_size,
             num_queries=num_queries,
@@ -124,7 +125,7 @@ class LUNAClinicalWrapper(nn.Module):
             mlp_ratio=mlp_ratio,
             norm_layer=nn.LayerNorm,
             drop_path=0.0,
-            num_classes=num_classes,  # Classification mode
+            num_classes=out_classes,  # Classification mode
         ).to(self.device)
 
         # Load pretrained weights if available
