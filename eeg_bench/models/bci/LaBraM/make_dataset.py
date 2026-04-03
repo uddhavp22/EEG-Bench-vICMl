@@ -99,6 +99,72 @@ def make_dataset(data: np.ndarray, labels: np.ndarray|None, task_name: str, samp
         return LaBraMBCIDataset(data, labels, target_rate, target_channels)
 
 
+def make_dataset_reve(
+    data: np.ndarray,
+    labels: np.ndarray | None,
+    task_name: str,
+    sampling_rate: int,
+    ch_names: List[str],
+    target_rate: int = 200,
+    target_channels: Optional[List[str]] = None,
+    l_freq: float = 0.1,
+    h_freq: float = 75.0,
+    train: bool = True,
+    split_size=0.1,
+) -> LaBraMBCIDataset:
+    """
+    REVE preprocessing:
+    - Bandpass: 0.1-75 Hz
+    - Notch: 50 + 60 Hz when available
+    - Resample: 200 Hz
+    - Stable standard_1020 channel ordering per dataset
+    """
+    print(f"\n[REVE] Processing data with shape: {data.shape}")
+    logging.info(f"[REVE] data shape: {data.shape}, sampling_rate: {sampling_rate} Hz")
+
+    if len(data) == 0:
+        if train:
+            return LaBraMBCIDataset(data, labels, sampling_rate, ch_names), LaBraMBCIDataset(data, labels, sampling_rate, ch_names)
+        return LaBraMBCIDataset(data, labels, sampling_rate, ch_names)
+
+    ch_names = [ch.upper() for ch in ch_names]
+    if target_channels is not None:
+        target_channels = [ch.upper() for ch in target_channels]
+    else:
+        target_channels = _ordered_target_channels(ch_names)
+    data = data[:, [ch_names.index(ch) for ch in target_channels], :]
+
+    data = filter_data(data, sfreq=sampling_rate, l_freq=l_freq, h_freq=h_freq, method='fir', verbose=False)
+    notch_freqs = [freq for freq in [50, 60] if freq < 0.5 * sampling_rate]
+    if notch_freqs:
+        data = notch_filter(data, Fs=sampling_rate, freqs=notch_freqs, verbose=False)
+    data = resample(data, sampling_rate, target_rate, axis=2, filter='kaiser_best')
+    logging.info(f"[REVE] data shape after resampling: {data.shape}")
+
+    n_samples = data.shape[2]
+    n_seconds = max(1, int(np.floor(n_samples / target_rate)))
+    new_n_samples = n_seconds * target_rate
+    if new_n_samples > n_samples:
+        padding = new_n_samples - n_samples
+        data = np.pad(data, ((0, 0), (0, 0), (0, padding)), mode='constant', constant_values=0)
+    elif new_n_samples < n_samples:
+        data = data[:, :, :new_n_samples]
+
+    if labels is not None:
+        labels = np.array([map_label(label, task_name) for label in labels])
+        labels = np.eye(n_unique_labels(task_name))[labels]
+
+    if train:
+        data_train, data_val, labels_train, labels_val = train_test_split(
+            data, labels, test_size=split_size, random_state=42
+        )
+        return (
+            LaBraMBCIDataset(data_train, labels_train, target_rate, target_channels),
+            LaBraMBCIDataset(data_val, labels_val, target_rate, target_channels),
+        )
+    return LaBraMBCIDataset(data, labels, target_rate, target_channels)
+
+
 def make_dataset_lejepa(data: np.ndarray, labels: np.ndarray|None, task_name: str, sampling_rate: int,
                         ch_names: List[str], target_rate: int = 250, target_channels: Optional[List[str]] = None,
                         l_freq: float = 0.1, h_freq: float = 75.0, train: bool = True, split_size=0.1) -> LaBraMBCIDataset:
