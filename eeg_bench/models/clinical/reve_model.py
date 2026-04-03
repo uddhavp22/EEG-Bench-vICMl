@@ -108,14 +108,22 @@ class REVEClinicalModel(AbstractModel):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_classes = num_classes
         self.num_labels_per_chunk = num_labels_per_chunk
-        if chunk_len_s is None:
+        if num_labels_per_chunk is not None:
             self.chunk_len_s = (
-                DEFAULT_MULTILABEL_CHUNK_LEN_S
-                if num_labels_per_chunk is not None
-                else DEFAULT_SINGLE_LABEL_CHUNK_LEN_S
+                DEFAULT_MULTILABEL_CHUNK_LEN_S if chunk_len_s is None else chunk_len_s
             )
+            self.internal_chunk_len_s = None
+            self.use_internal_chunking = False
         else:
-            self.chunk_len_s = chunk_len_s
+            self.chunk_len_s = None
+            self.internal_chunk_len_s = (
+                DEFAULT_SINGLE_LABEL_CHUNK_LEN_S if chunk_len_s is None else chunk_len_s
+            )
+            self.use_internal_chunking = True
+            logger.info(
+                "[REVE Clinical] Single-label task detected. Using internal %s-second chunking.",
+                self.internal_chunk_len_s,
+            )
         self.linear_probe = linear_probe
         self.freeze_backbone = freeze_backbone or linear_probe
 
@@ -254,15 +262,102 @@ class REVEClinicalModel(AbstractModel):
             coords=coords,
         ).to(self.device)
 
+    def _internal_chunk_len_samples(self, sfreq: int) -> Optional[int]:
+        if not self.use_internal_chunking or self.internal_chunk_len_s is None:
+            return None
+        return max(1, int(round(self.internal_chunk_len_s * sfreq)))
+
+    def _split_signal_into_chunks(self, signal: torch.Tensor, chunk_len: int) -> torch.Tensor:
+        """Split a recording [C, T] into >=1 contiguous chunks."""
+        assert signal.dim() == 2, "Signal must have shape [C, T]"
+        signal_len = signal.shape[-1]
+        if signal_len <= chunk_len:
+            return signal.unsqueeze(0).contiguous()
+
+        n_chunks = max(1, signal_len // chunk_len)
+        trimmed = n_chunks * chunk_len
+        if trimmed == 0:
+            return signal.unsqueeze(0).contiguous()
+        signal = signal[..., :trimmed].contiguous()
+        return signal.view(signal.shape[0], n_chunks, chunk_len).permute(1, 0, 2).contiguous()
+
+    def _expand_label_for_chunks(self, label: torch.Tensor, num_chunks: int) -> torch.Tensor:
+        if label.dim() == 0:
+            return label.repeat(num_chunks)
+        repeat_dims = [num_chunks] + [1] * label.dim()
+        return label.unsqueeze(0).repeat(*repeat_dims)
+
+    def _prepare_train_batch(
+        self,
+        x: torch.Tensor,
+        yb: torch.Tensor,
+        coords: torch.Tensor,
+        sfreq: int = 200,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._ch_keep is not None:
+            x = x[:, self._ch_keep, :]
+
+        if not self.use_internal_chunking:
+            coords_batch = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            return x, yb, coords_batch
+
+        chunk_len = self._internal_chunk_len_samples(sfreq)
+        assert chunk_len is not None
+
+        chunked_x, chunked_y, chunked_cb = [], [], []
+        for idx in range(x.size(0)):
+            sample_chunks = self._split_signal_into_chunks(x[idx], chunk_len)
+            chunked_x.append(sample_chunks)
+            chunked_y.append(self._expand_label_for_chunks(yb[idx], sample_chunks.size(0)))
+            chunked_cb.append(coords.unsqueeze(0).expand(sample_chunks.size(0), -1, -1))
+
+        return (
+            torch.cat(chunked_x, dim=0),
+            torch.cat(chunked_y, dim=0),
+            torch.cat(chunked_cb, dim=0),
+        )
+
+    def _prepare_inference_batch(
+        self,
+        x: torch.Tensor,
+        indices: torch.Tensor,
+        coords: torch.Tensor,
+        sfreq: int = 200,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._ch_keep is not None:
+            x = x[:, self._ch_keep, :]
+
+        if not self.use_internal_chunking:
+            coords_batch = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            return x, indices, coords_batch
+
+        chunk_len = self._internal_chunk_len_samples(sfreq)
+        assert chunk_len is not None
+
+        chunked_x, chunked_idx, chunked_cb = [], [], []
+        for idx in range(x.size(0)):
+            sample_chunks = self._split_signal_into_chunks(x[idx], chunk_len)
+            chunked_x.append(sample_chunks)
+            chunked_idx.append(indices[idx].repeat(sample_chunks.size(0)))
+            chunked_cb.append(coords.unsqueeze(0).expand(sample_chunks.size(0), -1, -1))
+
+        return (
+            torch.cat(chunked_x, dim=0),
+            torch.cat(chunked_idx, dim=0),
+            torch.cat(chunked_cb, dim=0),
+        )
+
     def _cache_payload(self, task_name: str, meta: List[Dict]) -> Dict:
         return {
             "task": task_name,
             "datasets": [m.get("name", f"dataset_{idx}") for idx, m in enumerate(meta)],
             "chunk_len_s": self.chunk_len_s,
+            "internal_chunk_len_s": self.internal_chunk_len_s,
             "num_labels_per_chunk": self.num_labels_per_chunk,
             "backbone": REVE_BACKBONE_ID,
             "pooling": "mean_tokens",
             "preprocess": "make_dataset_2",
+            "chunk_mode": "internal" if self.use_internal_chunking else "dataset",
             "model": self.name,
         }
 
@@ -283,10 +378,11 @@ class REVEClinicalModel(AbstractModel):
             if self.model is None:
                 coords, ch_keep = self._get_channel_coords(cache_bundle["metadata"]["channels"])
                 self._ch_keep = ch_keep
-                sample_shape = cache_bundle["metadata"]["sample_shape"]
-                sample = torch.zeros(sample_shape[0], sample_shape[1], dtype=torch.float32)
-                if ch_keep is not None:
-                    sample = sample[ch_keep, :]
+                model_input_shape = cache_bundle["metadata"].get(
+                    "model_input_shape",
+                    cache_bundle["metadata"]["sample_shape"],
+                )
+                sample = torch.zeros(model_input_shape[0], model_input_shape[1], dtype=torch.float32)
                 self._init_model(sample.numpy(), coords)
             return cache_bundle
 
@@ -321,11 +417,14 @@ class REVEClinicalModel(AbstractModel):
         sample_data, _, _ = dataset[0]
         if ch_keep is not None:
             sample_data = sample_data[ch_keep, :]
+        if self.use_internal_chunking:
+            chunk_len = self._internal_chunk_len_samples(getattr(dataset, "sfreq", 200))
+            sample_data = self._split_signal_into_chunks(sample_data, chunk_len)[0]
         self._init_model(sample_data.numpy(), coords)
 
         loader = DataLoader(
             dataset,
-            batch_size=64,
+            batch_size=64 if self.chunk_len_s else 1,
             shuffle=False,
             num_workers=0,
             collate_fn=self._collate_labeled_batch,
@@ -339,18 +438,31 @@ class REVEClinicalModel(AbstractModel):
         self.model.eval()
         for batch_idx, (x, yb, _) in enumerate(tqdm(loader, desc="Cache REVE clinical embeddings", leave=False)):
             x = x.to(self.device)
-            if self._ch_keep is not None:
-                x = x[:, self._ch_keep, :]
             if not self.model.is_multilabel_task and yb.dim() > 1:
                 yb = yb.argmax(dim=1)
-            coords_batch = coords.unsqueeze(0).expand(x.size(0), -1, -1)
-            feats = self.model.extract_features(x, coords_batch).cpu()
+            chunk_x, chunk_y, coords_batch = self._prepare_train_batch(
+                x,
+                yb,
+                coords,
+                getattr(dataset, "sfreq", 200),
+            )
+            feats = self.model.extract_features(chunk_x, coords_batch).cpu()
             features.append(feats)
-            labels.append(yb.cpu())
+            labels.append(chunk_y.cpu())
 
             start = batch_idx * loader.batch_size
             end = start + x.size(0)
-            record_ids.append(torch.tensor(ordered_record_ids[start:end], dtype=torch.long))
+            batch_record_ids = []
+            for rec_id, sample in zip(ordered_record_ids[start:end], x):
+                n_chunks = 1
+                if self.use_internal_chunking:
+                    chunk_len = self._internal_chunk_len_samples(getattr(dataset, "sfreq", 200))
+                    n_chunks = self._split_signal_into_chunks(
+                        sample[self._ch_keep, :] if self._ch_keep is not None else sample,
+                        chunk_len,
+                    ).shape[0]
+                batch_record_ids.extend([rec_id] * n_chunks)
+            record_ids.append(torch.tensor(batch_record_ids, dtype=torch.long))
 
         cache_bundle = {
             "features": torch.cat(features, dim=0).float(),
@@ -359,7 +471,9 @@ class REVEClinicalModel(AbstractModel):
             "metadata": {
                 "channels": channels,
                 "sample_shape": tuple(dataset[0][0].shape),
+                "model_input_shape": tuple(sample_data.shape),
                 "chunk_len_s": self.chunk_len_s,
+                "internal_chunk_len_s": self.internal_chunk_len_s,
             },
         }
         torch.save(cache_bundle, cache_file)
@@ -566,21 +680,25 @@ class REVEClinicalModel(AbstractModel):
         sample_data, _, _ = dataset_train[0]
         if self._ch_keep is not None:
             sample_data = sample_data[self._ch_keep, :]
+        if self.use_internal_chunking:
+            chunk_len = self._internal_chunk_len_samples(getattr(dataset_train, "sfreq", 200))
+            sample_data = self._split_signal_into_chunks(sample_data, chunk_len)[0]
         self._init_model(sample_data.numpy(), coords_train)
 
         class_weights = torch.tensor(calc_class_weights(y, task_name), dtype=torch.float32, device=self.device)
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+        batch_size = 64 if self.chunk_len_s else 1
 
         train_loader = DataLoader(
             dataset_train,
-            batch_size=64,
+            batch_size=batch_size,
             shuffle=True,
             num_workers=0,
             collate_fn=self._collate_labeled_batch,
         )
         val_loader = DataLoader(
             dataset_val,
-            batch_size=64,
+            batch_size=batch_size,
             shuffle=False,
             num_workers=0,
             collate_fn=self._collate_labeled_batch,
@@ -604,11 +722,14 @@ class REVEClinicalModel(AbstractModel):
             for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch + 1}", leave=False):
                 x = x.to(self.device)
                 yb = yb.to(self.device)
-                if self._ch_keep is not None:
-                    x = x[:, self._ch_keep, :]
                 if not self.model.is_multilabel_task and yb.dim() > 1:
                     yb = yb.argmax(dim=1)
-                coords_batch = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
+                x, yb, coords_batch = self._prepare_train_batch(
+                    x,
+                    yb,
+                    coords_train,
+                    getattr(dataset_train, "sfreq", 200),
+                )
 
                 optimizer.zero_grad()
                 logits = self.model(x, coords_batch)
@@ -639,11 +760,14 @@ class REVEClinicalModel(AbstractModel):
                 for x, yb, _ in val_loader:
                     x = x.to(self.device)
                     yb = yb.to(self.device)
-                    if self._ch_keep is not None:
-                        x = x[:, self._ch_keep, :]
                     if not self.model.is_multilabel_task and yb.dim() > 1:
                         yb = yb.argmax(dim=1)
-                    coords_batch = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
+                    x, yb, coords_batch = self._prepare_train_batch(
+                        x,
+                        yb,
+                        coords_val,
+                        getattr(dataset_val, "sfreq", 200),
+                    )
                     logits = self.model(x, coords_batch)
                     loss = self.model.loss_fn(logits, yb)
                     val_loss += loss.item() * x.size(0)
@@ -709,23 +833,28 @@ class REVEClinicalModel(AbstractModel):
 
         self.model.eval()
         for x, batch_idx, _, has_explicit_indices in tqdm(test_loader, desc="Predicting", leave=False):
+            raw_batch_size = x.size(0)
             x = x.to(self.device)
-            if self._ch_keep is not None:
-                x = x[:, self._ch_keep, :]
-            coords_batch = coords.unsqueeze(0).expand(x.size(0), -1, -1)
+            batch_idx = batch_idx.to(self.device)
+            if not has_explicit_indices:
+                batch_idx = batch_idx + sample_offset
+            x, batch_idx, coords_batch = self._prepare_inference_batch(
+                x,
+                batch_idx,
+                coords,
+                getattr(dataset_test, "sfreq", 200),
+            )
             logits = self.model(x, coords_batch)
             pred = torch.argmax(logits, dim=1)
             predictions.append(pred.cpu())
-            if has_explicit_indices:
-                indices.append(batch_idx)
-            else:
-                indices.append(batch_idx + sample_offset)
-                sample_offset += x.size(0)
+            indices.append(batch_idx.cpu())
+            if not has_explicit_indices:
+                sample_offset += raw_batch_size
 
         predictions = torch.cat(predictions, dim=0).cpu().numpy()
         indices = torch.cat(indices, dim=0).cpu().numpy()
 
-        if self.chunk_len_s is not None and not self.model.is_multilabel_task:
+        if not self.model.is_multilabel_task and predictions.shape[0] != np.unique(indices).shape[0]:
             aggregated_predictions = []
             for idx in np.unique(indices):
                 idx_predictions = predictions[indices == idx]
