@@ -50,6 +50,7 @@ import sys
 import time
 import re
 import glob
+import json
 from pathlib import Path
 from dataclasses import dataclass
 from multiprocessing import Pool
@@ -84,6 +85,7 @@ def normalize_task_name(task_name):
 
 EMBED_CACHE_VERSION = os.getenv("EEG_BENCH_EMBED_CACHE_VERSION", "v2")
 ALL_TASKS = CLINICAL_TASKS + BCI_TASKS
+RESUME_INDEX_FILENAME = ".resume_index.json"
 
 
 @dataclass
@@ -363,11 +365,87 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     """
     Check which experiments have already completed based on result files.
 
-    Returns set of (model_name, task, checkpoint_id, percentage, probe_head) tuples.
+    Returns set of (model_name, task, checkpoint_id, percentage, probe_head, seed) tuples.
     """
+    def _parse_result_file(file_path: str, filename: str):
+        match = re.match(
+            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_(ATTN|MLP))?_(\d{8}_\d{6})\.json",
+            filename
+        )
+        if not match:
+            return None
+
+        prefix, _model_class, ckpt_id, pct_str, probe_suffix, _timestamp = match.groups()
+
+        # Split prefix into model_name and task by matching known task names at the end.
+        model_name = None
+        task = None
+        for known_task in ALL_TASKS:
+            possible_patterns = [
+                f"{known_task}_clinical",
+                f"{known_task}_bci",
+                known_task,
+            ]
+
+            for full_name, short_name in TASK_NAME_MAP.items():
+                if short_name == known_task:
+                    possible_patterns.insert(0, full_name)
+
+            for pattern in possible_patterns:
+                if prefix.endswith("_" + pattern):
+                    model_name = prefix[:-(len(pattern) + 1)]
+                    task = normalize_task_name(pattern)
+                    break
+                if prefix == pattern:
+                    model_name = ""
+                    task = normalize_task_name(pattern)
+                    break
+
+            if task:
+                break
+
+        if model_name is None or not task:
+            return None
+
+        pct = int(pct_str) / 100 if pct_str else 1.0
+        probe_head = {
+            "ATTN": "attentive",
+            "MLP": "mlp",
+        }.get(probe_suffix, "linear")
+
+        # Conservative policy: if seed is missing/unreadable, keep as None.
+        seed = None
+        try:
+            with open(file_path, "r") as handle:
+                result_json = json.load(handle)
+            raw_seed = result_json.get("seed")
+            if raw_seed is not None:
+                seed = int(raw_seed)
+        except Exception:
+            pass
+
+        return (model_name, task, ckpt_id, pct, probe_head, seed)
+
     completed = set()
     if not os.path.exists(results_dir):
         return completed
+
+    index_path = os.path.join(results_dir, RESUME_INDEX_FILENAME)
+    index = {"version": 1, "files": {}}
+    index_changed = False
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, "r") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict) and isinstance(loaded.get("files"), dict):
+                index = loaded
+        except Exception:
+            # Corrupt/unreadable index: rebuild from scratch.
+            index = {"version": 1, "files": {}}
+            index_changed = True
+
+    indexed_files = index.setdefault("files", {})
+    current_basenames = set()
 
     # Pattern: {model_name}_{task}_{ModelClass}_ckpt_{checkpoint_id}[_pctXX][_LP][_{ATTN|MLP}]_{timestamp}.json
     # Examples:
@@ -375,60 +453,50 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     # - lejepa_base_global_proj_abnormal_clinical_LeJEPAClinical_ckpt_last_LP_ATTN_20260124_122416.json
     # - lejepa_base_global_proj_Left Hand vs Right Hand vs Feet vs Tongue MI_LeJEPABCI_ckpt_last_LP_20260124_192457.json
     
-    for f in glob.glob(os.path.join(results_dir, "*.json")):
-        filename = os.path.basename(f)
-        
-        # Match pattern: *_LeJEPA{Type}_ckpt_{checkpoint_id}[_pctXX][_LP]_{timestamp}.json
-        # match = re.match(
-        #     r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_ATTN)?_(\d{8}_\d{6})\.json",
-        #     filename
-        # )
-        match = re.match(
-            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_(ATTN|MLP))?_(\d{8}_\d{6})\.json",
-            filename
-        )
-        if match:
-            prefix, model_class, ckpt_id, pct_str, probe_suffix, timestamp = match.groups()
-            
-            # Split prefix into model_name and task
-            # Try to find a known task at the end of prefix
-            model_name = None
-            task = None
-            
-            # Try each known task (including space-separated ones)
-            for known_task in ALL_TASKS:
-                # Build possible task patterns to match in filename
-                possible_patterns = [
-                    f"{known_task}_clinical",
-                    f"{known_task}_bci",
-                    known_task
-                ]
-                
-                # Also check for the reverse mapping (e.g., "Left Hand vs Right Hand vs Feet vs Tongue MI")
-                for full_name, short_name in TASK_NAME_MAP.items():
-                    if short_name == known_task:
-                        possible_patterns.insert(0, full_name)
-                
-                for pattern in possible_patterns:
-                    if prefix.endswith("_" + pattern):
-                        model_name = prefix[:-(len(pattern) + 1)]
-                        task = normalize_task_name(pattern)
-                        break
-                    elif prefix == pattern:
-                        model_name = ""
-                        task = normalize_task_name(pattern)
-                        break
-                
-                if task:
-                    break
-            
-            if model_name is not None and task:
-                pct = int(pct_str) / 100 if pct_str else 1.0
-                probe_head = {
-                    "ATTN": "attentive",
-                    "MLP": "mlp",
-                }.get(probe_suffix, "linear")
-                completed.add((model_name, task, ckpt_id, pct, probe_head))
+    for file_path in glob.glob(os.path.join(results_dir, "*.json")):
+        filename = os.path.basename(file_path)
+        if filename == RESUME_INDEX_FILENAME:
+            continue
+
+        current_basenames.add(filename)
+        try:
+            stat = os.stat(file_path)
+        except OSError:
+            continue
+
+        cached = indexed_files.get(filename)
+        cached_result = None
+        if isinstance(cached, dict):
+            if cached.get("mtime") == stat.st_mtime and cached.get("size") == stat.st_size:
+                cached_result = cached.get("result")
+
+        if cached_result is None:
+            parsed = _parse_result_file(file_path, filename)
+            indexed_files[filename] = {
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "result": list(parsed) if parsed is not None else None,
+            }
+            index_changed = True
+            result_tuple = parsed
+        else:
+            result_tuple = tuple(cached_result)
+
+        if result_tuple is not None:
+            completed.add(result_tuple)
+
+    stale_files = [name for name in indexed_files.keys() if name not in current_basenames]
+    for stale_name in stale_files:
+        del indexed_files[stale_name]
+        index_changed = True
+
+    if index_changed:
+        try:
+            with open(index_path, "w") as f:
+                json.dump(index, f)
+        except Exception:
+            pass
+
     return completed
 
 
@@ -447,8 +515,11 @@ def run_experiment(args: Tuple) -> Tuple:
 
     cmd = [sys.executable, "benchmark_console.py"] + experiment.to_cmd_args()
 
-    log_name = (f"{experiment.model_name}_{experiment.task}_"
-                f"{experiment.checkpoint_id}_pct{int(experiment.percentage*100)}_gpu{gpu_id}.log")
+    log_name = (
+        f"{experiment.model_name}_{experiment.task}_"
+        f"{experiment.checkpoint_id}_pct{int(experiment.percentage*100)}_"
+        f"{experiment.probe_head}_seed{experiment.seed}_gpu{gpu_id}.log"
+    )
     log_file = os.path.join(log_dir, log_name)
 
     if dry_run:
@@ -574,7 +645,7 @@ def main():
         original_count = len(experiments)
         experiments = [
             e for e in experiments
-            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.probe_head) not in completed
+            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.probe_head, e.seed) not in completed
         ]
         print(f"Already completed: {original_count - len(experiments)}")
         print(f"Remaining: {len(experiments)}")

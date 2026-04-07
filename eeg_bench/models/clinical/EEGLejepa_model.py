@@ -69,7 +69,7 @@ EMBED_CACHE_VERSION = os.getenv("EMBED_CACHE_VERSION", "v2")
     #     return self.fc(pooled)
 
 class AttentiveProbe(nn.Module):
-    def __init__(self, dim: int, out_dim: int, use_mlp: bool = False):
+    def __init__(self, dim: int, out_dim: int, use_mlp: bool = False, dropout: float = 0.4):
         super().__init__()
 
         # Single learned query
@@ -77,9 +77,11 @@ class AttentiveProbe(nn.Module):
 
         # Value projection (linear here, but could be identity?)
         self.value_proj = nn.Linear(dim, dim)
+        self.value_dropout = nn.Dropout(dropout)
 
         # Normalization after pooling
         self.norm = nn.LayerNorm(dim)
+        self.out_dropout = nn.Dropout(dropout)
 
         # Output head
         if use_mlp:
@@ -105,7 +107,7 @@ class AttentiveProbe(nn.Module):
         scores = torch.einsum("bqd,bsd->bqs", q, x) / math.sqrt(D)
         weights = torch.softmax(scores, dim=-1)  # (B, 1, S)
 
-        values = self.value_proj(x)
+        values = self.value_dropout(self.value_proj(x))
         pooled = torch.einsum("bqs,bsd->bqd", weights, values)
 
         return pooled.squeeze(1)
@@ -124,6 +126,7 @@ class AttentiveProbe(nn.Module):
             raise ValueError(f"Unexpected input shape: {tuple(x.shape)}")
 
         pooled = self.norm(pooled)
+        pooled = self.out_dropout(pooled)
         return self.head(pooled)
 
 
@@ -135,7 +138,7 @@ def build_probe_head(dim: int, out_dim: int, probe_head: str) -> nn.Module:
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
             nn.ELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
             nn.Linear(dim, out_dim),
         )
     if probe_head == "attentive":
@@ -461,6 +464,13 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             probe_head=self.probe_head,
         ).to(self.device)
         self._eval_noise_config: Optional[Dict] = None
+
+    def _get_probe_optimizer_defaults(self) -> Dict[str, float]:
+        if self.probe_head == "attentive":
+            return {"max_lr": 3e-4, "weight_decay": 0.1, "patience": 5}
+        if self.probe_head == "mlp":
+            return {"max_lr": 1e-3, "weight_decay": 0.05, "patience": 6}
+        return {"max_lr": 4e-4, "weight_decay": 0.01, "patience": 10}
 
     def set_eval_noise_config(self, config: Optional[Dict]) -> None:
         """Set evaluation-time noise configuration (opt-in)."""
@@ -826,7 +836,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.model.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
         max_epochs = 30
-        patience = 10
+        probe_hparams = self._get_probe_optimizer_defaults()
+        patience = int(probe_hparams["patience"])
 
         coords_train = self._coords(dataset_train.ch_names)
 
@@ -883,9 +894,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
             trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
             
-
-            max_lr = 5e-2 #1e-3 if bs < 1024 else 1e-2
-            optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=1e-2)
+            max_lr = probe_hparams["max_lr"]
+            weight_decay = probe_hparams["weight_decay"]
+            optimizer = optim.AdamW(trainable_params, lr=max_lr, weight_decay=weight_decay)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=max_epochs,
@@ -960,10 +971,11 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             print("[LeJEPAClinical] Using full forward pass (freeze_encoder=False)")
 
             steps_per_epoch = math.ceil(len(train_loader))
-            max_lr = 4e-4
+            max_lr = probe_hparams["max_lr"]
+            weight_decay = probe_hparams["weight_decay"]
 
             trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=weight_decay)
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
                 max_lr=max_lr,

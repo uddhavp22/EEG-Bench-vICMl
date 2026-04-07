@@ -29,7 +29,7 @@ training:
   linear_probe: true
   probe_head: mlp
   data_percentages: [1.0]
-  seeds: [42]
+  seeds: [42, 43, 44]
 
 execution:
   gpus: 1

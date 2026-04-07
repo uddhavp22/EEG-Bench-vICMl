@@ -69,7 +69,7 @@ def build_probe_head(dim: int, out_dim: int, probe_head: str) -> nn.Module:
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
             nn.ELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
             nn.Linear(dim, out_dim),
         )
     if probe_head == "attentive":
@@ -277,6 +277,11 @@ class EEGLeJEPABCIModel(AbstractModel):
 
         # Load position bank with HuggingFace fallback
         self.pos_bank = self._load_position_bank(pos_bank_path)
+
+    def _get_probe_optimizer_defaults(self) -> Dict[str, float]:
+        if self.probe_head == "mlp":
+            return {"max_lr": 1e-3, "weight_decay": 0.05, "patience": 6}
+        return {"max_lr": 1e-4, "weight_decay": 0.01, "patience": 10}
 
     def _load_position_bank(self, local_fallback_path: str):
         """Load REVE position bank - try local first, fall back to HuggingFace."""
@@ -559,7 +564,8 @@ class EEGLeJEPABCIModel(AbstractModel):
         batch_size = 64
         num_workers = 8
         max_epochs = 30
-        patience = 10
+        probe_hparams = self._get_probe_optimizer_defaults()
+        patience = int(probe_hparams["patience"])
 
         if self.freeze_encoder:
             print("[LeJEPABCI] Using cached embeddings (freeze_encoder=True)")
@@ -597,9 +603,10 @@ class EEGLeJEPABCIModel(AbstractModel):
             
             # Setup optimizer for head only
             steps_per_epoch = math.ceil(len(cached_train_loader))
-            max_lr = 1e-4 #WAT DO I CHOOOOOOOOOOSE? 
+            max_lr = probe_hparams["max_lr"]
+            weight_decay = probe_hparams["weight_decay"]
             
-            optimizer = optim.AdamW(self.model.head.parameters(), lr=1e-6, weight_decay=0.01)
+            optimizer = optim.AdamW(self.model.head.parameters(), lr=1e-6, weight_decay=weight_decay)
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
                 max_lr=max_lr,
@@ -665,10 +672,11 @@ class EEGLeJEPABCIModel(AbstractModel):
             ]
 
             steps_per_epoch = math.ceil(sum(len(train_loader) for train_loader in train_loader_list))
-            max_lr = 1e-4
+            max_lr = probe_hparams["max_lr"]
+            weight_decay = probe_hparams["weight_decay"]
 
             trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=0.01)
+            optimizer = optim.AdamW(trainable_params, lr=1e-6, weight_decay=weight_decay)
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
                 max_lr=max_lr,

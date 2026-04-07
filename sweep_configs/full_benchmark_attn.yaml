@@ -33,6 +33,7 @@ training:
   data_percentages: [1.0]
 
 execution:
-  gpus: 2
+  gpus: 1
   workers_per_gpu: 1
-  log_dir: results_rebuttal/lejepa_attn_subset
+  log_dir: rebuttal_logs/lejepa_attn_subset
+  results_dir: results_rebuttal/lejepa_attn_subset
