@@ -15,8 +15,8 @@ from transformers import AutoModel
 from ..abstract_model import AbstractModel
 from ..reve_utils import (
     REVE_BACKBONE_ID,
-    REVE_POSITIONS_ID,
     build_reve_cache_path,
+    load_reve_position_bank,
     pool_reve_features,
 )
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
@@ -127,7 +127,7 @@ class REVEClinicalModel(AbstractModel):
         self.linear_probe = linear_probe
         self.freeze_backbone = freeze_backbone or linear_probe
 
-        self.pos_bank = AutoModel.from_pretrained(REVE_POSITIONS_ID, trust_remote_code=True).to(self.device)
+        self.pos_bank = load_reve_position_bank(self.device)
         bank_names = self.pos_bank.get_all_positions()
         self._bank_vocab = set(bank_names)
         self._upper_to_bank = {name.upper(): name for name in bank_names}
@@ -153,7 +153,7 @@ class REVEClinicalModel(AbstractModel):
     def _collate_predict_batch(batch):
         xs = torch.stack([item[0] for item in batch])
         raw_indices = [item[1] for item in batch]
-        if raw_indices[0] is None:
+        if any(idx is None for idx in raw_indices):
             indices = torch.arange(len(batch), dtype=torch.long)
             has_explicit_indices = False
         else:
@@ -862,6 +862,15 @@ class REVEClinicalModel(AbstractModel):
             predictions = np.array(aggregated_predictions)
 
         if self.model.is_multilabel_task:
-            return predictions
+            grouped_predictions: Dict[int, List[np.ndarray]] = {}
+            for rec_name, pred in zip(dataset_test.recording_names, predictions):
+                rec_idx = self._parse_recording_index(rec_name)
+                grouped_predictions.setdefault(rec_idx, []).append(np.asarray(pred))
+
+            ordered_predictions = [
+                np.concatenate(grouped_predictions[rec_idx], axis=0)
+                for rec_idx in sorted(grouped_predictions)
+            ]
+            return ordered_predictions
 
         return np.array([map_label_reverse(int(pred), task_name) for pred in predictions])

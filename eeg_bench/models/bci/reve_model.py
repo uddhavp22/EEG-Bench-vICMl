@@ -15,8 +15,8 @@ from transformers import AutoModel
 from ..abstract_model import AbstractModel
 from ..reve_utils import (
     REVE_BACKBONE_ID,
-    REVE_POSITIONS_ID,
     build_reve_cache_path,
+    load_reve_position_bank,
     pool_reve_features,
 )
 from .LaBraM.make_dataset import make_dataset_reve
@@ -103,11 +103,7 @@ class REVEBenchmarkModel(AbstractModel):
         self.supports_full_dataset_cache = self.freeze_backbone
         self.cache = Memory(location=get_config_value("cache"), verbose=0)
 
-        self.pos_bank = AutoModel.from_pretrained(
-            REVE_POSITIONS_ID,
-            trust_remote_code=True,
-            dtype="auto",
-        )
+        self.pos_bank = load_reve_position_bank()
 
         bank_names = self.pos_bank.get_all_positions()
         self._bank_vocab = set(bank_names)

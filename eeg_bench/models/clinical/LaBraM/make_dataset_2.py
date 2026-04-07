@@ -9,6 +9,15 @@ from ....utils.utils import get_multilabel_tasks
 import h5py
 import logging
 
+
+def _open_h5_file(path, mode):
+    """Disable HDF5 file locking on shared filesystems where advisory locks are unreliable."""
+    try:
+        return h5py.File(path, mode, locking=False)
+    except TypeError:
+        return h5py.File(path, mode)
+
+
 def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_cache, **kwargs):
     # Create or override the HDF5 file.
     h5_folder = os.path.join(get_config_value("data"), "make_dataset")
@@ -20,12 +29,20 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
     if os.path.exists(h5_path) and use_cache:
         # Validate h5 file is not corrupted before trusting cache
         try:
-            with h5py.File(h5_path, 'r') as hf:
+            with _open_h5_file(h5_path, 'r') as hf:
                 if '/recordings' not in hf or len(hf['/recordings']) == 0:
                     raise ValueError("Empty or missing /recordings group")
+        except (BlockingIOError, OSError) as e:
+            if "Resource temporarily unavailable" in str(e):
+                print(f"[Info] Cached h5 is temporarily locked. Reusing with file locking disabled: {h5_path}")
+                if model_name == "NeuroGPTModel":
+                    return NeuroGPTDataset2(h5_path, is_train, get_channels(task_name), **kwargs)
+                return LaBraMDataset2(h5_path, is_train, get_channels(task_name))
+            raise
         except Exception as e:
             print(f"[Warning] Cached h5 is corrupted ({e}). Deleting and rebuilding: {h5_path}")
-            os.remove(h5_path)
+            if os.path.exists(h5_path):
+                os.remove(h5_path)
         else:
             print(f"[Info] Dataset already exists at {h5_path}. Loading existing dataset.")
             if model_name == "NeuroGPTModel":
@@ -35,7 +52,7 @@ def make_dataset(X, y, meta, task_name, model_name, chunk_len_s, is_train, use_c
 
     if not os.path.exists(h5_folder):
         os.makedirs(h5_folder)
-    with h5py.File(h5_path, 'w') as hf:
+    with _open_h5_file(h5_path, 'w') as hf:
         hf.create_group('/recordings')
 
     manager = Manager()

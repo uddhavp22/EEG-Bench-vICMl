@@ -59,6 +59,14 @@ standard_1020 = [
     "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1", "FP2-F4", "F4-C4", "C4-P4", "P4-O2"
 ]
 
+
+def _open_h5_file(path, mode):
+    """Disable HDF5 file locking on shared filesystems where advisory locks are unreliable."""
+    try:
+        return h5py.File(path, mode, locking=False)
+    except TypeError:
+        return h5py.File(path, mode)
+
 class LaBraMDataset2(Dataset):
     def __init__(self, h5_path, is_train_set, channels, recording_names=None, sfreq = 200):
         """
@@ -77,7 +85,7 @@ class LaBraMDataset2(Dataset):
 
         if recording_names is None:
             # Get list of all recording names from the HDF5 file
-            with h5py.File(h5_path, 'r') as hf:
+            with _open_h5_file(h5_path, 'r') as hf:
                 self.recording_names = sorted(list(hf['/recordings'].keys()))
         else:
             self.recording_names = recording_names
@@ -88,7 +96,7 @@ class LaBraMDataset2(Dataset):
     def _get_hf(self):
         if self._hf is None:
             # Important: open lazily so each worker gets its own file handle post-fork.
-            self._hf = h5py.File(self.h5_path, 'r')
+            self._hf = _open_h5_file(self.h5_path, 'r')
         return self._hf
 
     def __del__(self):
@@ -171,7 +179,7 @@ class NeuroGPTDataset2(EEGDataset):
 
         # Get list of all recording names
         if recording_names is None:
-            with h5py.File(h5_path, 'r') as hf:
+            with _open_h5_file(h5_path, 'r') as hf:
                 self.recording_names = sorted(list(hf['/recordings'].keys()))
         else:
             self.recording_names = recording_names
@@ -181,7 +189,7 @@ class NeuroGPTDataset2(EEGDataset):
     
     def _get_hf(self):
         if self._hf is None:
-            self._hf = h5py.File(self.h5_path, 'r')
+            self._hf = _open_h5_file(self.h5_path, 'r')
         return self._hf
 
     def __del__(self):
@@ -250,7 +258,7 @@ def writer_task(output_queue, h5_path):
     """
     Dedicated writer process that listens to the queue and writes data to the HDF5 file.
     """
-    with h5py.File(h5_path, 'a') as hf:
+    with _open_h5_file(h5_path, 'a') as hf:
         recordings_grp = hf.require_group('/recordings')
         while True:
             message = output_queue.get()
@@ -944,7 +952,7 @@ def get_labels_from_finetune_dataset(dataset):
     Extract labels from a FinetuneDataset instance.
     """
     labels = []
-    with h5py.File(dataset.h5_path, 'r') as hf:
+    with _open_h5_file(dataset.h5_path, 'r') as hf:
         for rec_name in dataset.recording_names:
             recording_grp = hf[f'/recordings/{rec_name}']
             if 'label' in recording_grp:
