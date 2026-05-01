@@ -14,6 +14,7 @@ class LeJEPAConfig:
     pos_bank_path: str = "./REVE_posbank"
     freeze_encoder: bool = True
     probe_head: str = "linear"
+    probe_layer: Optional[float] = None  # Fraction of encoder depth to probe (e.g. 0.5 = halfway)
     # Checkpoint resolution (shared by BCI and Clinical)
     checkpoint_base_path: Optional[str] = None
     checkpoint_version: Optional[int] = None
@@ -27,6 +28,14 @@ class LeJEPAConfig:
             base = Path(self.checkpoint_base_path)
             return str(base / f"version_{self.checkpoint_version}" / "checkpoints" / "last.ckpt")
         return None
+
+def _resolve_probe_layer_idx(probe_layer: Optional[float], depth: int) -> Optional[int]:
+    """Convert a fractional probe layer (e.g. 0.5) to a 0-based layer index."""
+    if probe_layer is None:
+        return None
+    idx = round(depth * probe_layer) - 1
+    return max(0, min(idx, depth - 1))
+
 
 def load_config():
     global _config
@@ -162,6 +171,9 @@ def merge_lejepa_config_with_cli(base_config: dict, cli_args) -> LeJEPAConfig:
 
     if getattr(cli_args, "lejepa_attentive_probe", False):
         config.probe_head = "attentive"
+
+    if getattr(cli_args, "lejepa_probe_layer", None) is not None:
+        config.probe_layer = cli_args.lejepa_probe_layer
 
     # Handle freeze_encoder boolean flags
     if getattr(cli_args, "lejepa_freeze_encoder", False):

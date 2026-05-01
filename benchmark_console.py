@@ -71,7 +71,7 @@ ALL_TASKS_CLASSES = [
 ]
 
 def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None, linear_probe=False,
-              result_prefix=None, checkpoint_id=None, eval_noise_config=None, probe_type=None):
+              result_prefix=None, checkpoint_id=None, eval_noise_config=None, probe_type=None, probe_layer=None):
     print("running bench")
     if tasks=="full":
         tasks=[cls() for cls in ALL_TASKS_CLASSES] # Instantiate task classes here
@@ -302,6 +302,7 @@ def benchmark(tasks, models, seed, reps=1, wandb_run=None, data_percentages=None
                     checkpoint_id=checkpoint_id,
                     seed=seed,
                     eval_noise_metadata=collector.get("noise_metadata"),
+                    probe_layer=probe_layer,
                 )
                 print_classification_results(
                     collector["y_trains"],
@@ -524,6 +525,12 @@ def main():
         default=None,
         help="LeJEPA classification head type. Defaults to linear."
     )
+    parser.add_argument(
+        "--lejepa-probe-layer",
+        type=float,
+        default=None,
+        help="Fraction of encoder depth to probe (e.g. 0.25, 0.5, 1.0). None = final layer."
+    )
 
     # Result file naming (for sweep scripts)
     parser.add_argument(
@@ -574,6 +581,7 @@ def main():
         lejepa_config.freeze_encoder = True
 
     probe_type = lejepa_config.probe_head
+    probe_layer = lejepa_config.probe_layer
 
     # Factory functions for LeJEPA models (to inject config)
     def make_lejepa_clinical(num_classes=2, num_labels_per_chunk=None):
@@ -702,7 +710,7 @@ def main():
                 benchmark([task_instance], model_classes, args.seed, args.reps, wandb_run=wandb_run,
                          data_percentages=args.data_percentages, linear_probe=args.linear_probe,
                          result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
-                         eval_noise_config=eval_noise_config, probe_type=probe_type)
+                         eval_noise_config=eval_noise_config, probe_type=probe_type, probe_layer=probe_layer)
 
         else:
             if not args.task or not args.model:
@@ -736,7 +744,7 @@ def main():
             benchmark(tasks_to_run, [model_instance], args.seed, args.reps, wandb_run=wandb_run,
                      data_percentages=args.data_percentages, linear_probe=args.linear_probe,
                      result_prefix=args.result_prefix, checkpoint_id=args.checkpoint_id,
-                     eval_noise_config=eval_noise_config, probe_type=probe_type)
+                     eval_noise_config=eval_noise_config, probe_type=probe_type, probe_layer=probe_layer)
     finally:
         wandb_utils.finish()
 

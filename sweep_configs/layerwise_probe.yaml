@@ -1,0 +1,35 @@
+# Layerwise LeJEPA Probing
+# Probes linear-probe accuracy from fractional encoder depths.
+# Uses the main Laya-B model (laya-b-20k-02sig).
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/layerwise_probe.yaml
+
+models:
+  laya-b-20k-02sig:
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_rebuttal/fullds_02sig_20k
+    version: 0
+
+checkpoints:
+  steps: []
+  include_last: true
+
+tasks:
+  epoch_sweep: []
+  final_only:
+    - left_right
+    - right_feet
+    - seizure
+    - abnormal
+    - epilepsy
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+  seeds: [42, 123, 456]
+  probe_layer_fractions: [0.25, 0.333, 0.5, 0.667, 0.75, 1.0]
+
+execution:
+  gpus: 2
+  workers_per_gpu: 1
+  log_dir: rebuttal_logs/layerwise_probe
+  results_dir: results_rebuttal/layerwise_probe

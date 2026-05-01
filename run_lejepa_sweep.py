@@ -101,6 +101,7 @@ class ExperimentConfig:
     probe_head: str = "linear"
     eval_noise_config: Optional[Dict[str, Any]] = None
     seed: Optional[int] = 42  # Default seed for reproducibility
+    probe_layer: Optional[float] = None  # Fraction of encoder depth to probe (None = final layer)
 
     def to_cmd_args(self) -> List[str]:
         """Convert to benchmark_console.py CLI arguments."""
@@ -119,6 +120,8 @@ class ExperimentConfig:
             args.extend(["--linear-probe", "--lejepa-freeze-encoder"])
         else:
             args.append("--lejepa-no-freeze-encoder")
+        if self.probe_layer is not None:
+            args.extend(["--lejepa-probe-layer", str(self.probe_layer)])
 
         noise_cfg = self.eval_noise_config or {}
         noise_types = noise_cfg.get("noise_types") or []
@@ -282,6 +285,7 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
 
     #get seeds
     seeds = config["training"].get("seeds", [42])  # Default to
+    probe_layer_fractions = config["training"].get("probe_layer_fractions", [None])
 
     print(f"\nTask configuration:")
     print(f"  Epoch sweep tasks ({len(epoch_sweep_tasks)}): {epoch_sweep_tasks}")
@@ -321,36 +325,40 @@ def generate_experiments(config: Dict[str, Any]) -> List[ExperimentConfig]:
             for ckpt_id, ckpt_path in epoch_checkpoints.items():
                 for pct in config["training"]["data_percentages"]:
                     for seed in seeds:
-                        experiments.append(ExperimentConfig(
-                            model_name=model_name,
-                            base_path=base_path,
-                            checkpoint_path=ckpt_path,
-                            checkpoint_id=ckpt_id,
-                            task=task,
-                            percentage=pct,
-                            linear_probe=config["training"]["linear_probe"],
-                            probe_head=probe_head,
-                            eval_noise_config=config.get("eval_noise"),
-                            seed=seed
-                        ))
+                        for fraction in probe_layer_fractions:
+                            experiments.append(ExperimentConfig(
+                                model_name=model_name,
+                                base_path=base_path,
+                                checkpoint_path=ckpt_path,
+                                checkpoint_id=ckpt_id,
+                                task=task,
+                                percentage=pct,
+                                linear_probe=config["training"]["linear_probe"],
+                                probe_head=probe_head,
+                                eval_noise_config=config.get("eval_noise"),
+                                seed=seed,
+                                probe_layer=fraction,
+                            ))
 
         # Generate experiments for final_only tasks (last.ckpt only)
         for task in final_only_tasks:
             for ckpt_id, ckpt_path in last_only.items():
                 for pct in config["training"]["data_percentages"]:
                     for seed in seeds:
-                        experiments.append(ExperimentConfig(
-                            model_name=model_name,
-                            base_path=base_path,
-                            checkpoint_path=ckpt_path,
-                            checkpoint_id=ckpt_id,
-                            task=task,
-                            percentage=pct,
-                            linear_probe=config["training"]["linear_probe"],
-                            probe_head=probe_head,
-                            eval_noise_config=config.get("eval_noise") if pct == 1.0 else None,
-                            seed=seed
-                        ))
+                        for fraction in probe_layer_fractions:
+                            experiments.append(ExperimentConfig(
+                                model_name=model_name,
+                                base_path=base_path,
+                                checkpoint_path=ckpt_path,
+                                checkpoint_id=ckpt_id,
+                                task=task,
+                                percentage=pct,
+                                linear_probe=config["training"]["linear_probe"],
+                                probe_head=probe_head,
+                                eval_noise_config=config.get("eval_noise") if pct == 1.0 else None,
+                                seed=seed,
+                                probe_layer=fraction,
+                            ))
 
     # Sort experiments to maximize cache hits:
     # 1. Group by checkpoint (same embeddings)
@@ -369,13 +377,13 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
     """
     def _parse_result_file(file_path: str, filename: str):
         match = re.match(
-            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_(ATTN|MLP))?_(\d{8}_\d{6})\.json",
+            r"(.+?)_(LeJEPA(?:Clinical|BCI))_ckpt_([^_]+(?:_\d+)?(?:_step_\d+)?)(?:_pct(\d+))?(?:_LP)?(?:_(ATTN|MLP))?(?:_Lf(\d{3}))?_(\d{8}_\d{6})\.json",
             filename
         )
         if not match:
             return None
 
-        prefix, _model_class, ckpt_id, pct_str, probe_suffix, _timestamp = match.groups()
+        prefix, _model_class, ckpt_id, pct_str, probe_suffix, layer_str, _timestamp = match.groups()
 
         # Split prefix into model_name and task by matching known task names at the end.
         model_name = None
@@ -413,18 +421,22 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
             "MLP": "mlp",
         }.get(probe_suffix, "linear")
 
-        # Conservative policy: if seed is missing/unreadable, keep as None.
+        # Read seed and probe_layer from JSON for exact float precision.
         seed = None
+        probe_layer_frac = int(layer_str) / 100 if layer_str else None
         try:
             with open(file_path, "r") as handle:
                 result_json = json.load(handle)
             raw_seed = result_json.get("seed")
             if raw_seed is not None:
                 seed = int(raw_seed)
+            raw_probe_layer = result_json.get("probe_layer")
+            if raw_probe_layer is not None:
+                probe_layer_frac = float(raw_probe_layer)
         except Exception:
             pass
 
-        return (model_name, task, ckpt_id, pct, probe_head, seed)
+        return (model_name, task, ckpt_id, pct, probe_head, seed, probe_layer_frac)
 
     completed = set()
     if not os.path.exists(results_dir):
@@ -481,6 +493,9 @@ def get_completed_experiments(results_dir: str = "results/raw") -> set:
             result_tuple = parsed
         else:
             result_tuple = tuple(cached_result)
+            # Normalize old 6-element tuples (pre-probe_layer) to 7-element
+            if result_tuple is not None and len(result_tuple) == 6:
+                result_tuple = result_tuple + (None,)
 
         if result_tuple is not None:
             completed.add(result_tuple)
@@ -645,7 +660,7 @@ def main():
         original_count = len(experiments)
         experiments = [
             e for e in experiments
-            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.probe_head, e.seed) not in completed
+            if (e.model_name, e.task, e.checkpoint_id, e.percentage, e.probe_head, e.seed, e.probe_layer) not in completed
         ]
         print(f"Already completed: {original_count - len(experiments)}")
         print(f"Remaining: {len(experiments)}")

@@ -248,6 +248,7 @@ def save_results(
     checkpoint_id: Optional[str] = None,
     seed: Optional[int] = None,
     eval_noise_metadata: Optional[Dict] = None,
+    probe_layer: Optional[float] = None,
 ):
 
     # Get the current timestamp
@@ -266,7 +267,9 @@ def save_results(
         probe_str = "_MLP"
     else:
         probe_str = ""
-    filename = os.path.join(get_config_value("results"), "raw", f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}{probe_str}_{timestamp}.json")
+    from ..models.lejepa_utils import probe_layer_suffix
+    layer_str = probe_layer_suffix(probe_layer)
+    filename = os.path.join(get_config_value("results"), "raw", f"{prefix_str}{task_name}_{models_str}{ckpt_str}{pct_str}{lp_str}{probe_str}{layer_str}_{timestamp}.json")
 
     if task_name in get_multilabel_tasks():
         y_trains = [[[y_2.tolist() for y_2 in y] for y in y_train] for y_train in y_trains]
@@ -297,6 +300,7 @@ def save_results(
         "checkpoint_id": checkpoint_id,
         "seed": seed,
         "eval_noise": eval_noise_metadata,
+        "probe_layer": probe_layer,
     }
 
     # Save the results to the file

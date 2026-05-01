@@ -8,15 +8,21 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
-import sys
 import logging
-import os
 
 from ..abstract_model import AbstractModel
+from .. import lejepa_utils as _lejepa_utils
+from ..lejepa_utils import (
+    EMBED_CACHE_VERSION,
+    _setup_eegfm_imports,
+    build_simple_probe_head,
+    extract_layer_cls,
+    probe_layer_suffix,
+)
 from .LaBraM.make_dataset import make_dataset_lejepa  # LeJEPA-specific loader with Defossez scaling
 from .LaBraM.utils_2 import calc_class_weights, reverse_map_label, n_unique_labels
 from joblib import Memory
-from ...config import get_config_value, LeJEPAConfig
+from ...config import get_config_value, LeJEPAConfig, _resolve_probe_layer_idx
 from ...utils import wandb_utils
 
 from transformers import AutoModel
@@ -29,52 +35,13 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# eegfm imports are done dynamically in _setup_eegfm_imports()
-EEGLEJEPAConfig = None
-ConvPatchEmbedderConfig = None
-DynamicChannelMixerConfig = None
-EncoderConfig = None
-
-
-def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
-    """Setup eegfm imports by adding path to sys.path if needed."""
-    global EEGLEJEPAConfig, ConvPatchEmbedderConfig, DynamicChannelMixerConfig, EncoderConfig
-
-    if eegfm_path and eegfm_path not in sys.path:
-        sys.path.insert(0, eegfm_path)
-        logger.info(f"Added eegfm path to sys.path: {eegfm_path}")
-
-    # Import eegfm modules
-    from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
-    from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
-    from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
-    from eegfmchallenge.models.common import EncoderConfig as _EncoderConfig
-
-    EEGLEJEPAConfig = _EEGLEJEPAConfig
-    ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig
-    DynamicChannelMixerConfig = _DynamicChannelMixerConfig
-    EncoderConfig = _EncoderConfig
-
-EMBED_CACHE_VERSION = os.getenv("EEG_BENCH_EMBED_CACHE_VERSION", "v2")
-
 
 def build_probe_head(dim: int, out_dim: int, probe_head: str) -> nn.Module:
-    if probe_head == "linear":
-        return nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, out_dim),
-        )
-    if probe_head == "mlp":
-        return nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-            nn.ELU(),
-            nn.Dropout(0.3),
-            nn.Linear(dim, out_dim),
-        )
-    if probe_head == "attentive":
+    head = build_simple_probe_head(dim, out_dim, probe_head)
+    if head is None:  # probe_head == "attentive"
         raise ValueError("Attentive probe is not supported for LeJEPA BCI")
-    raise ValueError(f"Unsupported LeJEPA probe head: {probe_head}")
+    return head
+
 
 class ConcreteLeJEPABCI(nn.Module):
     def __init__(
@@ -120,7 +87,7 @@ class ConcreteLeJEPABCI(nn.Module):
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
                 pretrain_config['model']['name'] = 'EEGLEJEPA' #force for MAE.
-            cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+            cfg = _lejepa_utils.EEGLEJEPAConfig(**pretrain_config["model"])
             print("[LeJEPABCI] Loaded Config!")
         else:
             raise
@@ -199,15 +166,14 @@ class ConcreteLeJEPABCI(nn.Module):
         self.head = build_probe_head(DIM, num_classes, probe_head)
         self.loss_fn = nn.CrossEntropyLoss()
 
-    def forward(self, x, coords):
-        # Uses your new downstream method
-        outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
-        
-        # Use the 384-dim CLS token
-        cls = outputs["cls_token"]
-        if cls.dim() == 3:
-            cls = cls.mean(dim=1)
-            
+    def forward(self, x, coords, probe_layer_idx: Optional[int] = None):
+        if probe_layer_idx is not None:
+            cls = extract_layer_cls(self.backbone, x, coords, probe_layer_idx)
+        else:
+            outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
+            cls = outputs["cls_token"]
+            if cls.dim() == 3:
+                cls = cls.mean(dim=1)
         return self.head(cls)
 
 class EEGLeJEPABCIModel(AbstractModel):
@@ -223,6 +189,8 @@ class EEGLeJEPABCIModel(AbstractModel):
         assert torch.cuda.is_available(), "CUDA is not available"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.probe_head = "linear"
+        self.probe_layer = None
+        self.probe_layer_idx = None  # resolved in fit() once depth is known
 
         # Handle config vs legacy parameters
         if config is not None:
@@ -254,6 +222,7 @@ class EEGLeJEPABCIModel(AbstractModel):
                 self.pretrained_path = None
             self.freeze_encoder = config.freeze_encoder
             self.probe_head = config.probe_head
+            self.probe_layer = config.probe_layer
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
@@ -400,26 +369,28 @@ class EEGLeJEPABCIModel(AbstractModel):
 
     @torch.no_grad()
     def _extract_embeddings(self, dataloader, coords, valid_indices=None):
-        """Extract CLS token embeddings from frozen encoder in a single pass."""
+        """Extract embeddings from frozen encoder (final layer or probe layer)."""
         self.model.backbone.eval()
         embeddings_list = []
         labels_list = []
+        probe_layer_idx = self.probe_layer_idx
 
         for x, y_batch in tqdm(dataloader, desc="Extracting embeddings", leave=False):
             x = x.to(self.device)
             y_batch = y_batch.to(self.device).argmax(dim=1)
 
-            # Filter to only valid channels if needed
             if valid_indices is not None:
                 x = x[:, valid_indices, :]
 
             cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
 
-            # Get CLS token from backbone
-            outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
-            cls = outputs["cls_token"]
-            if cls.dim() == 3:
-                cls = cls.mean(dim=1)
+            if probe_layer_idx is not None:
+                cls = extract_layer_cls(self.model.backbone, x, cb, probe_layer_idx)
+            else:
+                outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
+                cls = outputs["cls_token"]
+                if cls.dim() == 3:
+                    cls = cls.mean(dim=1)
 
             embeddings_list.append(cls.cpu())
             labels_list.append(y_batch.cpu())
@@ -485,7 +456,8 @@ class EEGLeJEPABCIModel(AbstractModel):
         cache_dir = Path(get_config_value("cache", ".cache")) / "lejepa_embeddings"
         cache_dir.mkdir(parents=True, exist_ok=True)
         ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:12]
-        return cache_dir / f"bci_{task_name}_{ckpt_hash}_{dataset_hash}_{split}_{EMBED_CACHE_VERSION}.npz"
+        layer_str = probe_layer_suffix(self.probe_layer)
+        return cache_dir / f"bci_{task_name}_{ckpt_hash}_{dataset_hash}_{split}{layer_str}_{EMBED_CACHE_VERSION}.npz"
 
     def _compute_dataset_hash(self, datasets: list, ch_names_list: list) -> str:
         """Compute a hash to identify the combined datasets."""
@@ -544,6 +516,8 @@ class EEGLeJEPABCIModel(AbstractModel):
             pretrained_path=self.pretrained_path,
             probe_head=self.probe_head,
         ).to(self.device)
+        depth = self.model.backbone.config.encoder_config.depth
+        self.probe_layer_idx = _resolve_probe_layer_idx(self.probe_layer, depth)
 
         datasets = [self.cache.cache(make_dataset_lejepa)(X_, y_, task_name, m_["sampling_frequency"], m_["channel_names"], train=True, split_size=0.15)
                     for X_, y_, m_ in zip(X, y, meta)]
@@ -787,7 +761,7 @@ class EEGLeJEPABCIModel(AbstractModel):
                 if valid_indices is not None:
                     x = x[:, valid_indices, :]
                 cb = coords.unsqueeze(0).expand(x.size(0), -1, -1)
-                logits = self.model(x, cb)
+                logits = self.model(x, cb, probe_layer_idx=self.probe_layer_idx)
                 preds_all.append(torch.argmax(logits, dim=1).cpu())
             predictions.append(torch.cat(preds_all, dim=0))
 

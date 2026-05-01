@@ -12,14 +12,21 @@ import pickle
 from collections import Counter
 import gc
 import math
-import sys
 import logging
 import hashlib
 import json
 import bisect
 from pathlib import Path
 from ..abstract_model import AbstractModel
-from ...config import get_config_value, LeJEPAConfig
+from .. import lejepa_utils as _lejepa_utils
+from ..lejepa_utils import (
+    EMBED_CACHE_VERSION,
+    _setup_eegfm_imports,
+    build_simple_probe_head,
+    extract_layer_cls,
+    probe_layer_suffix,
+)
+from ...config import get_config_value, LeJEPAConfig, _resolve_probe_layer_idx
 
 # LaBraM Clinical Utilities
 from .LaBraM.make_dataset_2 import make_dataset as make_dataset_2
@@ -31,15 +38,6 @@ from ...utils import wandb_utils
 from ...utils.eeg_noise import apply_eeg_noise
 
 logger = logging.getLogger(__name__)
-
-# eegfm imports are done dynamically in _setup_eegfm_imports()
-EEGLEJEPAConfig = None
-ConvPatchEmbedderConfig = None
-DynamicChannelMixerConfig = None
-EncoderConfig = None
-import os
-
-EMBED_CACHE_VERSION = os.getenv("EMBED_CACHE_VERSION", "v2")
 
     # def __init__(self, dim: int, out_dim: int):
     #     super().__init__()
@@ -131,19 +129,10 @@ class AttentiveProbe(nn.Module):
 
 
 def build_probe_head(dim: int, out_dim: int, probe_head: str) -> nn.Module:
-    if probe_head == "linear":
-        return nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, out_dim))
-    if probe_head == "mlp":
-        return nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-            nn.ELU(),
-            nn.Dropout(0.3),
-            nn.Linear(dim, out_dim),
-        )
-    if probe_head == "attentive":
+    head = build_simple_probe_head(dim, out_dim, probe_head)
+    if head is None:  # probe_head == "attentive"
         return AttentiveProbe(dim, out_dim)
-    raise ValueError(f"Unsupported LeJEPA probe head: {probe_head}")
+    return head
 
 class ShardedEmbeddingDataset(Dataset):
     def __init__(self, index_path: Path):
@@ -207,25 +196,6 @@ class MemmapEmbeddingDataset(Dataset):
             return None
         return self.sequence_ids[idx]
 
-def _setup_eegfm_imports(eegfm_path: Optional[str] = None):
-    """Setup eegfm imports by adding path to sys.path if needed."""
-    global EEGLEJEPAConfig, ConvPatchEmbedderConfig, DynamicChannelMixerConfig, EncoderConfig
-
-    if eegfm_path and eegfm_path not in sys.path:
-        sys.path.insert(0, eegfm_path)
-        logger.info(f"Added eegfm path to sys.path: {eegfm_path}")
-
-    # Import eegfm modules
-    from eegfmchallenge.models.eeglejepa import EEGLEJEPAConfig as _EEGLEJEPAConfig
-    from eegfmchallenge.models.patch_embedder import ConvPatchEmbedderConfig as _ConvPatchEmbedderConfig
-    from eegfmchallenge.models.channel_mixer import DynamicChannelMixerConfig as _DynamicChannelMixerConfig
-    from eegfmchallenge.models.common import EncoderConfig as _EncoderConfig
-
-    EEGLEJEPAConfig = _EEGLEJEPAConfig
-    ConvPatchEmbedderConfig = _ConvPatchEmbedderConfig
-    DynamicChannelMixerConfig = _DynamicChannelMixerConfig
-    EncoderConfig = _EncoderConfig
-
 class ConcreteLeJEPAClinical(nn.Module):
     def __init__(
         self,
@@ -270,7 +240,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             with open(config_path, "rb") as f:
                 pretrain_config = pickle.load(f)
                 pretrain_config['model']['name'] = 'EEGLEJEPA' #force for MAE.
-            cfg = EEGLEJEPAConfig(**pretrain_config["model"])
+            cfg = _lejepa_utils.EEGLEJEPAConfig(**pretrain_config["model"])
             print("Loaded Config!")
         else:
             raise 
@@ -350,7 +320,7 @@ class ConcreteLeJEPAClinical(nn.Module):
             logits = self.head(cls)
         return logits
 
-    def forward(self, x, coords):
+    def forward(self, x, coords, probe_layer_idx: Optional[int] = None):
 
         B, C, T = x.shape
         n_chunks = T // self.chunk_length
@@ -377,8 +347,14 @@ class ConcreteLeJEPAClinical(nn.Module):
         # coords shape: (B, C, 3) -> (B*n_chunks, C, 3)
         coords = coords.unsqueeze(1).expand(-1, n_chunks, -1, -1).reshape(B * n_chunks, C, 3)
 
-        outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
-        logits = self._get_logits_from_outputs(outputs, B, n_chunks)
+        if probe_layer_idx is not None:
+            cls = extract_layer_cls(self.backbone, x, coords, probe_layer_idx)
+            embedding_dim = cls.shape[1]
+            cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)
+            logits = self.head(cls)
+        else:
+            outputs = self.backbone.forward_downstream(x=x, channel_locations=coords)
+            logits = self._get_logits_from_outputs(outputs, B, n_chunks)
         if self.is_multilabel_task:
             logits = logits.reshape(B, self.num_classes, -1)
         return logits
@@ -400,6 +376,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         self.freeze_encoder = freeze_encoder  # Store for use in fit()
         self.probe_head = "linear"
         self.attentive_probe = False
+        self.probe_layer = None
+        self.probe_layer_idx = None
 
         # Handle config vs legacy parameters
         if config is not None:
@@ -433,6 +411,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             self.freeze_encoder = freeze_encoder
             self.probe_head = config.probe_head
             self.attentive_probe = self.probe_head == "attentive"
+            self.probe_layer = config.probe_layer
             pos_bank_path = config.pos_bank_path
             eegfm_path = config.eegfm_path
         else:
@@ -463,6 +442,8 @@ class EEGLeJEPAClinicalModel(AbstractModel):
             pretrained_path=self.pretrained_path,
             probe_head=self.probe_head,
         ).to(self.device)
+        depth = self.model.backbone.config.encoder_config.depth
+        self.probe_layer_idx = _resolve_probe_layer_idx(self.probe_layer, depth)
         self._eval_noise_config: Optional[Dict] = None
 
     def _get_probe_optimizer_defaults(self) -> Dict[str, float]:
@@ -578,14 +559,20 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     cb = cb.reshape(B * n_chunks, C, 3)
 
                     # Forward through backbone
-                    outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
-                    if self.attentive_probe:
+                    if self.probe_layer_idx is not None:
+                        cls = extract_layer_cls(self.model.backbone, x, cb, self.probe_layer_idx)
+                        embedding_dim = cls.shape[1]
+                        cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)  # (B, dim)
+                        embeddings_list.append(cls.cpu())
+                    elif self.attentive_probe:
+                        outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
                         seq = outputs["sequence_embeddings"]
                         seq_len = seq.shape[1]
                         embed_dim = seq.shape[2]
                         seq = seq.view(B, n_chunks, seq_len, embed_dim)
                         embeddings_list.append(seq.cpu())
                     else:
+                        outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
                         cls = outputs["cls_token"]
                         embedding_dim = cls.shape[1]
                         cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)  # (B, dim)
@@ -641,18 +628,24 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
                     cb = cb.reshape(B * n_chunks, C, 3)
 
-                    outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
-                    if self.attentive_probe:
-                        seq = outputs["sequence_embeddings"]
-                        seq_len = seq.shape[1]
-                        embed_dim = seq.shape[2]
-                        seq = seq.view(B, n_chunks, seq_len, embed_dim)
-                        embeddings = seq.cpu().numpy()
-                    else:
-                        cls = outputs["cls_token"]
+                    if self.probe_layer_idx is not None:
+                        cls = extract_layer_cls(self.model.backbone, x, cb, self.probe_layer_idx)
                         embedding_dim = cls.shape[1]
                         cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)
                         embeddings = cls.cpu().numpy()
+                    else:
+                        outputs = self.model.backbone.forward_downstream(x=x, channel_locations=cb)
+                        if self.attentive_probe:
+                            seq = outputs["sequence_embeddings"]
+                            seq_len = seq.shape[1]
+                            embed_dim = seq.shape[2]
+                            seq = seq.view(B, n_chunks, seq_len, embed_dim)
+                            embeddings = seq.cpu().numpy()
+                        else:
+                            cls = outputs["cls_token"]
+                            embedding_dim = cls.shape[1]
+                            cls = cls.view(B, n_chunks, embedding_dim).mean(dim=1)
+                            embeddings = cls.cpu().numpy()
 
                     if not self.model.is_multilabel_task and yb.dim() > 1:
                         labels = yb.argmax(dim=1).cpu().numpy()
@@ -1186,7 +1179,7 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
             cb = coords.unsqueeze(0).expand(B, -1, -1)
 
-            logits = self.model(x, cb)
+            logits = self.model(x, cb, probe_layer_idx=self.probe_layer_idx)
             # Get window-level predictions
             pred = torch.argmax(logits, dim=1)
             preds_all.append(pred.cpu().numpy())
@@ -1209,13 +1202,21 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         return np.array([map_label_reverse(p, task_name) for p in preds])
 
     def _get_embedding_cache_path(self, checkpoint_path: str, task_name: str, dataset_hash: str, split: str) -> Path:
-        """Generate cache path for embeddings."""
+        """Generate cache path for embeddings.
+
+        The probe-layer suffix takes precedence over the attentive ``_seq`` tag:
+        layerwise probes always extract pooled CLS embeddings regardless of probe head.
+        """
         cache_dir = Path(get_config_value("cache", ".cache")) / "lejepa_embeddings"
         cache_dir.mkdir(parents=True, exist_ok=True)
         ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:12]
-        if self.attentive_probe:
-            return cache_dir / f"{task_name}_{ckpt_hash}_{dataset_hash}_{split}_seq_{EMBED_CACHE_VERSION}.npz"
-        return cache_dir / f"{task_name}_{ckpt_hash}_{dataset_hash}_{split}_{EMBED_CACHE_VERSION}.npz"
+        if self.probe_layer is not None:
+            tag = probe_layer_suffix(self.probe_layer)
+        elif self.attentive_probe:
+            tag = "_seq"
+        else:
+            tag = ""
+        return cache_dir / f"{task_name}_{ckpt_hash}_{dataset_hash}_{split}{tag}_{EMBED_CACHE_VERSION}.npz"
 
     def _compute_dataset_hash(self, X: list, meta: list) -> str:
         """Compute a hash to identify the dataset (robust to missing fields)."""
