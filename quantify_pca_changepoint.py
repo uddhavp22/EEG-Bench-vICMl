@@ -207,6 +207,75 @@ def top3(Z):
     return Zc @ np.linalg.svd(Zc, full_matrices=False)[2][:3].T
 
 
+def _zscore(Z):
+    sd = Z.std(axis=0)
+    return (Z - Z.mean(axis=0)) / np.where(sd > 0, sd, 1.0)
+
+
+def _auc(scores, y):
+    """Rank AUC. Chance is exactly 0.5 at any dimension and any class balance."""
+    y = np.asarray(y).astype(bool)
+    n1, n0 = int(y.sum()), int((~y).sum())
+    if n1 == 0 or n0 == 0:
+        return np.nan
+    r = np.argsort(np.argsort(np.asarray(scores, float))) + 1.0
+    return float((r[y].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0))
+
+
+def state_auc(Zs, labs, n_folds=5, seed=0, shift_null=False):
+    """M3. Do event tokens occupy a different region than non-event tokens?
+
+    This is what the PCA panel actually shows: not a sharp edge at the
+    boundary, but a colour that HOLDS for the duration of the event. M1 cannot
+    see that. A panel full of high-frequency flicker can have a perfectly real
+    sustained level shift whose change score never wins the argmax.
+
+    The contrast direction is fit on OTHER chunks and applied to held-out ones,
+    so nothing is fit and scored on the same data and a wider embedding cannot
+    buy accuracy. AUC is a rank statistic, so chance is exactly 0.5 at D=384
+    and at D=200. That is what makes Laya and LaBraM directly comparable here,
+    and what a multivariate Cohen's d could not deliver.
+
+    shift_null circularly shifts each chunk's labels first, preserving the run
+    structure of a temporal annotation while removing the label-state link.
+
+    Returns (pooled_auc, per_chunk_auc array).
+    """
+    rng   = np.random.default_rng(seed)
+    n     = len(Zs)
+    if n < n_folds:
+        return float("nan"), np.array([])
+    labs  = [np.asarray(l) for l in labs]
+    if shift_null:
+        labs = [np.roll(l, int(rng.integers(1, max(len(l), 2)))) for l in labs]
+    fold  = rng.permutation(n) % n_folds
+    per, ps, py = [], [], []
+    for f in range(n_folds):
+        u, cnt = np.zeros(Zs[0].shape[1]), 0
+        for i in range(n):
+            if fold[i] == f:
+                continue
+            l = labs[i]
+            if l.min() == l.max():
+                continue
+            u   += Zs[i][l == 1].mean(axis=0) - Zs[i][l == 0].mean(axis=0)
+            cnt += 1
+        if cnt == 0:
+            continue
+        u = u / (np.linalg.norm(u) + 1e-12)
+        for i in range(n):
+            if fold[i] != f:
+                continue
+            sc = Zs[i] @ u
+            per.append(_auc(sc, labs[i]))
+            ps.append(sc)
+            py.append(labs[i])
+    if not ps:
+        return float("nan"), np.array([])
+    return (_auc(np.concatenate(ps), np.concatenate(py)),
+            np.array([v for v in per if np.isfinite(v)], dtype=float))
+
+
 def positional_stats(Z):
     """How much of this embedding is just a clock?
 
@@ -509,6 +578,16 @@ def main():
                     help="also score after regressing an order-N polynomial in "
                          "token index out of each chunk (try 3). Separates real "
                          "state structure from a global temporal ramp.")
+    ap.add_argument("--smooth", type=int, default=0, metavar="K",
+                    help="moving-average the token series by K before the change "
+                         "score. M1 is driven by the largest spike, so a real but "
+                         "gradual transition can lose to token-level flicker.")
+    ap.add_argument("--state-auc", action="store_true",
+                    help="also run M3, held-out state occupancy AUC. This is what "
+                         "the PCA panel shows when the colour HOLDS across the "
+                         "event rather than spiking at its edge.")
+    ap.add_argument("--auc-max-chunks", type=int, default=2000,
+                    help="cap on chunks retained in RAM for M3")
     ap.add_argument("--limit", type=int, default=None, help="smoke-test N chunks")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--out", default=None)
@@ -539,6 +618,8 @@ def main():
     print(f"device {device}\n")
 
     rows, t0, warned = [], time.time(), False
+    keep = {"laya": [], "labram": []}
+    keep_lab = {"laya": [], "labram": []}
     with h5py.File(h5_path, "r") as hf:
         for k, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
             eeg      = hf[f"/recordings/{seq_id}/data"][:]
@@ -564,6 +645,14 @@ def main():
                 hz = len(Z) / 16.0
                 (row[f"pc1t_{tag}"], row[f"evr1_{tag}"],
                  row[f"timer2_{tag}"]) = positional_stats(Z)
+                if args.state_auc and len(keep[tag]) < args.auc_max_chunks:
+                    keep[tag].append(_zscore(Z).astype(np.float32))
+                    keep_lab[tag].append(np.asarray(l))
+                if args.smooth > 1:
+                    k = args.smooth
+                    ker = np.ones(k) / k
+                    Z = np.apply_along_axis(
+                        lambda v: np.convolve(v, ker, mode="same"), 0, Z)
                 variants = [("", Z), ("_pc3", top3(Z))]
                 if args.detrend:
                     Zd = detrend_tokens(Z, args.detrend)
@@ -579,6 +668,34 @@ def main():
             if (k + 1) % 50 == 0:
                 el = time.time() - t0
                 print(f"  {k+1} chunks  {el:.0f}s  ({el/(k+1):.2f} s/chunk)")
+
+    if args.state_auc:
+        print("\nM3  held-out state-occupancy AUC (chance exactly 0.500)")
+        print("    Does the embedding sit somewhere DIFFERENT during the event?")
+        print("    The TIME ONLY row is the clock's own score: what you get from")
+        print("    token index alone, knowing nothing about the EEG. In these")
+        print("    chunks the event runs to the end, so the clock scores high by")
+        print("    construction. Only the margin OVER that row is state content.")
+
+        def _timebasis(l):
+            t = np.linspace(-1.0, 1.0, len(l))
+            return np.vstack([t, t ** 2, t ** 3]).T.astype(np.float32)
+
+        arms = [("Laya", keep["laya"], keep_lab["laya"], False),
+                ("LaBraM", keep["labram"], keep_lab["labram"], False),
+                ("TIME ONLY (clock)",
+                 [_timebasis(l) for l in keep_lab["laya"]], keep_lab["laya"], False),
+                ("Laya  minus clock", keep["laya"], keep_lab["laya"], True),
+                ("LaBraM minus clock", keep["labram"], keep_lab["labram"], True)]
+        for nm, Zs, ls, dt in arms:
+            if not Zs:
+                continue
+            Za = [detrend_tokens(Z, 3).astype(np.float32) for Z in Zs] if dt else Zs
+            pooled, per = state_auc(Za, ls)
+            nulls = [state_auc(Za, ls, seed=s_, shift_null=True)[0] for s_ in range(5)]
+            print(f"  {nm:20s} n={len(Za):5d}  pooled AUC={pooled:.4f}  "
+                  f"per-chunk median={np.median(per) if per.size else float('nan'):.4f}  "
+                  f"shift-null={np.median(nulls):.4f}")
 
     df = pd.DataFrame(rows)
     df.to_csv(f"{out}.csv", index=False)
