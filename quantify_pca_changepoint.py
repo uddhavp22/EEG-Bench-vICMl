@@ -54,9 +54,18 @@ CAVEATS THIS SCRIPT DOES NOT HIDE
    `range(C+1)`, attaching pretrained electrode position embeddings to the
    wrong electrodes. --bipolar-map first maps T8-P8 -> T8 as a robustness
    check. The default reproduces the notebook exactly, warnings and all.
-2. LaBraM is fed the LeJEPA-preprocessed EEG (same H5 both models read), not
-   its own pipeline's. That is the controlled comparison (same input, different
-   model) but it is not what LaBraM's own eval uses.
+2. The EEG is read from the LaBraMModel H5 (200 Hz, microvolts), NOT from the
+   LeJEPAClinical H5. The latter applies defossez scaling at write time
+   (utils_2.py:516) and CLIPS TO +/-20, which flattens exactly the
+   high-amplitude ictal and artifact segments these metrics are about. Every
+   result produced before 2026-07-30 used the clipped H5 for the LaBraM arm and
+   should be discarded. Laya's arm is unaffected: its embeddings come from the
+   .index.json cache, not from the H5. `signal_fingerprint` prints the units and
+   the clip fraction on the first chunk so this cannot recur silently.
+3. The index and the H5 are independent dataset builds that each number
+   recordings from scratch, so seq_id agreement is assumed, not guaranteed. The
+   per-chunk H5 label is compared against the index label and the run ABORTS on
+   any mismatch rather than reporting misaligned pairs.
 
 USAGE
 -----
@@ -588,7 +597,21 @@ def find_lejepa_index(task, ckpt_path, split, attentive=True):
     return hits[0]
 
 
-def find_h5(task, model_tag="LeJEPAClinical"):
+def find_h5(task, model_tag="LaBraMModel"):
+    """Locate the recordings H5.
+
+    Default is the LaBraMModel build, NOT LeJEPAClinical. The LeJEPAClinical
+    build applies defossez scaling at write time (utils_2.py:516): median
+    subtracted, divided by the global IQR, then CLIPPED TO +/-20. Feeding that
+    to LaBraM squashes exactly the high-amplitude ictal and artifact segments
+    the metrics are about, and no downstream norm can undo a clip. The
+    LaBraMModel build (utils_2.py:435-444) is filtered to 200 Hz and kept in
+    microvolts, which is what LaBraM was trained on.
+
+    Laya's embeddings come from the .index.json, not from here, so switching
+    the H5 does not touch the Laya arm. The EEG read here is used for LaBraM's
+    forward pass and for the M6 waveform descriptors.
+    """
     from eeg_bench.config import get_config_value
     task = TASK_ALIASES.get(task, task)
     root = get_config_value("make_dataset") or os.path.join(
@@ -598,6 +621,25 @@ def find_h5(task, model_tag="LeJEPAClinical"):
     if not hits:
         raise FileNotFoundError(f"no H5 for {root}/{task}_{model_tag}_*.h5")
     return hits[0]
+
+
+def infer_sfreq(eeg, chunk_len_s):
+    """Sampling rate from the chunk itself. The H5 stores no sfreq attribute,
+    so a --sfreq flag is a silent footgun the moment the H5 tag changes."""
+    return float(eeg.shape[1]) / float(chunk_len_s)
+
+
+def signal_fingerprint(eeg):
+    """Detect defossez-scaled input before it reaches LaBraM.
+
+    Microvolt EEG: median|x| of order 1-50, max|x| in the hundreds, nothing
+    pinned to a bound. Defossez output: unit-IQR and hard-clipped at +/-20, so
+    `clipped` is strictly positive on any chunk containing a real event.
+    """
+    a = np.abs(eeg)
+    return dict(median=float(np.median(a)), p99=float(np.percentile(a, 99)),
+                max=float(a.max()),
+                clipped=float(np.mean(a >= 19.999)))
 
 
 def iter_chunks(index, limit=None):
@@ -801,7 +843,10 @@ def main():
                     help="checkpoint PATH; md5 of this string names the cache")
     ap.add_argument("--index", default=None, help="explicit .index.json, skips lookup")
     ap.add_argument("--h5", default=None, help="explicit recordings H5")
-    ap.add_argument("--sfreq", type=float, default=250.0)
+    ap.add_argument("--h5-tag", default="LaBraMModel",
+                    help="H5 model tag. LaBraMModel is 200 Hz microvolts; "
+                         "LeJEPAClinical is defossez-scaled and clipped to +/-20 "
+                         "and must NOT be used for the LaBraM arm.")
     ap.add_argument("--window", type=int, default=5, help="w, in Laya tokens (0.5 s)")
     ap.add_argument("--tol", type=int, default=5, help="+/- tokens around annotation")
     ap.add_argument("--bipolar-map", choices=["none", "first"], default="none",
@@ -846,7 +891,7 @@ def main():
         print(f"NOTE: stripped whitespace from --ckpt; md5 hashes the path string")
 
     index_path = args.index or find_lejepa_index(args.task, ckpt, args.split)
-    h5_path    = args.h5 or find_h5(args.task)
+    h5_path    = args.h5 or find_h5(args.task, args.h5_tag)
     out        = args.out or f"figures/cp_{args.task}_{args.split}"
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 
@@ -861,6 +906,9 @@ def main():
     model  = load_labram(device)
     print(f"device {device}\n")
 
+    meta        = index.get("meta") or {}
+    chunk_len_s = float(meta.get("chunk_len_s", 16))
+    n_missing = n_checked = n_mismatch = n_shape_mismatch = 0
     rows, t0, warned = [], time.time(), False
     keep = {"laya": [], "labram": []}
     keep_lab = {"laya": [], "labram": []}
@@ -868,13 +916,32 @@ def main():
     keep_tr  = {"laya": [], "laya_mean": [], "labram": [], "W": [], "l": []}
     with h5py.File(h5_path, "r") as hf:
         for ci, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
-            eeg      = hf[f"/recordings/{seq_id}/data"][:]
-            ch_names = hf[f"/recordings/{seq_id}/channels"][:]
+            grp = hf.get(f"/recordings/{seq_id}")
+            if grp is None:
+                n_missing += 1
+                continue
+            eeg      = grp["data"][:]
+            ch_names = grp["channels"][:]
+
+            # The index and the H5 are separate dataset builds that each number
+            # recordings from scratch. If either dropped a recording, seq_id
+            # silently pairs Laya's chunk with someone else's EEG. The writer
+            # stores per-chunk labels (utils_2.py:243-246), so compare them.
+            if "label" in grp:
+                h5_lab = np.asarray(grp["label"][:]).ravel()
+                if h5_lab.shape == np.asarray(lab).shape:
+                    n_checked += 1
+                    if not np.array_equal(h5_lab, np.asarray(lab)):
+                        n_mismatch += 1
+                else:
+                    n_shape_mismatch += 1
+
+            sfreq = infer_sfreq(eeg, chunk_len_s)
 
             Za = np.asarray(emb, dtype=np.float64)          # (160, 384)
             la = tok_labels_repeat(lab, len(Za))
             Zb, starts = labram_embeddings(model, device, eeg, ch_names,
-                                           args.sfreq, args.bipolar_map,
+                                           sfreq, args.bipolar_map,
                                            args.batch_size)
             Zb = Zb.astype(np.float64)                      # (151, 200)
             lb = tok_labels_windows(lab, starts, LABRAM_PATCH_SZ, LABRAM_SFREQ)
@@ -883,6 +950,14 @@ def main():
                 print(f"  shapes: Laya {Za.shape} @ {len(Za)/16:.1f} Hz, "
                       f"LaBraM {Zb.shape} @ {len(Zb)/16:.1f} Hz, "
                       f"{len(decode_names(ch_names))} channels")
+                fp = signal_fingerprint(eeg)
+                print(f"  sfreq  {sfreq:.1f} Hz (inferred from {eeg.shape[1]} "
+                      f"samples / {chunk_len_s:g} s)")
+                print(f"  signal median|x|={fp['median']:.3g} p99={fp['p99']:.3g} "
+                      f"max|x|={fp['max']:.3g} clipped@20={fp['clipped']:.4f}")
+                if fp['clipped'] > 0 or fp['max'] <= 20.0001:
+                    print("  *** WARNING: looks defossez-scaled and clipped to +/-20. "
+                          "LaBraM expects microvolts; use the LaBraMModel H5. ***")
                 warned = True
 
             if args.tracking and len(keep_tr["W"]) < args.auc_max_chunks:
@@ -904,7 +979,7 @@ def main():
                     keep_tr["labram"].append(Zb[idxb].astype(np.float32))
                     keep_tr["W"].append(
                         _zscore(waveform_features(
-                            eeg, args.sfreq, np.arange(nsec) + 0.5)).astype(np.float32))
+                            eeg, sfreq, np.arange(nsec) + 0.5)).astype(np.float32))
                     keep_tr["l"].append(np.asarray(lab))
 
             row = dict(seq_id=seq_id, n_trans=int(transitions(lab).size),
@@ -921,7 +996,7 @@ def main():
                         ctr = ((np.arange(len(Z)) + 0.5) / hz if tag == "laya"
                                else (starts + LABRAM_PATCH_SZ / 2) / LABRAM_SFREQ)
                         keep_w[tag].append(
-                            _zscore(waveform_features(eeg, args.sfreq, ctr))
+                            _zscore(waveform_features(eeg, sfreq, ctr))
                             .astype(np.float32))
                 if args.smooth > 1:
                     ker = np.ones(args.smooth) / args.smooth
@@ -980,6 +1055,17 @@ def main():
             print(f"  {nm:20s} n={len(Za):5d}  pooled AUC={pooled:.4f}  "
                   f"per-chunk median={np.median(per) if per.size else float('nan'):.4f}  "
                   f"shift-null={np.median(nulls):.4f}")
+
+    print(f"\nalignment: {n_checked} chunks label-checked, {n_mismatch} mismatched, "
+          f"{n_shape_mismatch} shape-mismatched, {n_missing} index seq_ids absent from H5")
+    if n_mismatch or n_shape_mismatch:
+        raise SystemExit(
+            f"ABORT: {n_mismatch + n_shape_mismatch} chunks disagree on labels between the "
+            f"index and {h5_path}. The two builds number recordings independently, so "
+            f"seq_id is pairing Laya embeddings with the wrong EEG. Do not report these "
+            f"numbers. Rebuild the H5 or add an explicit seq_id map.")
+    if n_checked == 0:
+        print("WARNING: no chunk carried an H5 label, so alignment is UNVERIFIED.")
 
     df = pd.DataFrame(rows)
     if args.tracking:
