@@ -710,7 +710,7 @@ def main():
                     ker = np.ones(k) / k
                     Z = np.apply_along_axis(
                         lambda v: np.convolve(v, ker, mode="same"), 0, Z)
-                a, a0 = pca_state_auc(Z, l)
+                a, a0 = pca_state_auc(Z, l, seed=k)
                 row[f"pcauc_{tag}"], row[f"pcauc0_{tag}"] = a, a0
                 variants = [("", Z), ("_pc3", top3(Z))]
                 if args.detrend:
