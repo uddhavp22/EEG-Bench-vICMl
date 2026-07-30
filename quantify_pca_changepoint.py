@@ -385,6 +385,52 @@ def tracking_scores(Zs, Ws, ls, k=32, n_folds=5, seed=0):
             np.mean(r2s, axis=0))
 
 
+def within_state_consistency(Z, lab, n_null=40, seed=0):
+    """M7. Does each state get a CONSISTENT colour for its whole duration?
+
+    AUC ranks tokens along one direction, so a representation that jumps around
+    inside a state pays nothing as long as that one projection still separates.
+    This is what "LaBraM changes at the boundary but is all over the place
+    within the seizure" means, and no other metric here sees it.
+
+      eta2    fraction of 3-PC variance that is BETWEEN states rather than
+              within them. High = each state holds one colour.
+      jitter  mean token-to-token step taken WITHIN a state, divided by the
+              distance between the two state centroids. High = flickering.
+
+    eta2 gets a relocated-label null since a drifting trajectory scores high
+    against any split; jitter needs none, as it never looks at the labels
+    except to exclude the steps that cross a boundary.
+
+    Returns (eta2, eta2_null, jitter).
+    """
+    P   = top3(Z)
+    lab = np.asarray(lab)
+
+    def _eta2(l):
+        if l.min() == l.max():
+            return np.nan
+        sst = float(((P - P.mean(axis=0)) ** 2).sum())
+        if sst <= 0:
+            return np.nan
+        ssw = sum(float(((P[l == v] - P[l == v].mean(axis=0)) ** 2).sum())
+                  for v in (0, 1))
+        return 1.0 - ssw / sst
+
+    step = np.linalg.norm(np.diff(P, axis=0), axis=1)
+    same = lab[1:] == lab[:-1]
+    sep  = (float(np.linalg.norm(P[lab == 1].mean(axis=0) - P[lab == 0].mean(axis=0)))
+            if lab.min() != lab.max() else np.nan)
+    jit  = (float(step[same].mean() / sep)
+            if np.isfinite(sep) and sep > 0 and same.any() else np.nan)
+
+    rng = np.random.default_rng(seed)
+    nl  = [_eta2(_relocate(lab, rng)) for _ in range(n_null)]
+    return (_eta2(lab),
+            float(np.nanmean(nl)) if np.any(np.isfinite(nl)) else np.nan,
+            jit)
+
+
 def cusum_split(P):
     """Best single split of a token trajectory, by the standard multivariate
     CUSUM statistic  sqrt(t(n-t)/n) * ||mean(P[:t]) - mean(P[t:])||.
@@ -812,8 +858,9 @@ def main():
     keep = {"laya": [], "labram": []}
     keep_lab = {"laya": [], "labram": []}
     keep_w   = {"laya": [], "labram": []}
+    keep_tr  = {"laya": [], "labram": [], "W": [], "l": []}
     with h5py.File(h5_path, "r") as hf:
-        for k, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
+        for ci, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
             eeg      = hf[f"/recordings/{seq_id}/data"][:]
             ch_names = hf[f"/recordings/{seq_id}/channels"][:]
 
@@ -830,6 +877,26 @@ def main():
                       f"LaBraM {Zb.shape} @ {len(Zb)/16:.1f} Hz, "
                       f"{len(decode_names(ch_names))} channels")
                 warned = True
+
+            if args.tracking and len(keep_tr["W"]) < args.auc_max_chunks:
+                # One row per SECOND, which is also the native label rate. Each
+                # model gets exactly the same 1 s of signal: Laya's 10 tokens of
+                # 0.1 s concatenated, LaBraM's single 1 s window. Without this
+                # LaBraM predicts descriptors of the very samples it saw while
+                # Laya is asked about 10x more signal than its token covers, and
+                # the R2 gap is receptive field rather than training objective.
+                nsec = len(lab)
+                oky  = len(Za) == nsec * 10
+                idxb = np.searchsorted(starts, np.arange(nsec) * LABRAM_SFREQ)
+                okb  = idxb.max() < len(Zb)
+                if oky and okb:
+                    keep_tr["laya"].append(
+                        Za.reshape(nsec, -1).astype(np.float32))
+                    keep_tr["labram"].append(Zb[idxb].astype(np.float32))
+                    keep_tr["W"].append(
+                        _zscore(waveform_features(
+                            eeg, args.sfreq, np.arange(nsec) + 0.5)).astype(np.float32))
+                    keep_tr["l"].append(np.asarray(lab))
 
             row = dict(seq_id=seq_id, n_trans=int(transitions(lab).size),
                        n_pos=int((lab == 1).sum()))
@@ -851,7 +918,10 @@ def main():
                     ker = np.ones(args.smooth) / args.smooth
                     Z = np.apply_along_axis(
                         lambda v: np.convolve(v, ker, mode="same"), 0, Z)
-                a, a0 = pca_state_auc(Z, l, seed=k)
+                a, a0 = pca_state_auc(Z, l, seed=ci)
+                q7, q7n, q7j = within_state_consistency(Z, l, seed=ci)
+                row[f"eta2_{tag}"], row[f"eta2n_{tag}"] = q7, q7n
+                row[f"jit_{tag}"] = q7j
                 e5, s5, tr5 = m5_split_error(Z, l, hz)
                 row[f"m5err_{tag}"]   = e5
                 row[f"m5split_{tag}"] = s5
@@ -869,9 +939,9 @@ def main():
                 row[f"ceil_{tag}"] = m1_ceiling(len(Z), args.window, args.tol)
             rows.append(row)
 
-            if (k + 1) % 50 == 0:
+            if (ci + 1) % 50 == 0:
                 el = time.time() - t0
-                print(f"  {k+1} chunks  {el:.0f}s  ({el/(k+1):.2f} s/chunk)")
+                print(f"  {ci+1} chunks  {el:.0f}s  ({el/(k+1):.2f} s/chunk)")
 
     if args.state_auc:
         print("\nM3  held-out state-occupancy AUC (chance exactly 0.500)")
@@ -905,14 +975,36 @@ def main():
     df = pd.DataFrame(rows)
     if args.tracking:
         print("\nM6  waveform tracking vs state tracking, both at 32 PCs")
-        print("    R2 = how much of the 1 s signal descriptors the embedding")
-        print("    predicts; AUC = how well it separates the annotated state.")
+        print("    One row per second. Each model sees the SAME 1 s of signal:")
+        print("    Laya's 10 x 0.1 s tokens concatenated, LaBraM's one 1 s window.")
+        print("    R2 = how much of the 1 s descriptors the embedding predicts;")
+        print("    AUC = how well it separates the annotated state.")
         print(f"    {'':18s} {'stateAUC':>9s} " +
               " ".join(f"{f:>7s}" for f in WAVE_FEATS) + f" {'meanR2':>7s}")
+        n_tr = len(keep_tr["W"])
         for tag, nm in [("laya", "Laya"), ("labram", "LaBraM")]:
-            auc, r2 = tracking_scores(keep[tag], keep_w[tag], keep_lab[tag])
+            if n_tr < 5:
+                print(f"    {nm}: too few aligned chunks ({n_tr})"); continue
+            auc, r2 = tracking_scores(keep_tr[tag], keep_tr["W"], keep_tr["l"])
             print(f"    {nm:18s} {auc:9.4f} " +
                   " ".join(f"{v:7.3f}" for v in r2) + f" {np.mean(r2):7.3f}")
+        print(f"    (n={n_tr} chunks x {len(keep_tr['l'][0]) if n_tr else 0} s)")
+
+    print("\nM7  is each state held at a CONSISTENT colour? (the 3 PCs shown)")
+    for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
+        e  = df[f"eta2_{tag}"].to_numpy(float)
+        en = df[f"eta2n_{tag}"].to_numpy(float)
+        j  = df[f"jit_{tag}"].to_numpy(float)
+        m  = np.isfinite(e) & np.isfinite(en) & np.isfinite(j)
+        print(f"  {nm:26s} n={int(m.sum()):5d}  between-state var={np.median(e[m]):.4f}  "
+              f"(null {np.median(en[m]):.4f})  within-state jitter={np.median(j[m]):.4f}")
+    mm = np.isfinite(df["jit_laya"]) & np.isfinite(df["jit_labram"])
+    jl, jb = df["jit_laya"][mm].to_numpy(float), df["jit_labram"][mm].to_numpy(float)
+    if mm.sum() > 5:
+        st = stats.wilcoxon(jl, jb, alternative="less")
+        print(f"  {'paired jitter':26s} n={int(mm.sum()):5d}  Laya {np.median(jl):.4f}  "
+              f"LaBraM {np.median(jb):.4f}  Laya steadier on {100*np.mean(jl<jb):5.1f}%  "
+              f"p={st.pvalue:.3e}")
 
     print("\nM5  does the dominant split of the 3 PCs land on the boundary? (s)")
     print("    Null pairs each chunk's split with OTHER chunks' boundaries, so")
