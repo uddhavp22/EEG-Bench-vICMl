@@ -207,6 +207,49 @@ def top3(Z):
     return Zc @ np.linalg.svd(Zc, full_matrices=False)[2][:3].T
 
 
+def positional_stats(Z):
+    """How much of this embedding is just a clock?
+
+    A representation whose PCA is dominated by "where am I in the chunk" will
+    produce a smooth left-to-right colour sweep that looks like semantic
+    organisation but is independent of the annotation. It also has a nearly
+    flat change score, so M1 sits on the null and the argmax drifts to the
+    chunk edges, which reads as WORSE than chance localisation.
+
+    Returns
+      pc1_t : |corr(PC1, token index)|, 1.0 = PC1 is a pure ramp
+      evr1  : fraction of variance in PC1
+      t_r2  : fraction of TOTAL embedding variance explained by a cubic in
+              token index alone. This is the decisive number.
+    """
+    n  = len(Z)
+    Zc = Z - Z.mean(axis=0)
+    _, S, Vt = np.linalg.svd(Zc, full_matrices=False)
+    t   = np.linspace(-1.0, 1.0, n)
+    pc1 = Zc @ Vt[0]
+    X   = np.vstack([np.ones(n), t, t ** 2, t ** 3]).T
+    beta, *_ = np.linalg.lstsq(X, Zc, rcond=None)
+    resid = Zc - X @ beta
+    denom = float((Zc ** 2).sum())
+    return (float(abs(np.corrcoef(pc1, t)[0, 1])),
+            float(S[0] ** 2 / (S ** 2).sum()),
+            float(1.0 - (resid ** 2).sum() / denom) if denom > 0 else np.nan)
+
+
+def detrend_tokens(Z, order=3):
+    """Regress a per-chunk polynomial in token index out of every dimension.
+
+    If M1 rises above the null only after this, the state structure is present
+    but masked by a global temporal drift, which is a defensible thing to say.
+    If it stays on the null, there is nothing there to unmask.
+    """
+    n = len(Z)
+    t = np.linspace(-1.0, 1.0, n)
+    X = np.vstack([t ** k for k in range(order + 1)]).T
+    beta, *_ = np.linalg.lstsq(X, Z, rcond=None)
+    return Z - X @ beta
+
+
 def tok_labels_repeat(lab, n_tok):
     """1 Hz chunk labels -> one per token, for a grid that tiles the chunk."""
     lab = np.asarray(lab)
@@ -396,6 +439,20 @@ def aggregate(df, out_png):
     paired("m1_laya", "m1_labram", "paired, full embedding")
     paired("m1_laya_pc3", "m1_labram_pc3", "paired, 3 PCs")
 
+    print("\nPOSITIONAL CODE  is the embedding just a clock?")
+    for t, n in [("laya", "Laya  "), ("labram", "LaBraM")]:
+        if f"timer2_{t}" not in df:
+            continue
+        print(f"  {n:26s} |corr(PC1, t)|={df[f'pc1t_{t}'].median():.3f}  "
+              f"PC1 var={df[f'evr1_{t}'].median():.3f}  "
+              f"var explained by cubic in t={df[f'timer2_{t}'].median():.3f}")
+    if "m1_laya_dt" in df:
+        print("\nM1 after removing a per-chunk polynomial in token index")
+        vs_uniform("m1_laya_dt",     "Laya   detrended")
+        vs_uniform("m1_labram_dt",   "LaBraM detrended")
+        vs_uniform("m1_laya_dtpc3",  "Laya   detrended, 3 PCs")
+        paired("m1_laya_dt", "m1_labram_dt", "paired, detrended")
+
     print("\nM2  change-point localisation error, seconds (lower is better)")
     for t, n in [("laya", "Laya  "), ("labram", "LaBraM")]:
         d = df[[f"err_{t}", f"chance_{t}"]].dropna()
@@ -448,6 +505,10 @@ def main():
     ap.add_argument("--bipolar-map", choices=["none", "first"], default="none",
                     help="'first' maps T8-P8 -> T8 so LaBraM gets real electrode "
                          "positions instead of get_input_chans' range(C+1) fallback")
+    ap.add_argument("--detrend", type=int, default=0, metavar="ORDER",
+                    help="also score after regressing an order-N polynomial in "
+                         "token index out of each chunk (try 3). Separates real "
+                         "state structure from a global temporal ramp.")
     ap.add_argument("--limit", type=int, default=None, help="smoke-test N chunks")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--out", default=None)
@@ -501,7 +562,13 @@ def main():
                        n_pos=int((lab == 1).sum()))
             for tag, Z, l in [("laya", Za, la), ("labram", Zb, lb)]:
                 hz = len(Z) / 16.0
-                for sp, Zs in [("", Z), ("_pc3", top3(Z))]:
+                (row[f"pc1t_{tag}"], row[f"evr1_{tag}"],
+                 row[f"timer2_{tag}"]) = positional_stats(Z)
+                variants = [("", Z), ("_pc3", top3(Z))]
+                if args.detrend:
+                    Zd = detrend_tokens(Z, args.detrend)
+                    variants += [("_dt", Zd), ("_dtpc3", top3(Zd))]
+                for sp, Zs in variants:
                     p = m1_transition_percentile(Zs, l, args.window, args.tol)
                     row[f"m1_{tag}{sp}"] = float(np.mean(p)) if p else np.nan
                     e, c = m2_localisation(Zs, l, args.window, hz)
