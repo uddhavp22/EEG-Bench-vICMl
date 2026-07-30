@@ -618,9 +618,24 @@ def find_h5(task, model_tag="LaBraMModel"):
         get_config_value("data"), "make_dataset")
     hits = sorted(glob.glob(os.path.join(root, f"{task}_{model_tag}_*.h5")),
                   key=os.path.getsize, reverse=True)
-    if not hits:
-        raise FileNotFoundError(f"no H5 for {root}/{task}_{model_tag}_*.h5")
-    return hits[0]
+    if hits:
+        return hits[0]
+
+    # Say what IS there. `root` comes from eeg_bench config and can resolve to a
+    # RELATIVE path, so a miss may mean "wrong directory" rather than "not built".
+    msg = [f"no H5 matching {os.path.join(root, f'{task}_{model_tag}_*.h5')}",
+           f"  root resolved to {os.path.abspath(root)}"
+           f"{'' if os.path.isdir(root) else '   <-- DOES NOT EXIST'}"]
+    same_task = sorted(glob.glob(os.path.join(root, f"{task}_*.h5")))
+    if same_task:
+        msg.append(f"  builds present for {task}:")
+        msg += [f"    {os.path.basename(h)}" for h in same_task]
+    else:
+        any_h5 = sorted(glob.glob(os.path.join(root, "*.h5")))[:15]
+        msg.append("  no H5 for this task in that directory" if not any_h5
+                   else "  directory holds: " + ", ".join(os.path.basename(h) for h in any_h5))
+    msg.append("  pass --h5 /abs/path.h5 to bypass the lookup")
+    raise FileNotFoundError("\n".join(msg))
 
 
 def infer_sfreq(eeg, chunk_len_s):
