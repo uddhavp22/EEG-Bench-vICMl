@@ -323,6 +323,11 @@ class ConcreteLeJEPAClinical(nn.Module):
     def forward(self, x, coords, probe_layer_idx: Optional[int] = None):
 
         B, C, T = x.shape
+        if coords.shape[1] != C:
+            raise ValueError(
+                f"Channel coordinate mismatch: got x with {C} channels, "
+                f"but coords has {coords.shape[1]} channels."
+            )
         n_chunks = T // self.chunk_length
 
         # Handle case where data is shorter than one chunk
@@ -517,6 +522,23 @@ class EEGLeJEPAClinicalModel(AbstractModel):
         
         return torch.stack(output).to(self.device).float()
 
+    def _coords_for_batch(self, coords, batch_channels, n_channels):
+        if coords.shape[0] == n_channels:
+            return coords
+        if batch_channels is None:
+            raise ValueError(
+                f"Channel coordinate mismatch: batch has {n_channels} channels, "
+                f"but default coords has {coords.shape[0]} channels."
+            )
+        batch_ch_names = [ch_name[0] for ch_name in batch_channels]
+        batch_coords = self._coords(batch_ch_names).to(self.device)
+        if batch_coords.shape[0] != n_channels:
+            raise ValueError(
+                f"Channel coordinate mismatch: batch has {n_channels} channels, "
+                f"but resolved coords has {batch_coords.shape[0]} channels."
+            )
+        return batch_coords
+
     @torch.no_grad()
     def _extract_embeddings_clinical(self, dataloader, coords):
         """Extract averaged embeddings from frozen encoder (handles chunking internally)."""
@@ -548,14 +570,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     x = x.permute(0, 2, 1, 3)
                     x = x.reshape(B * n_chunks, C, chunk_length)
 
-                    #path for bipolar stuff
-                    if x.shape[1] != coords.shape[0]: # mismatch due to bipolar channels
-                        #stack batch_coords tuple to get batch channel names
-                        batch_coords = [ch_name[0] for ch_name in batch_coords]
-                        coords = self._coords(batch_coords).to(self.device)
+                    batch_coords_resolved = self._coords_for_batch(coords, batch_coords, C)
 
                     # Expand coords for all chunks
-                    cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
+                    cb = batch_coords_resolved.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
                     cb = cb.reshape(B * n_chunks, C, 3)
 
                     # Forward through backbone
@@ -621,11 +639,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     x = x.permute(0, 2, 1, 3)
                     x = x.reshape(B * n_chunks, C, chunk_length)
 
-                    if x.shape[1] != coords.shape[0]:
-                        batch_coords = [ch_name[0] for ch_name in batch_coords]
-                        coords = self._coords(batch_coords).to(self.device)
+                    batch_coords_resolved = self._coords_for_batch(coords, batch_coords, C)
 
-                    cb = coords.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
+                    cb = batch_coords_resolved.unsqueeze(0).unsqueeze(1).expand(B, n_chunks, -1, -1)
                     cb = cb.reshape(B * n_chunks, C, 3)
 
                     if self.probe_layer_idx is not None:
@@ -989,9 +1005,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                 total_samples = 0
                 correct = 0
                 total_acc_samples = 0
-                for x, yb, _ in tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs}", leave=False):
+                for x, yb, batch_coords in tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs}", leave=False):
                     x, yb = x.to(self.device), yb.to(self.device)
-                    cb = coords_train.unsqueeze(0).expand(x.size(0), -1, -1)
+                    batch_coords_resolved = self._coords_for_batch(coords_train, batch_coords, x.shape[1])
+                    cb = batch_coords_resolved.unsqueeze(0).expand(x.size(0), -1, -1)
 
                     optimizer.zero_grad()
                     logits = self.model(x, cb)
@@ -1026,9 +1043,10 @@ class EEGLeJEPAClinicalModel(AbstractModel):
                     val_acc_samples = 0
                     self.model.eval()
                     with torch.no_grad():
-                        for x, yb, _ in tqdm(val_loader, desc=f"Val {epoch}/{max_epochs}", leave=False):
+                        for x, yb, batch_coords in tqdm(val_loader, desc=f"Val {epoch}/{max_epochs}", leave=False):
                             x, yb = x.to(self.device), yb.to(self.device)
-                            cb = coords_val.unsqueeze(0).expand(x.size(0), -1, -1)
+                            batch_coords_resolved = self._coords_for_batch(coords_val, batch_coords, x.shape[1])
+                            cb = batch_coords_resolved.unsqueeze(0).expand(x.size(0), -1, -1)
                             logits = self.model(x, cb)
                             loss = self.model.loss_fn(logits, yb)
                             val_loss += loss.item() * x.size(0)
@@ -1172,12 +1190,9 @@ class EEGLeJEPAClinicalModel(AbstractModel):
 
                 x = x_noisy
 
-            # Handle bipolar/mismatch channels like training path
-            if C != coords.shape[0]:
-                batch_coords = [ch_name[0] for ch_name in batch_coords]
-                coords = self._coords(batch_coords).to(self.device)
+            batch_coords_resolved = self._coords_for_batch(coords, batch_coords, C)
 
-            cb = coords.unsqueeze(0).expand(B, -1, -1)
+            cb = batch_coords_resolved.unsqueeze(0).expand(B, -1, -1)
 
             logits = self.model(x, cb, probe_layer_idx=self.probe_layer_idx)
             # Get window-level predictions

@@ -62,9 +62,9 @@ models:
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_rebuttal/fullds_02sig_20k
     version: 0
   
-  # laya-b-30k-02sig: #laya-b 30k steps with 0.2 sig reg
-  #   base_path: /radraid2/spanchavati/eegfm/lightning_logs_rebuttal/fullds_02sig_30k
-  #   version: 0
+  laya-b-30k-02sig: #laya-b 30k steps with 0.2 sig reg
+    base_path: /radraid2/spanchavati/eegfm/lightning_logs_rebuttal/fullds_02sig_30k
+    version: 0
 
   laya-b-20k-02sig-nostopgrad: #no stop grad ablation
     base_path: /radraid2/spanchavati/eegfm/lightning_logs_rebuttal/fullds_02sig_20k_nostopgrad
@@ -92,7 +92,7 @@ training:
   seeds: [42, 123, 456] #, 789, 101]
 
 execution:
-  gpus: 2
+  gpus: 1
   workers_per_gpu: 1
   log_dir: rebuttal_logs/lejepa_full_benchmark/rerunning_laya
   results_dir: results_rebuttal/rerunning_laya

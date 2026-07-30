@@ -1,0 +1,32 @@
+# Laya-EMA (no-projector variant) — rebuttal EMA-target ablation, secondary
+# diagnostic checkpoint (see eegfmchallenge/rebuttal/ema/PLAN.md and
+# configs/laya_ema_noproj.py). Kept as its own file (not merged into
+# full_benchmark.yaml, which is mid-edit for an unrelated sweep) so it can be
+# run standalone against the same tasks/seeds as Table 3.
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/rebuttal_ema_noproj.yaml
+
+models:
+  laya-ema-noproj: # EMA target, no cls_projector (V-JEPA-style, proj_dim=None); 10k steps, 10% data
+    base_path: /REDLRADADM35839/home/spanchavati/eegfmchallenge/lightning_logs_rebuttal/rebuttal_laya_ema_noproj_10pct
+    version: 2
+
+checkpoints:
+  steps: []
+  include_last: true # only the final (step 10000) checkpoint, matching Table 3
+
+tasks:
+  epoch_sweep: []
+  final_only:
+    - all # all 14 tasks
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+  seeds: [42, 123, 456] # same seeds as Table 3 / full_benchmark.yaml
+
+execution:
+  gpus: 1
+  workers_per_gpu: 1
+  log_dir: rebuttal_logs/laya_ema_noproj
+  results_dir: results_rebuttal/laya_ema_noproj

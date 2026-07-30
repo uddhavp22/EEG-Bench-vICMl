@@ -49,8 +49,8 @@ training:
   seeds: [42, 123, 456] #, 789, 101]
 
 execution:
-  gpus: 1
-  workers_per_gpu: 2
+  gpus: 2
+  workers_per_gpu: 1
   log_dir: rebuttal_logs/lejepa_full_benchmark_fullft/rerunning_laya
   results_dir: results_rebuttal/lejepa_full_benchmark_fullft/rerunning_laya
 
