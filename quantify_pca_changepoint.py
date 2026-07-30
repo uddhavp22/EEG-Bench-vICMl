@@ -636,10 +636,16 @@ def signal_fingerprint(eeg):
     pinned to a bound. Defossez output: unit-IQR and hard-clipped at +/-20, so
     `clipped` is strictly positive on any chunk containing a real event.
     """
-    a = np.abs(eeg)
+    a  = np.abs(eeg)
+    mx = float(a.max())
+    # A clip shows up as mass pinned AT the bound with nothing above it. The
+    # fraction of samples ABOVE 20 is not the test: microvolt EEG has a median
+    # around 35 uV, so it sits above 20 most of the time and that reads as a
+    # false alarm. The discriminative fact is max|x|, 478 uV here vs exactly
+    # 20.0 for defossez output.
     return dict(median=float(np.median(a)), p99=float(np.percentile(a, 99)),
-                max=float(a.max()),
-                clipped=float(np.mean(a >= 19.999)))
+                max=mx, at_bound=float(np.mean(a >= mx - 1e-6)),
+                looks_clipped=bool(mx <= 20.0001))
 
 
 def iter_chunks(index, limit=None):
@@ -954,8 +960,9 @@ def main():
                 print(f"  sfreq  {sfreq:.1f} Hz (inferred from {eeg.shape[1]} "
                       f"samples / {chunk_len_s:g} s)")
                 print(f"  signal median|x|={fp['median']:.3g} p99={fp['p99']:.3g} "
-                      f"max|x|={fp['max']:.3g} clipped@20={fp['clipped']:.4f}")
-                if fp['clipped'] > 0 or fp['max'] <= 20.0001:
+                      f"max|x|={fp['max']:.3g} at_bound={fp['at_bound']:.5f} "
+                      f"({'MICROVOLTS ok' if not fp['looks_clipped'] else 'CLIPPED'})")
+                if fp['looks_clipped']:
                     print("  *** WARNING: looks defossez-scaled and clipped to +/-20. "
                           "LaBraM expects microvolts; use the LaBraMModel H5. ***")
                 warned = True
