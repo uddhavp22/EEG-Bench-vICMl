@@ -653,6 +653,7 @@ def main():
 
     import pandas as pd
     import torch
+    from scipy.stats import wilcoxon
 
     ckpt = str(args.ckpt).strip()
     if ckpt != args.ckpt:
@@ -764,7 +765,7 @@ def main():
         a  = df[f"pcauc_{tag}"].to_numpy(float)
         a0 = df[f"pcauc0_{tag}"].to_numpy(float)
         m  = np.isfinite(a) & np.isfinite(a0)
-        st = stats.wilcoxon(a[m], a0[m], alternative="greater") if m.sum() > 5 else None
+        st = wilcoxon(a[m], a0[m], alternative="greater") if m.sum() > 5 else None
         print(f"  {nm:26s} n={int(m.sum()):5d}  AUC={np.median(a[m]):.4f}  "
               f"null={np.median(a0[m]):.4f}  "
               f"margin={np.median(a[m] - a0[m]):+.4f}  "
@@ -773,7 +774,7 @@ def main():
     dl = (df["pcauc_laya"] - df["pcauc0_laya"])[ml].to_numpy(float)
     db = (df["pcauc_labram"] - df["pcauc0_labram"])[ml].to_numpy(float)
     if ml.sum() > 5:
-        st = stats.wilcoxon(dl, db, alternative="greater")
+        st = wilcoxon(dl, db, alternative="greater")
         print(f"  {'paired margin':26s} n={int(ml.sum()):5d}  Laya {np.median(dl):+.4f}  "
               f"LaBraM {np.median(db):+.4f}  Laya better on {100*np.mean(dl>db):5.1f}%  "
               f"p={st.pvalue:.3e}")
