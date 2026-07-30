@@ -819,6 +819,13 @@ def main():
                     help="also run M3, held-out state occupancy AUC. This is what "
                          "the PCA panel shows when the colour HOLDS across the "
                          "event rather than spiking at its edge.")
+    ap.add_argument("--tracking-pool", choices=["concat", "mean", "both"],
+                    default="both",
+                    help="how Laya's 10 x 0.1 s tokens are combined into one 1 s "
+                         "row. concat keeps within-second temporal structure, "
+                         "which LaBraM's single vector cannot express and which "
+                         "therefore favours Laya; mean removes it. Reporting both "
+                         "brackets the answer.")
     ap.add_argument("--tracking", action="store_true",
                     help="also run M6: does the embedding track the WAVEFORM or "
                          "the STATE? Equal-dimension, held out over chunks.")
@@ -858,7 +865,7 @@ def main():
     keep = {"laya": [], "labram": []}
     keep_lab = {"laya": [], "labram": []}
     keep_w   = {"laya": [], "labram": []}
-    keep_tr  = {"laya": [], "labram": [], "W": [], "l": []}
+    keep_tr  = {"laya": [], "laya_mean": [], "labram": [], "W": [], "l": []}
     with h5py.File(h5_path, "r") as hf:
         for ci, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
             eeg      = hf[f"/recordings/{seq_id}/data"][:]
@@ -892,6 +899,8 @@ def main():
                 if oky and okb:
                     keep_tr["laya"].append(
                         Za.reshape(nsec, -1).astype(np.float32))
+                    keep_tr["laya_mean"].append(
+                        Za.reshape(nsec, 10, -1).mean(axis=1).astype(np.float32))
                     keep_tr["labram"].append(Zb[idxb].astype(np.float32))
                     keep_tr["W"].append(
                         _zscore(waveform_features(
@@ -982,7 +991,13 @@ def main():
         print(f"    {'':18s} {'stateAUC':>9s} " +
               " ".join(f"{f:>7s}" for f in WAVE_FEATS) + f" {'meanR2':>7s}")
         n_tr = len(keep_tr["W"])
-        for tag, nm in [("laya", "Laya"), ("labram", "LaBraM")]:
+        arms = [("laya", "Laya (concat)"), ("laya_mean", "Laya (mean-pool)"),
+                ("labram", "LaBraM")]
+        if args.tracking_pool == "concat":
+            arms = [a for a in arms if a[0] != "laya_mean"]
+        elif args.tracking_pool == "mean":
+            arms = [a for a in arms if a[0] != "laya"]
+        for tag, nm in arms:
             if n_tr < 5:
                 print(f"    {nm}: too few aligned chunks ({n_tr})"); continue
             auc, r2 = tracking_scores(keep_tr[tag], keep_tr["W"], keep_tr["l"])
