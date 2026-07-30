@@ -302,6 +302,136 @@ def _relocate(lab, rng):
     return out
 
 
+WAVE_FEATS = ["rms", "linelen", "delta", "theta", "alpha", "beta", "gamma"]
+
+
+def waveform_features(eeg, sfreq, centers_s, win_s=1.0):
+    """Low-level signal descriptors on a 1 s window centred at each token.
+
+    Identical definition and identical window length for both models, sampled
+    at whatever token centres each one has, so the only thing that differs is
+    the embedding being asked to predict them.
+    """
+    eeg  = np.asarray(eeg, dtype=np.float64)
+    C, T = eeg.shape
+    w    = int(round(win_s * sfreq))
+    idx  = np.clip(np.round(np.asarray(centers_s) * sfreq).astype(int) - w // 2,
+                   0, max(T - w, 0))
+    seg  = np.stack([eeg[:, i:i + w] for i in idx], axis=0)      # (n, C, w)
+    seg  = seg - seg.mean(axis=2, keepdims=True)
+
+    rms  = np.sqrt((seg ** 2).mean(axis=2)).mean(axis=1)
+    ll   = np.abs(np.diff(seg, axis=2)).mean(axis=2).mean(axis=1)
+    P    = np.abs(np.fft.rfft(seg * np.hanning(w), axis=2)) ** 2
+    fr   = np.fft.rfftfreq(w, 1.0 / sfreq)
+    bp   = [P[:, :, (fr >= lo) & (fr < hi)].sum(axis=2).mean(axis=1)
+            for lo, hi in [(1, 4), (4, 8), (8, 13), (13, 30), (30, 45)]]
+    return np.log(np.vstack([rms, ll] + bp).T + 1e-12)
+
+
+def tracking_scores(Zs, Ws, ls, k=32, n_folds=5, seed=0):
+    """M6. Waveform tracking vs state tracking, at equal dimensionality.
+
+    Both models are projected onto their own top-k global PCs fit on the
+    TRAINING chunks, so Laya's 384 and LaBraM's 200 both become k and neither
+    can win on width. Then, held out:
+
+      waveform R2  OLS from the k PCs to the 1 s signal descriptors
+      state AUC    mean-difference direction in the k PCs, scored by rank AUC
+
+    Everything is per-chunk centred on both sides, so this measures tracking of
+    WITHIN-chunk fluctuation, not recognition of which chunk you are in.
+
+    Returns (state_auc, per_feature_r2).
+    """
+    rng  = np.random.default_rng(seed)
+    n    = len(Zs)
+    if n < n_folds:
+        return float("nan"), np.full(len(WAVE_FEATS), np.nan)
+    fold = rng.permutation(n) % n_folds
+    r2s, ps, py = [], [], []
+    for f in range(n_folds):
+        tr = [i for i in range(n) if fold[i] != f]
+        te = [i for i in range(n) if fold[i] == f]
+        if not tr or not te:
+            continue
+        Xtr = np.concatenate([Zs[i] for i in tr]).astype(np.float64)
+        mu  = Xtr.mean(axis=0)
+        Vt  = np.linalg.svd(Xtr - mu, full_matrices=False)[2][:k]
+        Ptr = (Xtr - mu) @ Vt.T
+        Wtr = np.concatenate([Ws[i] for i in tr]).astype(np.float64)
+
+        A = np.hstack([Ptr, np.ones((len(Ptr), 1))])
+        beta, *_ = np.linalg.lstsq(A, Wtr, rcond=None)
+
+        ytr = np.concatenate([ls[i] for i in tr]).astype(bool)
+        if ytr.all() or not ytr.any():
+            continue
+        u = Ptr[ytr].mean(axis=0) - Ptr[~ytr].mean(axis=0)
+        u = u / (np.linalg.norm(u) + 1e-12)
+
+        Pte  = np.concatenate([(np.asarray(Zs[i], np.float64) - mu) @ Vt.T
+                               for i in te])
+        Wte  = np.concatenate([Ws[i] for i in te]).astype(np.float64)
+        pred = np.hstack([Pte, np.ones((len(Pte), 1))]) @ beta
+        sst  = ((Wte - Wte.mean(axis=0)) ** 2).sum(axis=0)
+        r2s.append(1.0 - ((Wte - pred) ** 2).sum(axis=0) /
+                   np.where(sst > 0, sst, 1.0))
+        ps.append(Pte @ u)
+        py.append(np.concatenate([ls[i] for i in te]))
+    if not r2s:
+        return float("nan"), np.full(len(WAVE_FEATS), np.nan)
+    return (_auc(np.concatenate(ps), np.concatenate(py)),
+            np.mean(r2s, axis=0))
+
+
+def cusum_split(P):
+    """Best single split of a token trajectory, by the standard multivariate
+    CUSUM statistic  sqrt(t(n-t)/n) * ||mean(P[:t]) - mean(P[t:])||.
+
+    Global, unlike M1's local w=5 difference, so a transition that takes
+    seconds still registers. The sqrt weight is what stops the argmax being
+    dragged to the edges where one block is tiny and its mean is noisy.
+
+    Returns the argmax index.
+    """
+    n  = len(P)
+    cs = np.vstack([np.zeros(P.shape[1]), np.cumsum(P, axis=0)])
+    t  = np.arange(1, n)
+    m1 = cs[1:n] / t[:, None]
+    m2 = (cs[n] - cs[1:n]) / (n - t)[:, None]
+    d  = np.sqrt(t * (n - t) / n) * np.linalg.norm(m1 - m2, axis=1)
+    return int(np.argmax(d)) + 1
+
+
+def m5_split_error(Z, lab, token_hz):
+    """M5. Does the dominant split of the 3 PCs the figure colours with land on
+    the annotated boundary?
+
+    Separability saturates on a smooth trajectory -- a random boundary scores
+    ~0.96 on Laya -- so M4 cannot discriminate. Location does not saturate:
+    smoothness says nothing about WHERE the largest split sits. This is M2's
+    question asked with a global segmentation instead of a local window.
+
+    The chance level CANNOT be a uniform draw. The sqrt weight makes the argmax
+    centre-biased, and real event boundaries are centre-biased too, so two
+    independent centre biases manufacture agreement: a smooth random walk with
+    no relation to the label beats a uniform baseline on 99.7% of chunks. The
+    null is instead built across chunks in aggregate(), pairing this chunk's
+    split against OTHER chunks' boundaries, which keeps both biases and
+    destroys only their correspondence.
+
+    Returns (err_s, split_s, trans_s) with the transitions ";"-joined.
+    """
+    tr = transitions(lab)
+    if len(tr) == 0:
+        return np.nan, np.nan, ""
+    t = cusum_split(top3(Z))
+    return (float(np.min(np.abs(tr - t))) / token_hz,
+            t / token_hz,
+            ";".join(f"{x / token_hz:.4f}" for x in tr))
+
+
 def pca_state_auc(Z, lab, n_null=40, seed=0):
     """M4. On the 3 PCs the figure actually colours with: are event tokens
     separable from non-event tokens WITHIN the chunk?
@@ -643,6 +773,9 @@ def main():
                     help="also run M3, held-out state occupancy AUC. This is what "
                          "the PCA panel shows when the colour HOLDS across the "
                          "event rather than spiking at its edge.")
+    ap.add_argument("--tracking", action="store_true",
+                    help="also run M6: does the embedding track the WAVEFORM or "
+                         "the STATE? Equal-dimension, held out over chunks.")
     ap.add_argument("--auc-max-chunks", type=int, default=2000,
                     help="cap on chunks retained in RAM for M3")
     ap.add_argument("--limit", type=int, default=None, help="smoke-test N chunks")
@@ -678,6 +811,7 @@ def main():
     rows, t0, warned = [], time.time(), False
     keep = {"laya": [], "labram": []}
     keep_lab = {"laya": [], "labram": []}
+    keep_w   = {"laya": [], "labram": []}
     with h5py.File(h5_path, "r") as hf:
         for k, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
             eeg      = hf[f"/recordings/{seq_id}/data"][:]
@@ -703,15 +837,25 @@ def main():
                 hz = len(Z) / 16.0
                 (row[f"pc1t_{tag}"], row[f"evr1_{tag}"],
                  row[f"timer2_{tag}"]) = positional_stats(Z)
-                if args.state_auc and len(keep[tag]) < args.auc_max_chunks:
+                if ((args.state_auc or args.tracking)
+                        and len(keep[tag]) < args.auc_max_chunks):
                     keep[tag].append(_zscore(Z).astype(np.float32))
                     keep_lab[tag].append(np.asarray(l))
+                    if args.tracking:
+                        ctr = ((np.arange(len(Z)) + 0.5) / hz if tag == "laya"
+                               else (starts + LABRAM_PATCH_SZ / 2) / LABRAM_SFREQ)
+                        keep_w[tag].append(
+                            _zscore(waveform_features(eeg, args.sfreq, ctr))
+                            .astype(np.float32))
                 if args.smooth > 1:
-                    k = args.smooth
-                    ker = np.ones(k) / k
+                    ker = np.ones(args.smooth) / args.smooth
                     Z = np.apply_along_axis(
                         lambda v: np.convolve(v, ker, mode="same"), 0, Z)
                 a, a0 = pca_state_auc(Z, l, seed=k)
+                e5, s5, tr5 = m5_split_error(Z, l, hz)
+                row[f"m5err_{tag}"]   = e5
+                row[f"m5split_{tag}"] = s5
+                row[f"m5trans_{tag}"] = tr5
                 row[f"pcauc_{tag}"], row[f"pcauc0_{tag}"] = a, a0
                 variants = [("", Z), ("_pc3", top3(Z))]
                 if args.detrend:
@@ -759,6 +903,47 @@ def main():
                   f"shift-null={np.median(nulls):.4f}")
 
     df = pd.DataFrame(rows)
+    if args.tracking:
+        print("\nM6  waveform tracking vs state tracking, both at 32 PCs")
+        print("    R2 = how much of the 1 s signal descriptors the embedding")
+        print("    predicts; AUC = how well it separates the annotated state.")
+        print(f"    {'':18s} {'stateAUC':>9s} " +
+              " ".join(f"{f:>7s}" for f in WAVE_FEATS) + f" {'meanR2':>7s}")
+        for tag, nm in [("laya", "Laya"), ("labram", "LaBraM")]:
+            auc, r2 = tracking_scores(keep[tag], keep_w[tag], keep_lab[tag])
+            print(f"    {nm:18s} {auc:9.4f} " +
+                  " ".join(f"{v:7.3f}" for v in r2) + f" {np.mean(r2):7.3f}")
+
+    print("\nM5  does the dominant split of the 3 PCs land on the boundary? (s)")
+    print("    Null pairs each chunk's split with OTHER chunks' boundaries, so")
+    print("    the shared centre bias of both is preserved and only the")
+    print("    correspondence is broken.")
+    for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
+        e  = df[f"m5err_{tag}"].to_numpy(float)
+        sp = df[f"m5split_{tag}"].to_numpy(float)
+        trs = [np.fromstring(x, sep=";") if isinstance(x, str) and x else np.array([])
+               for x in df[f"m5trans_{tag}"]]
+        m  = np.isfinite(e) & np.isfinite(sp)
+        idx = np.where(m)[0]
+        rng = np.random.default_rng(0)
+        perm = []
+        for _ in range(200):
+            j = rng.permutation(idx)
+            perm.append(np.median([np.min(np.abs(trs[b] - sp[a]))
+                                   for a, b in zip(idx, j) if trs[b].size]))
+        perm = np.array(perm)
+        obs  = np.median(e[m])
+        print(f"  {nm:26s} n={int(m.sum()):5d}  err={obs:.3f}s  "
+              f"null={np.median(perm):.3f}s  "
+              f"p={(1 + np.sum(perm <= obs)) / (len(perm) + 1):.3e}")
+    mm = np.isfinite(df["m5err_laya"]) & np.isfinite(df["m5err_labram"])
+    el, eb = df["m5err_laya"][mm].to_numpy(float), df["m5err_labram"][mm].to_numpy(float)
+    if mm.sum() > 5:
+        st = stats.wilcoxon(el, eb, alternative="less")
+        print(f"  {'paired':26s} n={int(mm.sum()):5d}  Laya {np.median(el):.3f}s  "
+              f"LaBraM {np.median(eb):.3f}s  Laya better on {100*np.mean(el<eb):5.1f}%  "
+              f"p={st.pvalue:.3e}")
+
     print("\nM4  state separability on the 3 PCs the figure colours with")
     print("    Circular by design; the null is built the same way, so read the margin.")
     for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
