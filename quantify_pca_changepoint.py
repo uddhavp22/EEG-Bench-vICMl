@@ -208,12 +208,43 @@ def m2_localisation(Z, lab, w, token_hz, n_null=2000, seed=0):
     return err, chance
 
 
+# Set from --pc-norm in main(). "plot" reproduces the figure's colour space and
+# is the default, because the figure is what the rebuttal defends.
+PC_NORM = "plot"
+
+
+def plot_norm(P):
+    """The figure's exact per-component normalisation, from
+    plot_chunk_with_embeddings in analyze_embeddings_rebuttals.ipynb:
+
+        p_low, p_high = percentile(P, 2, axis=0), percentile(P, 98, axis=0)
+        P = clip((P - p_low) / (p_high - p_low), 0, 1)
+
+    This rescales EVERY component to the same [0,1] span before it becomes an
+    RGB channel, so PC3 at 5% of the variance carries the same visual weight as
+    PC1 at 50%. Metrics on RAW PC coordinates are dominated by PC1 and therefore
+    do not measure what the panel shows. With Laya's PC1 at |corr(PC1,t)|=0.815,
+    raw-space change-point statistics track the temporal drift in PC1 rather
+    than a state step living in a lower-variance component.
+
+    The 2/98 clip also caps single-token excursions, at ~3 tokens per end of a
+    160-token chunk. Applied identically to both models.
+    """
+    lo  = np.percentile(P, 2, axis=0, keepdims=True)
+    hi  = np.percentile(P, 98, axis=0, keepdims=True)
+    rng = hi - lo
+    rng[rng == 0] = 1e-8
+    return np.clip((P - lo) / rng, 0.0, 1.0)
+
+
 def top3(Z):
-    """The 3 PCs the panel actually colours with. If the effect is in the full
-    embedding but absent here, the number and the picture are measuring
-    different things and the rebuttal must say which it quotes."""
+    """The 3 PCs the panel actually colours with, in the panel's own colour
+    space (see plot_norm and --pc-norm). If the effect is in the full embedding
+    but absent here, the number and the picture are measuring different things
+    and the rebuttal must say which it quotes."""
     Zc = Z - Z.mean(axis=0)
-    return Zc @ np.linalg.svd(Zc, full_matrices=False)[2][:3].T
+    P  = Zc @ np.linalg.svd(Zc, full_matrices=False)[2][:3].T
+    return plot_norm(P) if PC_NORM == "plot" else P
 
 
 def _zscore(Z):
@@ -864,6 +895,12 @@ def main():
                     help="checkpoint PATH; md5 of this string names the cache")
     ap.add_argument("--index", default=None, help="explicit .index.json, skips lookup")
     ap.add_argument("--h5", default=None, help="explicit recordings H5")
+    ap.add_argument("--pc-norm", choices=["plot", "raw"], default="plot",
+                    help="colour space for the 3-PC metrics. 'plot' applies the "
+                         "figure's per-component 2/98 percentile stretch to [0,1], "
+                         "so each PC weighs equally as it does in the RGB overlay. "
+                         "'raw' leaves PC1 dominating every distance, which is what "
+                         "every result before 2026-07-30 used.")
     ap.add_argument("--h5-tag", default="LaBraMModel",
                     help="H5 model tag. LaBraMModel is 200 Hz microvolts; "
                          "LeJEPAClinical is defossez-scaled and clipped to +/-20 "
@@ -906,6 +943,11 @@ def main():
     import pandas as pd
     import torch
     from scipy import stats
+
+    global PC_NORM
+    PC_NORM = args.pc_norm
+    print(f"pc-norm {PC_NORM}"
+          f"{'  (figure colour space: per-PC 2/98 stretch to [0,1])' if PC_NORM == 'plot' else '  (raw PCs, PC1 dominates)'}")
 
     ckpt = str(args.ckpt).strip()
     if ckpt != args.ckpt:
