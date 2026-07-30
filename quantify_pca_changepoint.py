@@ -276,6 +276,63 @@ def state_auc(Zs, labs, n_folds=5, seed=0, shift_null=False):
             np.array([v for v in per if np.isfinite(v)], dtype=float))
 
 
+def _relocate(lab, rng):
+    """Null label with the SAME number of transitions, at random positions.
+
+    A circular shift is the wrong null here. Rolling a single step wraps it
+    into two segments, which a time-like axis separates worse than one clean
+    step, so the null lands too low and a pure clock scores a large false
+    margin. Relocating instead keeps the temporal shape and moves only the
+    location, so any axis that separates ANY step equally well -- which is what
+    a clock is -- scores at the null by construction, and only a code that
+    tracks the TRUE boundary clears it.
+    """
+    lab = np.asarray(lab)
+    n   = len(lab)
+    k   = int((lab[1:] != lab[:-1]).sum())
+    if k < 1 or n < k + 2:
+        return lab
+    cuts = np.sort(rng.choice(np.arange(1, n), size=k, replace=False))
+    out  = np.empty(n, dtype=int)
+    v    = int(rng.integers(0, 2))
+    prev = 0
+    for c in cuts:
+        out[prev:c] = v; v = 1 - v; prev = int(c)
+    out[prev:] = v
+    return out
+
+
+def pca_state_auc(Z, lab, n_null=40, seed=0):
+    """M4. On the 3 PCs the figure actually colours with: are event tokens
+    separable from non-event tokens WITHIN the chunk?
+
+    The direction is fit inside the same chunk it is scored on, which is
+    circular and inflates the value. That is fine, because the null is built by
+    the identical procedure on relocated labels, so the inflation cancels and
+    only the margin over the null counts. See _relocate for why the null moves
+    the boundary rather than circularly shifting it.
+
+    This is the only place a within-chunk fit is legitimate: 3 dims against
+    ~160 tokens cannot separate arbitrary labels, whereas 384 dims would
+    separate anything and drive both the real and null values to 1.0.
+
+    Returns (auc, null_auc).
+    """
+    P   = top3(Z)
+    lab = np.asarray(lab)
+
+    def _fit(l):
+        if l.min() == l.max():
+            return np.nan
+        u = P[l == 1].mean(axis=0) - P[l == 0].mean(axis=0)
+        nu = float(np.linalg.norm(u))
+        return _auc(P @ (u / nu), l) if nu > 0 else np.nan
+
+    rng   = np.random.default_rng(seed)
+    nulls = [_fit(_relocate(lab, rng)) for _ in range(n_null)]
+    return _fit(lab), float(np.nanmean(nulls)) if np.any(np.isfinite(nulls)) else np.nan
+
+
 def positional_stats(Z):
     """How much of this embedding is just a clock?
 
@@ -653,6 +710,8 @@ def main():
                     ker = np.ones(k) / k
                     Z = np.apply_along_axis(
                         lambda v: np.convolve(v, ker, mode="same"), 0, Z)
+                a, a0 = pca_state_auc(Z, l)
+                row[f"pcauc_{tag}"], row[f"pcauc0_{tag}"] = a, a0
                 variants = [("", Z), ("_pc3", top3(Z))]
                 if args.detrend:
                     Zd = detrend_tokens(Z, args.detrend)
@@ -674,8 +733,9 @@ def main():
         print("    Does the embedding sit somewhere DIFFERENT during the event?")
         print("    The TIME ONLY row is the clock's own score: what you get from")
         print("    token index alone, knowing nothing about the EEG. In these")
-        print("    chunks the event runs to the end, so the clock scores high by")
-        print("    construction. Only the margin OVER that row is state content.")
+        print("    Read it as a control, not a subtraction: if it is near 0.5 the")
+        print("    clock explains nothing and the minus-clock rows are a floor only,")
+        print("    since removing a cubic also eats a genuine step.")
 
         def _timebasis(l):
             t = np.linspace(-1.0, 1.0, len(l))
@@ -698,6 +758,26 @@ def main():
                   f"shift-null={np.median(nulls):.4f}")
 
     df = pd.DataFrame(rows)
+    print("\nM4  state separability on the 3 PCs the figure colours with")
+    print("    Circular by design; the null is built the same way, so read the margin.")
+    for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
+        a  = df[f"pcauc_{tag}"].to_numpy(float)
+        a0 = df[f"pcauc0_{tag}"].to_numpy(float)
+        m  = np.isfinite(a) & np.isfinite(a0)
+        st = stats.wilcoxon(a[m], a0[m], alternative="greater") if m.sum() > 5 else None
+        print(f"  {nm:26s} n={int(m.sum()):5d}  AUC={np.median(a[m]):.4f}  "
+              f"null={np.median(a0[m]):.4f}  "
+              f"margin={np.median(a[m] - a0[m]):+.4f}  "
+              f"p={st.pvalue:.3e}" if st else f"  {nm}: too few")
+    ml = np.isfinite(df["pcauc_laya"]) & np.isfinite(df["pcauc_labram"])
+    dl = (df["pcauc_laya"] - df["pcauc0_laya"])[ml].to_numpy(float)
+    db = (df["pcauc_labram"] - df["pcauc0_labram"])[ml].to_numpy(float)
+    if ml.sum() > 5:
+        st = stats.wilcoxon(dl, db, alternative="greater")
+        print(f"  {'paired margin':26s} n={int(ml.sum()):5d}  Laya {np.median(dl):+.4f}  "
+              f"LaBraM {np.median(db):+.4f}  Laya better on {100*np.mean(dl>db):5.1f}%  "
+              f"p={st.pvalue:.3e}")
+
     df.to_csv(f"{out}.csv", index=False)
     print(f"\n{len(df)} chunks with a label transition -> {out}.csv "
           f"({time.time()-t0:.0f}s)")
