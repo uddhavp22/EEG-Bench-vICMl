@@ -723,6 +723,57 @@ def onset_termination_reversal(Zs, labs, recs, win=20, n_folds=5, seed=0):
     return out
 
 
+def step_profile(Zs, labs, hz, max_s=6.0, n_bins=12):
+    """M10. Step size as a function of distance from the annotated boundary.
+
+    THIS IS THE TEST M8 CANNOT DO. M8 assumes the state sequence is
+    interictal -> ictal -> interictal, so a state code must come back. If the
+    real sequence is preictal -> ictal -> POSTICTAL, and postictal is its own
+    clinical state (suppression, slowing), then a genuine state representation
+    should NOT reverse either, and "no reversal" stops distinguishing a clock
+    from a three-state progression.
+
+    Speed does distinguish them:
+
+      a clock                 advances at a constant rate, so the normalised
+                              step is FLAT in distance from the boundary
+      a state progression     moves quickly between states and slowly inside
+                              one, so the step PEAKS at the boundary, even if
+                              the transition is gradual and smeared over
+                              seconds -- which is exactly the regime an
+                              argmax test like M5 or M2 is blind to
+
+    Steps are normalised by each chunk's own RMS radius before pooling, so a
+    chunk with a large embedding excursion cannot dominate the profile.
+
+    Returns (bin_centres_in_seconds, mean_normalised_step, n_per_bin).
+    """
+    edges = np.linspace(0.0, max_s, n_bins + 1)
+    acc   = [[] for _ in range(n_bins)]
+    for Z, lab in zip(Zs, labs):
+        Z   = np.asarray(Z, dtype=np.float64)
+        lab = np.asarray(lab)
+        tr  = transitions(lab)
+        if tr.size == 0 or len(Z) < 4:
+            continue
+        P   = Z - Z.mean(axis=0)
+        rad = float(np.sqrt((P ** 2).sum(axis=1).mean()))
+        if rad <= 0:
+            continue
+        step = np.linalg.norm(np.diff(P, axis=0), axis=1) / rad
+        # distance from the MIDPOINT of each step to the nearest transition
+        mid  = np.arange(len(step)) + 0.5
+        dist = np.min(np.abs(mid[:, None] - tr[None, :]), axis=1) / hz
+        idx  = np.digitize(dist, edges) - 1
+        for b, s in zip(idx, step):
+            if 0 <= b < n_bins:
+                acc[b].append(float(s))
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    means   = np.array([np.mean(a) if a else np.nan for a in acc])
+    counts  = np.array([len(a) for a in acc])
+    return centres, means, counts
+
+
 def _ridge_auc(Xtr, ytr, Xte, yte, lam=1.0):
     """Held-out AUC from ridge regression onto +/-1 labels.
 
@@ -1772,6 +1823,35 @@ def main():
                       f"   p={p}")
         print(f"    (n={n_rev} chunks, 2.0 s either side of each transition;")
         print("     p is a recording-level signed-rank test, not event-level)")
+        print("    CAVEAT, and it is a real one: M8 assumes interictal -> ictal ->")
+        print("    interictal, so that a state code has to come back. If the true")
+        print("    sequence is preictal -> ictal -> POSTICTAL and postictal is its")
+        print("    own state, a genuine state representation should NOT reverse")
+        print("    either. 'No reversal' is therefore consistent with a clock AND")
+        print("    with a real three-state progression. M8 cannot separate those.")
+        print("    M10 below is the test that can.")
+
+        print("\nM10 step size vs distance from the annotated boundary")
+        print("    A clock advances at a constant rate -> FLAT profile. A state")
+        print("    progression moves fast between states and slowly inside one ->")
+        print("    a PEAK near 0, even if the transition is smeared over seconds,")
+        print("    which is the regime M2/M5 argmax tests are blind to. Steps are")
+        print("    normalised by each chunk's own radius before pooling.")
+        for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
+            if n_rev < 10:
+                break
+            hz_t = len(keep_rev[tag][0]) / chunk_len_s
+            ctr, mu, cnt = step_profile(keep_rev[tag], keep_rev[f"{tag}_lab"], hz_t)
+            ok = np.isfinite(mu) & (cnt > 0)
+            if ok.sum() < 3:
+                print(f"    {nm}: too few steps to profile")
+                continue
+            near, far = mu[ok][0], np.nanmean(mu[ok][max(1, ok.sum() // 2):])
+            print(f"    {nm} (hz={hz_t:g})  " +
+                  " ".join(f"{c:.1f}s:{v:.3f}" for c, v in
+                           zip(ctr[ok], mu[ok])))
+            print(f"    {'':18s} nearest-bin/far-mean = {near / far:.3f}"
+                  f"   (1.00 = flat = clock)")
 
     if args.decoder:
         print("\nM9  does the embedding add state information BEYOND clock+waveform?")
