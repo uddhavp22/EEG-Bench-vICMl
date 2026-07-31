@@ -876,6 +876,86 @@ def conditional_state_decoder(Es, Ws, Ls, recs, k=32, n_folds=5, seed=0,
     return {a: float(np.mean(v)) for a, v in score.items() if v}
 
 
+def pc_dimension_sweep(Es, Ls, recs, ks=(1, 2, 3, 5, 8, 16, 32, 64, 128),
+                       n_folds=5, seed=0):
+    """M11. How many UNSUPERVISED dimensions does the state code live in?
+
+    This is the metric that carries the word "organization", and it is not the
+    linear probe restated. The probe is supervised with D free parameters: it
+    says the state information IS PRESENT, which almost any competent encoder
+    achieves, and says nothing about how the space is arranged. Here the basis
+    is PCA fit on TRAIN embeddings with the labels never shown to it, so asking
+    how well state decodes from the first k components asks whether state is
+    aligned with the DOMINANT axes of variation.
+
+    That is exactly the claim Figure 2 makes. The figure colours the top 3 PCs
+    and the colour tracks state, so the quantitative version of the figure is
+    "state decodes from the first 3 unsupervised PCs", measured over every chunk
+    in the split instead of a handful of panels.
+
+    Read the curve, not one number:
+
+        AUC saturating at small k   state is a dominant axis -> organised
+        AUC climbing until large k  state is present but spread thin across
+                                    many low-variance directions -> decodable
+                                    but NOT organised
+
+    k95 is the smallest k reaching 95% of that model's own gain over 0.5, so it
+    compares SHAPE and is not confounded by one model having a higher ceiling
+    or a wider embedding (Laya D=384 vs LaBraM D=200).
+
+    CAVEAT, and it must be quoted with the result: PCA is unsupervised but it is
+    not assumption-free. It ranks directions by variance, so a model whose
+    largest variance component is something irrelevant but huge (drift, a DC
+    offset, an amplitude envelope) is penalised for reasons unrelated to state.
+    That is a real confound for LaBraM, whose tokens are not centred per chunk
+    here. It is a statement about the representation as it comes out of the
+    model, which is the right unit for a claim about organisation, but it is not
+    a statement that state is absent from the model.
+
+    Returns {"auc": {k: auc}, "k95": int_or_nan, "kmax": int}.
+    """
+    rng = np.random.default_rng(seed)
+    Ls  = [np.asarray(l) for l in Ls]
+    fold, n_rec = _group_folds(list(recs), n_folds, rng)
+    if n_rec < n_folds:
+        return {}
+    D    = Es[0].shape[1]
+    ks   = [k for k in ks if k <= D]
+    if not ks:
+        return {}
+    kmax = max(ks)
+    acc  = {k: [] for k in ks}
+    for f in range(n_folds):
+        tr = [i for i in range(len(Ls)) if fold[i] != f]
+        te = [i for i in range(len(Ls)) if fold[i] == f]
+        if not tr or not te:
+            continue
+        ytr = np.concatenate([Ls[i] for i in tr])
+        yte = np.concatenate([Ls[i] for i in te])
+        if ytr.min() == ytr.max() or yte.min() == yte.max():
+            continue
+        Etr = np.concatenate([Es[i] for i in tr]).astype(np.float64)
+        mu  = Etr.mean(axis=0)
+        # one SVD per fold; every k is a prefix of the same basis, so the
+        # nested structure is exact rather than k separate decompositions
+        Vt  = np.linalg.svd(Etr - mu, full_matrices=False)[2][:kmax]
+        Ptr = (Etr - mu) @ Vt.T
+        Pte = np.concatenate([(np.asarray(Es[i], np.float64) - mu) @ Vt.T
+                              for i in te])
+        for k in ks:
+            v = _ridge_auc(Ptr[:, :k], ytr, Pte[:, :k], yte)
+            if np.isfinite(v):
+                acc[k].append(v)
+    auc = {k: float(np.mean(v)) for k, v in acc.items() if v}
+    if not auc:
+        return {}
+    best = max(auc.values())
+    k95  = next((k for k in sorted(auc)
+                 if auc[k] - 0.5 >= 0.95 * (best - 0.5)), float("nan"))
+    return {"auc": auc, "k95": k95, "kmax": max(auc)}
+
+
 def cusum_split(P):
     """Best single split of a token trajectory, by the standard multivariate
     CUSUM statistic  sqrt(t(n-t)/n) * ||mean(P[:t]) - mean(P[t:])||.
@@ -1892,6 +1972,34 @@ def main():
                   "ceiling, so the increment has no headroom and a gain near")
             print("    zero is UNINTERPRETABLE rather than negative evidence. "
                   "Report the ceiling, do not report the gain.")
+
+        print("\nM11 how many UNSUPERVISED dimensions does the state code need?")
+        print("    THIS is the quantitative version of Figure 2, and it is not")
+        print("    the linear probe restated. The probe is supervised over all D")
+        print("    dims and says the information is PRESENT. Here the basis is")
+        print("    PCA fit on train embeddings with labels never shown to it, so")
+        print("    'state decodes from the first 3 PCs' is a claim about how the")
+        print("    space is ARRANGED -- which is what the figure shows and what")
+        print("    balanced accuracy cannot say. Saturating at small k means")
+        print("    state is a dominant axis; climbing to large k means state is")
+        print("    present but spread thin, i.e. decodable but not organised.")
+        for tag, nm in [("laya_mean", "Laya (mean-pool)"), ("labram", "LaBraM")]:
+            if n_tr < 10:
+                break
+            r = pc_dimension_sweep(keep_tr[tag], keep_tr["l"], keep_tr["rec"])
+            if not r:
+                print(f"    {nm}: too few recordings for grouped CV"); continue
+            print(f"    {nm:18s} " + " ".join(f"k{k}:{v:.3f}" for k, v in
+                                              sorted(r["auc"].items())))
+            print(f"    {'':18s} k95={r['k95']}  (smallest k at 95% of this "
+                  f"model's own gain over 0.5)")
+        print("    CAVEAT to quote alongside: PCA ranks by variance, so a model "
+              "whose largest")
+        print("    component is big but irrelevant (drift, DC offset, amplitude "
+              "envelope) is")
+        print("    penalised for reasons unrelated to state. This measures the "
+              "representation")
+        print("    as it leaves the model, not whether state exists inside it.")
 
     print("\nM7  is each state held at a CONSISTENT colour? (the 3 PCs shown)")
     print("    jitfree is the LABEL-FREE smoothness statistic (step / chunk 3-PC")
