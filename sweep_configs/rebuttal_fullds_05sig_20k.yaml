@@ -1,0 +1,39 @@
+# Laya-FullDS-0.05sig (scaling/collapse ablation) — full-corpus (100% data)
+# pretraining at sigreg_lambda=0.05 (matching laya-s) instead of laya-b's 0.02,
+# 20k steps, to test whether under-regularization caused laya-b's early
+# collapse. See eegfmchallenge/configs/fullds_05sig_20k.py for the hypothesis
+# and eegfmchallenge/rebuttal/scaling/PLAN.md (if present) for the write-up.
+#
+# Result from pretraining logs: early collapse (laya-b's failure mode, crash
+# by step 3000) did NOT happen -- batch_std=0.554 at step 3099, matching
+# laya-s. But batch_std still decays steadily to 0.426 by step 20000,
+# effectively identical to laya-b's final 0.420. Hypothesis partially
+# falsified: lambda delays collapse onset but doesn't prevent the eventual
+# floor on full data.
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/rebuttal_fullds_05sig_20k.yaml
+
+models:
+  laya-fullds-05sig: # 100% data, sigreg_lambda=0.05 (vs laya-b's 0.02); 20k steps
+    base_path: /REDLRADADM35839/home/spanchavati/eegfmchallenge/lightning_logs_rebuttal/fullds_05sig_20k
+    version: 2
+
+checkpoints:
+  steps: []
+  include_last: true # only the final (step 20000) checkpoint
+
+tasks:
+  epoch_sweep: []
+  final_only:
+    - all # all 14 tasks
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+  seeds: [42, 123, 456] # same seeds as Table 3 / full_benchmark.yaml / laya-ema-noproj / laya-meanpool
+
+execution:
+  gpus: 1
+  workers_per_gpu: 1
+  log_dir: rebuttal_logs/laya_fullds_05sig
+  results_dir: results_rebuttal/laya_fullds_05sig
