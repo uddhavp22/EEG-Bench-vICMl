@@ -653,6 +653,14 @@ def onset_termination_reversal(Zs, labs, recs, win=20, n_folds=5, seed=0):
     the training onset direction, there is no consistent direction to speak of
     and the reversal row carries no information either way.
 
+    `win` is clamped to n/2 so it can never span the whole chunk. In native mode
+    a chunk is only 16 tokens, so an unclamped win=20 made every delta
+    mean(everything after) - mean(everything before). That does NOT bias the
+    test toward the clock answer -- a pure state code still gives -1.0, since a
+    termination's delta is exactly the negative of an onset's -- but it does mix
+    in the far side of a second transition when a chunk contains both, and it
+    makes the printed window size a lie.
+
     Returns {name: (frac_positive, mean_projection, n_events, per_recording
     mean projections)}. The per-recording list is what the p-value is computed
     on: several events from one recording share a patient and a montage, so an
@@ -665,10 +673,11 @@ def onset_termination_reversal(Zs, labs, recs, win=20, n_folds=5, seed=0):
         Z   = np.asarray(Z, dtype=np.float64)
         lab = np.asarray(lab)
         n   = len(Z)
+        w   = max(2, min(win, n // 2))
         for t in transitions(lab):
             if t < 2 or t > n - 2:
                 continue
-            a, b = Z[max(0, t - win):t], Z[t:min(n, t + win)]
+            a, b = Z[max(0, t - w):t], Z[t:min(n, t + w)]
             if len(a) < 2 or len(b) < 2:
                 continue
             d  = b.mean(axis=0) - a.mean(axis=0)
@@ -1749,7 +1758,13 @@ def main():
                 continue
             for k, (fp, mp, n, per_rec) in res.items():
                 if len(per_rec) >= 6:
-                    alt = "less" if k.endswith("term") else "greater"
+                    # SAME event type on both sides -> consistency, expect
+                    # positive. DIFFERENT -> reversal, expect negative. Both
+                    # onset->term and term->onset are reversal tests; the
+                    # earlier rule only caught the first and tested the second
+                    # against the wrong tail.
+                    src, dst = k.split("->")
+                    alt = "greater" if src == dst else "less"
                     p = f"{stats.wilcoxon(per_rec, alternative=alt).pvalue:.2g}"
                 else:
                     p = f"n/a ({len(per_rec)} rec)"
