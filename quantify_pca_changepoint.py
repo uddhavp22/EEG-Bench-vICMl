@@ -774,12 +774,40 @@ def step_profile(Zs, labs, hz, max_s=6.0, n_bins=12):
     return centres, means, counts
 
 
-def _ridge_auc(Xtr, ytr, Xte, yte, lam=1.0):
-    """Held-out AUC from ridge regression onto +/-1 labels.
+def _ap(scores, y):
+    """Average precision (AUPRC), the step-wise sum used by sklearn.
+
+    Chance is the POSITIVE RATE, not 0.5, so an AP is only interpretable next to
+    the prevalence it was computed at and is not comparable across splits with
+    different balance. That is the reason AUC is the primary statistic here: its
+    chance level is fixed at 0.5 regardless of prevalence and regardless of
+    embedding width, which is what makes Laya (D=384) and LaBraM (D=200)
+    directly comparable. AP is reported alongside because under imbalance a good
+    AUC can coexist with poor precision.
+    """
+    y  = np.asarray(y).astype(bool)
+    n1 = int(y.sum())
+    if n1 == 0 or n1 == len(y):
+        return float("nan")
+    o   = np.argsort(-np.asarray(scores, dtype=float), kind="mergesort")
+    hit = y[o].astype(float)
+    tp  = np.cumsum(hit)
+    prec = tp / np.arange(1, len(y) + 1)
+    return float((prec * hit).sum() / n1)
+
+
+def _ridge_scores(Xtr, ytr, Xte, lam=1.0):
+    """Held-out scores from ridge regression onto +/-1 labels.
 
     Ridge rather than logistic to keep this dependency-free and deterministic;
-    for a rank statistic the two are near-identical, and AUC is invariant to any
-    monotone transform of the score.
+    for a rank statistic the two are near-identical, and both AUC and AP are
+    invariant to any monotone transform of the score.
+
+    Columns are standardised on the TRAIN fold, so every PC enters the penalty
+    on equal footing. That matters for M11: without it, ridge would shrink
+    low-variance components harder purely because of their scale, and the
+    k-curve would measure the scaling rather than where the state information
+    lives.
     """
     mu, sd = Xtr.mean(axis=0), Xtr.std(axis=0)
     sd = np.where(sd > 0, sd, 1.0)
@@ -788,7 +816,18 @@ def _ridge_auc(Xtr, ytr, Xte, yte, lam=1.0):
     t  = np.where(np.asarray(ytr).astype(bool), 1.0, -1.0)
     G  = A.T @ A + lam * np.eye(A.shape[1])
     w  = np.linalg.solve(G, A.T @ t)
-    return _auc(B @ w, yte)
+    return B @ w
+
+
+def _ridge_auc(Xtr, ytr, Xte, yte, lam=1.0):
+    """Held-out AUC. Thin wrapper on _ridge_scores."""
+    return _auc(_ridge_scores(Xtr, ytr, Xte, lam), yte)
+
+
+def _ridge_auc_ap(Xtr, ytr, Xte, yte, lam=1.0):
+    """Held-out (AUC, AP, positive_rate) from one fit."""
+    s = _ridge_scores(Xtr, ytr, Xte, lam)
+    return _auc(s, yte), _ap(s, yte), float(np.mean(np.asarray(yte).astype(bool)))
 
 
 def conditional_state_decoder(Es, Ws, Ls, recs, k=32, n_folds=5, seed=0,
@@ -926,6 +965,8 @@ def pc_dimension_sweep(Es, Ls, recs, ks=(1, 2, 3, 5, 8, 16, 32, 64, 128),
         return {}
     kmax = max(ks)
     acc  = {k: [] for k in ks}
+    apc  = {k: [] for k in ks}
+    prev = []
     for f in range(n_folds):
         tr = [i for i in range(len(Ls)) if fold[i] != f]
         te = [i for i in range(len(Ls)) if fold[i] == f]
@@ -944,16 +985,23 @@ def pc_dimension_sweep(Es, Ls, recs, ks=(1, 2, 3, 5, 8, 16, 32, 64, 128),
         Pte = np.concatenate([(np.asarray(Es[i], np.float64) - mu) @ Vt.T
                               for i in te])
         for k in ks:
-            v = _ridge_auc(Ptr[:, :k], ytr, Pte[:, :k], yte)
+            v, a, p = _ridge_auc_ap(Ptr[:, :k], ytr, Pte[:, :k], yte)
             if np.isfinite(v):
                 acc[k].append(v)
+            if np.isfinite(a):
+                apc[k].append(a)
+        prev.append(float(np.mean(yte.astype(bool))))
     auc = {k: float(np.mean(v)) for k, v in acc.items() if v}
+    ap  = {k: float(np.mean(v)) for k, v in apc.items() if v}
     if not auc:
         return {}
     best = max(auc.values())
     k95  = next((k for k in sorted(auc)
                  if auc[k] - 0.5 >= 0.95 * (best - 0.5)), float("nan"))
-    return {"auc": auc, "k95": k95, "kmax": max(auc)}
+    # k95 is defined on AUC on purpose: AP's chance level moves with prevalence,
+    # so "95% of the gain over chance" would not be a fixed target across folds.
+    return {"auc": auc, "ap": ap, "k95": k95, "kmax": max(auc),
+            "prev": float(np.mean(prev)) if prev else float("nan")}
 
 
 def cusum_split(P):
@@ -1989,10 +2037,18 @@ def main():
             r = pc_dimension_sweep(keep_tr[tag], keep_tr["l"], keep_tr["rec"])
             if not r:
                 print(f"    {nm}: too few recordings for grouped CV"); continue
-            print(f"    {nm:18s} " + " ".join(f"k{k}:{v:.3f}" for k, v in
-                                              sorted(r["auc"].items())))
+            print(f"    {nm:18s} AUC " + " ".join(f"k{k}:{v:.3f}" for k, v in
+                                                  sorted(r["auc"].items())))
+            print(f"    {'':18s} AP  " + " ".join(f"k{k}:{v:.3f}" for k, v in
+                                                  sorted(r.get("ap", {}).items())))
             print(f"    {'':18s} k95={r['k95']}  (smallest k at 95% of this "
                   f"model's own gain over 0.5)")
+        print(f"    AP chance = positive rate = {r.get('prev', float('nan')):.3f}"
+              " (SAME labels for both models, so imbalance cannot favour either;")
+        print("     it changes how to read the ABSOLUTE values, not the "
+              "comparison). k95 is")
+        print("     defined on AUC because AP's chance level moves with "
+              "prevalence per fold.")
         print("    CAVEAT to quote alongside: PCA ranks by variance, so a model "
               "whose largest")
         print("    component is big but irrelevant (drift, DC offset, amplitude "
