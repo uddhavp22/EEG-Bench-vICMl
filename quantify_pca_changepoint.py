@@ -317,15 +317,17 @@ def state_auc(Zs, labs, n_folds=5, seed=0, shift_null=False):
 
 
 def _relocate(lab, rng):
-    """Null label with the SAME number of transitions, at random positions.
+    """DEPRECATED, kept only behind --null uniform for reproducing old numbers.
 
-    A circular shift is the wrong null here. Rolling a single step wraps it
-    into two segments, which a time-like axis separates worse than one clean
-    step, so the null lands too low and a pure clock scores a large false
-    margin. Relocating instead keeps the temporal shape and moves only the
-    location, so any axis that separates ANY step equally well -- which is what
-    a clock is -- scores at the null by construction, and only a code that
-    tracks the TRUE boundary clears it.
+    Draws cut positions uniformly. Its docstring used to claim it "keeps the
+    temporal shape and moves only the location", and that is FALSE: for k=1 it
+    does not preserve the class fraction, and for k>1 it does not preserve the
+    run lengths. eta2 is maximised near a balanced split, so if real boundaries
+    sit off-centre -- short artifact bursts, seizures that run to the chunk end
+    -- a uniform relocation is more balanced on average than the truth and wins
+    for purely combinatorial reasons. Every negative eta2 margin this script
+    reported before 2026-07-30 (artifact Laya -0.0637 raw, -0.0475 plot) is
+    suspect for exactly this reason. Use `sample_null_labels` instead.
     """
     lab = np.asarray(lab)
     n   = len(lab)
@@ -340,6 +342,88 @@ def _relocate(lab, rng):
         out[prev:c] = v; v = 1 - v; prev = int(c)
     out[prev:] = v
     return out
+
+
+def sample_null_labels(pool, self_idx, k, n_null, rng):
+    """Null labels drawn from OTHER chunks' REAL annotations.
+
+    This is the same construction M5's null already uses, and it is the only
+    one that preserves the label geometry eta2 and AUC are sensitive to. A
+    synthesised null has to get class fraction, run-length distribution,
+    boundary position and transition direction all right simultaneously; a real
+    annotation from another chunk has them right by construction, and breaks
+    only the correspondence between the labels and THIS chunk's signal, which is
+    precisely the thing being tested.
+
+    Restricted to patterns with the same transition count where the pool allows,
+    so the null matches this chunk's k as well as the empirical run lengths. The
+    chunk's own pattern is excluded, which matters at n=216 where a self-draw is
+    otherwise ~0.5% of the null.
+
+    Returns a list of n_null second-resolution label arrays.
+    """
+    cand = pool.by_k.get(int(k))
+    if cand is None or len(cand) < 5:
+        cand = pool.all_idx
+    cand = [j for j in cand if j != self_idx]
+    if not cand:
+        return []
+    draw = rng.choice(len(cand), size=n_null, replace=True)
+    return [pool.labels[cand[d]] for d in draw]
+
+
+class LabelPool:
+    """Every real label pattern in the split, indexed by transition count.
+
+    Built in a cheap pre-pass over the index that touches only the labels .npy,
+    never the embeddings, so it costs a fraction of a second even at n=5058.
+    """
+
+    def __init__(self, labels):
+        self.labels  = labels
+        self.all_idx = list(range(len(labels)))
+        self.by_k    = {}
+        for j, l in enumerate(labels):
+            self.by_k.setdefault(int(transitions(l).size), []).append(j)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def summary(self):
+        ks   = sorted(self.by_k)
+        frac = np.array([float(np.mean(np.asarray(l) == 1)) for l in self.labels])
+        return (f"{len(self.labels)} real label patterns; "
+                f"transition counts {{{', '.join(f'{k}:{len(self.by_k[k])}' for k in ks)}}}; "
+                f"positive fraction median={np.median(frac):.3f} "
+                f"IQR=[{np.percentile(frac, 25):.3f}, {np.percentile(frac, 75):.3f}]")
+
+
+def collect_label_pool(index, limit=None):
+    """Pre-pass for LabelPool. Reads only shard['labels'], never embeddings."""
+    out = []
+    for shard in index["shards"]:
+        labels = np.load(shard["labels"], mmap_mode="r")
+        for i in range(len(labels)):
+            lab = np.asarray(labels[i])
+            if transitions(lab).size == 0:
+                continue
+            out.append(lab.copy())
+            if limit and len(out) >= limit:
+                return LabelPool(out)
+    return LabelPool(out)
+
+
+def rec_id(seq_id):
+    """Recording identity from a seq_id.
+
+    utils_2.py:240 writes `recording_{idx:04d}_{i:03d}`, so chunks of one
+    recording share the first field. Chunk-level p-values treat all 5058
+    artifact chunks as independent when they come from far fewer recordings;
+    everything reported at chunk level is pseudoreplicated without this.
+    """
+    s = str(seq_id)
+    p = s.split("_")
+    return "_".join(p[:2]) if len(p) >= 3 and p[0] == "recording" else s
 
 
 WAVE_FEATS = ["rms", "linelen", "delta", "theta", "alpha", "beta", "gamma"]
@@ -425,7 +509,26 @@ def tracking_scores(Zs, Ws, ls, k=32, n_folds=5, seed=0):
             np.mean(r2s, axis=0))
 
 
-def within_state_consistency(Z, lab, n_null=40, seed=0):
+def _far_from_transitions(lab, guard):
+    """Mask of tokens at least `guard` tokens away from every label change.
+
+    LaBraM's 1 s window at 0.1 s stride means a true step is smeared across
+    ~10 consecutive windows. Excluding only the single label-crossing step
+    leaves that entire ramp counted as WITHIN-state variation and also drags
+    the two centroids toward each other, so the un-guarded jitter penalises the
+    baseline for its own receptive field. Guarding both models identically in
+    seconds removes that.
+    """
+    lab = np.asarray(lab)
+    if guard <= 0:
+        return np.ones(len(lab), dtype=bool)
+    keep = np.ones(len(lab), dtype=bool)
+    for t in transitions(lab):
+        keep[max(0, t - guard):min(len(lab), t + guard)] = False
+    return keep
+
+
+def within_state_consistency(Z, lab, null_labs=(), guard=0):
     """M7. Does each state get a CONSISTENT colour for its whole duration?
 
     AUC ranks tokens along one direction, so a representation that jumps around
@@ -433,42 +536,284 @@ def within_state_consistency(Z, lab, n_null=40, seed=0):
     This is what "LaBraM changes at the boundary but is all over the place
     within the seizure" means, and no other metric here sees it.
 
-      eta2    fraction of 3-PC variance that is BETWEEN states rather than
-              within them. High = each state holds one colour.
-      jitter  mean token-to-token step taken WITHIN a state, divided by the
-              distance between the two state centroids. High = flickering.
+      eta2     fraction of 3-PC variance that is BETWEEN states rather than
+               within them. High = each state holds one colour.
+      jit      mean within-state token step / distance between state centroids.
+      jitfree  mean within-state token step / the chunk's own 3-PC RMS radius.
 
-    eta2 gets a relocated-label null since a drifting trajectory scores high
-    against any split; jitter needs none, as it never looks at the labels
-    except to exclude the steps that cross a boundary.
+    WHY BOTH JITTER FORMS ARE REPORTED. `jit`'s denominator is defined by the
+    labels, so it conflates two different things: how smooth the trajectory is,
+    and how far apart the labelled states sit. A pure temporal ramp gets a
+    flattering `jit` for free, because when the labels form early/late blocks
+    the centroid distance is large no matter what the embedding encodes. Worse,
+    the obvious control does not catch it: for a linear ramp split at fraction
+    f the two centroids sit at f/2 and (1+f)/2, so the separation is 1/2 for
+    EVERY f and a relocated-label jitter is identical to the real one. `jitfree`
+    replaces the denominator with a label-free scale, which makes it an honest
+    smoothness statistic that claims nothing about states. Quote `jitfree` for
+    "Laya's trajectory is smoother"; quote `jit` only alongside it.
 
-    Returns (eta2, eta2_null, jitter).
+    eta2 gets a null drawn from other chunks' real annotations (see
+    sample_null_labels). The nulls are pre-converted to this model's token grid
+    by the caller, since Laya and LaBraM have different token counts.
+
+    Returns a dict.
     """
-    P   = top3(Z)
-    lab = np.asarray(lab)
+    P    = top3(Z)
+    lab  = np.asarray(lab)
+    out  = dict(eta2=np.nan, eta2n=np.nan, eta2rank=np.nan, jit=np.nan,
+                jitfree=np.nan, step=np.nan, sep=np.nan, spread=np.nan,
+                n_used=0)
 
-    def _eta2(l):
-        if l.min() == l.max():
-            return np.nan
-        sst = float(((P - P.mean(axis=0)) ** 2).sum())
+    def _stats(l):
+        l    = np.asarray(l)
+        keep = _far_from_transitions(l, guard)
+        if keep.sum() < 4:
+            return None
+        Pk, lk = P[keep], l[keep]
+        if lk.min() == lk.max():
+            return None
+        sst = float(((Pk - Pk.mean(axis=0)) ** 2).sum())
         if sst <= 0:
-            return np.nan
-        ssw = sum(float(((P[l == v] - P[l == v].mean(axis=0)) ** 2).sum())
-                  for v in (0, 1))
-        return 1.0 - ssw / sst
+            return None
+        ssw  = sum(float(((Pk[lk == v] - Pk[lk == v].mean(axis=0)) ** 2).sum())
+                   for v in (0, 1))
+        eta2 = 1.0 - ssw / sst
+        sep  = float(np.linalg.norm(Pk[lk == 1].mean(axis=0) -
+                                    Pk[lk == 0].mean(axis=0)))
+        return eta2, sep, keep, lk
 
+    real = _stats(lab)
+    if real is None:
+        return out
+    eta2, sep, keep, _ = real
+
+    # A step counts only when BOTH endpoints survive the guard and share a
+    # label, so no step spanning a transition or its ramp is ever included.
+    ok   = keep[1:] & keep[:-1] & (lab[1:] == lab[:-1])
     step = np.linalg.norm(np.diff(P, axis=0), axis=1)
-    same = lab[1:] == lab[:-1]
-    sep  = (float(np.linalg.norm(P[lab == 1].mean(axis=0) - P[lab == 0].mean(axis=0)))
-            if lab.min() != lab.max() else np.nan)
-    jit  = (float(step[same].mean() / sep)
-            if np.isfinite(sep) and sep > 0 and same.any() else np.nan)
+    if not ok.any():
+        return out
+    step_mean = float(step[ok].mean())
+    spread    = float(np.sqrt(((P[keep] - P[keep].mean(axis=0)) ** 2)
+                              .sum(axis=1).mean()))
 
+    nl = []
+    for nlab in null_labs:
+        s = _stats(nlab)
+        if s is not None:
+            nl.append(s[0])
+
+    out.update(eta2=eta2,
+               eta2n=float(np.mean(nl)) if nl else np.nan,
+               # Rank of the truth among the nulls, uniform on [0,1] under the
+               # null. Immune to the ceiling compression that makes the MARGIN
+               # unreadable on a smooth trajectory: when every relocated split
+               # already scores near the maximum, a true effect has almost no
+               # headroom left to show as a difference, but it can still sit
+               # above nearly all of the nulls. Aggregate this against 0.5.
+               eta2rank=float(np.mean(np.asarray(nl) < eta2)) if nl else np.nan,
+               jit=step_mean / sep if sep > 0 else np.nan,
+               jitfree=step_mean / spread if spread > 0 else np.nan,
+               step=step_mean, sep=sep, spread=spread, n_used=int(keep.sum()))
+    return out
+
+
+def _group_folds(recs, n_folds, rng):
+    """Folds that never split a recording across train and test."""
+    uniq = sorted(set(recs))
+    rng.shuffle(uniq)
+    assign = {r: i % n_folds for i, r in enumerate(uniq)}
+    return np.array([assign[r] for r in recs]), len(uniq)
+
+
+def onset_termination_reversal(Zs, labs, recs, win=20, n_folds=5, seed=0):
+    """M8. Does the embedding REVERSE at a termination, or keep going?
+
+    This is the one cheap test that a clock cannot pass. Learn the direction the
+    embedding moves at seizure ONSET, on one set of recordings. Then look at
+    what it does at seizure TERMINATION on recordings never seen during the fit.
+
+      a state representation  moves back toward the interictal region, so the
+                              projection onto the onset direction is NEGATIVE
+      a clock                 moves forward in time at both events, so the
+                              projection stays POSITIVE
+
+    Chance is 50% negative. Nothing about smoothness, PC1 variance share or
+    boundary sharpness can produce reversal; only a code whose position depends
+    on the STATE rather than on elapsed time can.
+
+    Deltas are unit-normalised before averaging, so a few high-amplitude events
+    cannot define the direction, and the fit is on the full embedding in its
+    native space -- NOT per-chunk PCA, whose component signs and axis order are
+    arbitrary from chunk to chunk and would make cross-chunk averaging
+    meaningless.
+
+    The onset->onset row is the control: if held-out onsets do not align with
+    the training onset direction, there is no consistent direction to speak of
+    and the reversal row carries no information either way.
+
+    Returns {name: (frac_positive, mean_projection, n_events, per_recording
+    mean projections)}. The per-recording list is what the p-value is computed
+    on: several events from one recording share a patient and a montage, so an
+    event-level sign test is pseudoreplicated in exactly the way M7 was.
+    """
     rng = np.random.default_rng(seed)
-    nl  = [_eta2(_relocate(lab, rng)) for _ in range(n_null)]
-    return (_eta2(lab),
-            float(np.nanmean(nl)) if np.any(np.isfinite(nl)) else np.nan,
-            jit)
+
+    events = {"onset": [], "term": []}          # (rec, unit delta)
+    for Z, lab, rc in zip(Zs, labs, recs):
+        Z   = np.asarray(Z, dtype=np.float64)
+        lab = np.asarray(lab)
+        n   = len(Z)
+        for t in transitions(lab):
+            if t < 2 or t > n - 2:
+                continue
+            a, b = Z[max(0, t - win):t], Z[t:min(n, t + win)]
+            if len(a) < 2 or len(b) < 2:
+                continue
+            d  = b.mean(axis=0) - a.mean(axis=0)
+            nd = float(np.linalg.norm(d))
+            if nd <= 0:
+                continue
+            kind = "onset" if lab[t] == 1 else "term"
+            events[kind].append((rc, d / nd))
+
+    if len(events["onset"]) < 10 or len(events["term"]) < 10:
+        return {}
+
+    all_recs = [r for k in events for r, _ in events[k]]
+    fold_of  = {}
+    uniq     = sorted(set(all_recs))
+    rng.shuffle(uniq)
+    for i, r in enumerate(uniq):
+        fold_of[r] = i % n_folds
+
+    out = {}
+    for fit_on, test_on in [("onset", "onset"), ("onset", "term"),
+                            ("term", "onset")]:
+        proj, by_rec = [], {}
+        for f in range(n_folds):
+            tr = [d for r, d in events[fit_on] if fold_of[r] != f]
+            te = [(r, d) for r, d in events[test_on] if fold_of[r] == f]
+            if len(tr) < 5 or not te:
+                continue
+            u  = np.mean(tr, axis=0)
+            nu = float(np.linalg.norm(u))
+            if nu <= 0:
+                continue
+            u = u / nu
+            for r, d in te:
+                v = float(d @ u)
+                proj.append(v)
+                by_rec.setdefault(r, []).append(v)
+        if proj:
+            p = np.array(proj)
+            out[f"{fit_on}->{test_on}"] = (
+                float(np.mean(p > 0)), float(np.mean(p)), len(p),
+                [float(np.mean(v)) for v in by_rec.values()])
+    return out
+
+
+def _ridge_auc(Xtr, ytr, Xte, yte, lam=1.0):
+    """Held-out AUC from ridge regression onto +/-1 labels.
+
+    Ridge rather than logistic to keep this dependency-free and deterministic;
+    for a rank statistic the two are near-identical, and AUC is invariant to any
+    monotone transform of the score.
+    """
+    mu, sd = Xtr.mean(axis=0), Xtr.std(axis=0)
+    sd = np.where(sd > 0, sd, 1.0)
+    A  = np.hstack([(Xtr - mu) / sd, np.ones((len(Xtr), 1))])
+    B  = np.hstack([(Xte - mu) / sd, np.ones((len(Xte), 1))])
+    t  = np.where(np.asarray(ytr).astype(bool), 1.0, -1.0)
+    G  = A.T @ A + lam * np.eye(A.shape[1])
+    w  = np.linalg.solve(G, A.T @ t)
+    return _auc(B @ w, yte)
+
+
+def conditional_state_decoder(Es, Ws, Ls, recs, k=32, n_folds=5, seed=0,
+                              permute=False):
+    """M9. Does the embedding carry state information BEYOND clock and waveform?
+
+    This is the test that speaks to `results.tex:42` directly. Everything is at
+    1 Hz, whole recordings are held out, and the four arms are nested:
+
+        TIME              t, t^2, t^3 within the chunk -- the clock alone
+        WAVE              the 7 signal descriptors -- "surface-level statistics"
+        TIME+WAVE         both
+        TIME+WAVE+EMB     both, plus the embedding at k global PCs
+
+    The number that matters is the LAST ROW MINUS THE THIRD. If adding the
+    embedding to a model that already knows elapsed time and the waveform does
+    not improve held-out AUC, then whatever the embedding encodes about state is
+    already available from the clock and from bandpower, and "organized around
+    semantically meaningful brain states rather than surface-level signal
+    statistics" is not supported. If it does improve, that increment is the
+    quantitative claim, and it is immune to every confound in M1-M7 because
+    those confounds are IN the baseline.
+
+    Recording-level grouping is not optional here: chunks of one recording share
+    a patient and an event, so a chunk-level split lets the model memorise the
+    recording and every arm saturates.
+
+    permute=True shuffles the EMBEDDING between chunks and leaves labels, time
+    and waveform untouched. That is the right null for an INCREMENT: it holds
+    the TIME+WAVE arm fixed and measures what adding 32 uninformative columns
+    buys through overfitting alone. Permuting the labels instead would destroy
+    the baseline as well, and the resulting "gain" would answer a different
+    question.
+
+    Returns {arm: auc}.
+    """
+    rng = np.random.default_rng(seed)
+    Ls  = [np.asarray(l) for l in Ls]
+    if permute:
+        perm = rng.permutation(len(Es))
+        Es   = [Es[j] if len(Es[j]) == len(Ls[i]) else Es[i]
+                for i, j in enumerate(perm)]
+
+    def tbasis(n):
+        t = np.linspace(-1.0, 1.0, n)
+        return np.vstack([t, t ** 2, t ** 3]).T
+
+    fold, n_rec = _group_folds(list(recs), n_folds, rng)
+    if n_rec < n_folds:
+        return {}
+
+    arms  = ["TIME", "WAVE", "TIME+WAVE", "TIME+WAVE+EMB"]
+    score = {a: [] for a in arms}
+    for f in range(n_folds):
+        tr = [i for i in range(len(Ls)) if fold[i] != f]
+        te = [i for i in range(len(Ls)) if fold[i] == f]
+        if not tr or not te:
+            continue
+        ytr = np.concatenate([Ls[i] for i in tr])
+        yte = np.concatenate([Ls[i] for i in te])
+        if ytr.min() == ytr.max() or yte.min() == yte.max():
+            continue
+
+        Etr = np.concatenate([Es[i] for i in tr]).astype(np.float64)
+        mu  = Etr.mean(axis=0)
+        Vt  = np.linalg.svd(Etr - mu, full_matrices=False)[2][:k]
+        Ptr = (Etr - mu) @ Vt.T
+        Pte = np.concatenate([(np.asarray(Es[i], np.float64) - mu) @ Vt.T
+                              for i in te])
+
+        Ttr = np.concatenate([tbasis(len(Ls[i])) for i in tr])
+        Tte = np.concatenate([tbasis(len(Ls[i])) for i in te])
+        Wtr = np.concatenate([Ws[i] for i in tr]).astype(np.float64)
+        Wte = np.concatenate([Ws[i] for i in te]).astype(np.float64)
+
+        feats = {"TIME": (Ttr, Tte), "WAVE": (Wtr, Wte),
+                 "TIME+WAVE": (np.hstack([Ttr, Wtr]), np.hstack([Tte, Wte])),
+                 "TIME+WAVE+EMB": (np.hstack([Ttr, Wtr, Ptr]),
+                                   np.hstack([Tte, Wte, Pte]))}
+        for a in arms:
+            X1, X2 = feats[a]
+            v = _ridge_auc(X1, ytr, X2, yte)
+            if np.isfinite(v):
+                score[a].append(v)
+    return {a: float(np.mean(v)) for a, v in score.items() if v}
 
 
 def cusum_split(P):
@@ -518,7 +863,7 @@ def m5_split_error(Z, lab, token_hz):
             ";".join(f"{x / token_hz:.4f}" for x in tr))
 
 
-def pca_state_auc(Z, lab, n_null=40, seed=0):
+def pca_state_auc(Z, lab, null_labs=()):
     """M4. On the 3 PCs the figure actually colours with: are event tokens
     separable from non-event tokens WITHIN the chunk?
 
@@ -532,21 +877,34 @@ def pca_state_auc(Z, lab, n_null=40, seed=0):
     ~160 tokens cannot separate arbitrary labels, whereas 384 dims would
     separate anything and drive both the real and null values to 1.0.
 
-    Returns (auc, null_auc).
+    THE MARGIN IS CEILING-COMPRESSED AND THE RANK IS NOT. On a smooth monotone
+    trajectory every contiguous split separates well, so the null itself sits
+    near the maximum (Laya artifact null = 0.920 vs LaBraM 0.760) and there is
+    almost no headroom left for a real effect to appear as a difference. Laya's
+    higher absolute AUC and its much smaller margin are then the same fact --
+    smoothness -- reported twice, and the margin cannot be read as "less
+    state-specific than LaBraM". The rank of the truth among the nulls is
+    uniform on [0,1] under the null at ANY ceiling, so it is the comparable
+    statistic across two models with different smoothness.
+
+    Returns (auc, null_auc, rank).
     """
     P   = top3(Z)
     lab = np.asarray(lab)
 
     def _fit(l):
+        l = np.asarray(l)
         if l.min() == l.max():
             return np.nan
         u = P[l == 1].mean(axis=0) - P[l == 0].mean(axis=0)
         nu = float(np.linalg.norm(u))
         return _auc(P @ (u / nu), l) if nu > 0 else np.nan
 
-    rng   = np.random.default_rng(seed)
-    nulls = [_fit(_relocate(lab, rng)) for _ in range(n_null)]
-    return _fit(lab), float(np.nanmean(nulls)) if np.any(np.isfinite(nulls)) else np.nan
+    real  = _fit(lab)
+    nulls = np.array([v for v in (_fit(l) for l in null_labs) if np.isfinite(v)])
+    if nulls.size == 0 or not np.isfinite(real):
+        return real, np.nan, np.nan
+    return real, float(nulls.mean()), float(np.mean(nulls < real))
 
 
 def positional_stats(Z):
@@ -797,9 +1155,122 @@ def labram_embeddings(model, device, eeg, ch_names, orig_sfreq, bipolar_map,
     return np.concatenate(out, axis=0), starts
 
 
+def labram_embeddings_native(model, device, eeg, ch_names, orig_sfreq,
+                             bipolar_map):
+    """LaBraM the way LaBraM is meant to run: ONE forward pass over the 16 s.
+
+    WHY THIS ARM EXISTS. The sliding-window function above runs 151 independent
+    single-patch forward passes. That is not a neutral choice: it removes all
+    across-time attention and pins every window's time embedding to slot 0, so
+    the baseline is denied the mechanism that would let it hold a state. It is
+    also exactly what notebook cell 9 does, which means the published Figure 2
+    shows LaBraM in this crippled configuration -- so the sliding arm stays the
+    DEFAULT here, because the point of this analysis is to characterise the
+    figure we actually printed.
+
+    This arm answers the separate and fair question: with full context, does
+    LaBraM organise by state? The output is (16, D) at 1 Hz -- one token per
+    second, channel-averaged -- and the caller pools Laya to the same 16 points
+    so neither model is scored at a resolution the other cannot reach.
+
+    forward_features returns (1, C*n_patch, D) in CHANNEL-MAJOR order, hence
+    reshape(C, n_patch, D) then mean over the channel axis. Getting that order
+    backwards would silently transpose time into channels.
+    """
+    import torch
+    from scipy.signal import resample
+    from eeg_bench.models.clinical.LaBraM import utils as labram_utils
+
+    if orig_sfreq != LABRAM_SFREQ:
+        new_T  = int(round(eeg.shape[1] * LABRAM_SFREQ / orig_sfreq))
+        eeg_rs = resample(eeg, new_T, axis=1)
+    else:
+        eeg_rs = np.asarray(eeg)
+
+    C, T    = eeg_rs.shape
+    n_patch = T // LABRAM_PATCH_SZ
+    if n_patch < 2:
+        raise ValueError(f"need >=2 whole 1 s patches, got {n_patch}")
+    x = eeg_rs[:, :n_patch * LABRAM_PATCH_SZ]
+
+    names       = map_channel_names(decode_names(ch_names), bipolar_map)
+    input_chans = labram_utils.get_input_chans(names)
+
+    with torch.no_grad():
+        tok = (torch.from_numpy(np.ascontiguousarray(x)).float()
+                 .reshape(1, C, n_patch, LABRAM_PATCH_SZ) / 100.0)
+        pe  = model.forward_features(tok.to(device), input_chans=input_chans,
+                                     return_patch_tokens=True)
+        assert pe.shape[1] == C * n_patch, (
+            f"token axis {pe.shape[1]} != C*n_patch {C}*{n_patch}; the reshape "
+            "below would mix channels into time")
+        Z = pe.reshape(C, n_patch, -1).mean(dim=0).cpu().numpy()
+
+    starts = np.arange(n_patch, dtype=int) * LABRAM_PATCH_SZ
+    return Z, starts
+
+
 # ===========================================================================
 # main
 # ===========================================================================
+
+def paired_report(df, col, name, alternative="less", fmt="{:.4f}", width=20):
+    """Paired Laya-vs-LaBraM test at BOTH chunk and recording level.
+
+    Chunk-level p-values here are pseudoreplicated and should not be quoted.
+    The 5058 artifact chunks come from far fewer recordings; chunks inside one
+    recording share a patient, a montage, an amplifier and often a single
+    clinical event, so they are nowhere near independent draws. A Wilcoxon over
+    them answers "is this true of the average CHUNK", with an effective n far
+    below 5058, which is how a p of 1e-300 appears. Collapsing each recording to
+    its median first answers "is this true of the average RECORDING", which is
+    the claim the rebuttal actually needs. Quote the recording-level row.
+
+    The descriptive win rate is unaffected by this and stays quotable.
+    """
+    from scipy import stats
+    a_col, b_col = f"{col}_laya", f"{col}_labram"
+    if a_col not in df or b_col not in df:
+        return
+    d = (df[["rec", a_col, b_col]].replace([np.inf, -np.inf], np.nan).dropna())
+    if len(d) < 6:
+        print(f"  {name:<{width}} too few usable chunks ({len(d)})")
+        return
+    levels = [("chunks", d[[a_col, b_col]]),
+              ("recordings", d.groupby("rec")[[a_col, b_col]].median())]
+    for i, (lvl, dd) in enumerate(levels):
+        a, b = dd[a_col].to_numpy(float), dd[b_col].to_numpy(float)
+        win  = np.mean(a < b) if alternative == "less" else np.mean(a > b)
+        try:
+            p = stats.wilcoxon(a, b, alternative=alternative).pvalue
+        except ValueError:
+            p = np.nan
+        print(f"  {(name if i == 0 else ''):<{width}} {lvl:<11s} n={len(a):5d}  "
+              f"Laya {fmt.format(np.median(a))}  LaBraM {fmt.format(np.median(b))}  "
+              f"Laya wins {100*win:5.1f}%  p={p:.3e}")
+
+
+def rank_report(df, col, name, width=20):
+    """Rank of the truth among its nulls, aggregated. Uniform on [0,1] under
+    the null at any ceiling, so this is comparable across two models whose
+    nulls sit at very different levels. Tested against 0.5."""
+    from scipy import stats
+    for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
+        c = f"{col}_{tag}"
+        if c not in df:
+            continue
+        v = df[["rec", c]].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(v) < 6:
+            continue
+        r = v.groupby("rec")[c].median().to_numpy(float)
+        try:
+            p = stats.wilcoxon(r - 0.5, alternative="greater").pvalue
+        except ValueError:
+            p = np.nan
+        print(f"  {(name if tag == 'laya' else ''):<{width}} {nm} "
+              f"recordings n={len(r):5d}  median rank={np.median(r):.4f}  "
+              f"(0.5 = chance)  p={p:.3e}")
+
 
 def aggregate(df, out_png):
     import matplotlib
@@ -922,6 +1393,26 @@ def main():
                     help="also run M3, held-out state occupancy AUC. This is what "
                          "the PCA panel shows when the colour HOLDS across the "
                          "event rather than spiking at its edge.")
+    ap.add_argument("--labram-mode", choices=["sliding", "native"],
+                    default="sliding",
+                    help="sliding (DEFAULT) reproduces the published Figure 2: "
+                         "151 independent single-patch passes, no across-time "
+                         "attention, time embedding pinned to slot 0. native "
+                         "runs one 16 s pass and returns 1 token/s with full "
+                         "context, and pools Laya to the same 1 Hz grid. Quote "
+                         "sliding when describing the figure, native when "
+                         "claiming anything about LaBraM as a model.")
+    ap.add_argument("--reversal", action="store_true",
+                    help="run M8, the onset/termination sign-reversal test. The "
+                         "one test here that a temporal ramp cannot pass: a clock "
+                         "moves forward at BOTH events, a state code moves back at "
+                         "the second one. Recording-held-out, chance is 50%%.")
+    ap.add_argument("--decoder", action="store_true",
+                    help="run M9, the recording-held-out conditional decoder. "
+                         "Asks whether the embedding beats a baseline that already "
+                         "has elapsed time and the 7 waveform descriptors. This is "
+                         "the direct test of the results.tex:42 claim; implies "
+                         "--tracking for the per-second features it needs.")
     ap.add_argument("--tracking-pool", choices=["concat", "mean", "both"],
                     default="both",
                     help="how Laya's 10 x 0.1 s tokens are combined into one 1 s "
@@ -934,6 +1425,22 @@ def main():
                          "the STATE? Equal-dimension, held out over chunks.")
     ap.add_argument("--auc-max-chunks", type=int, default=2000,
                     help="cap on chunks retained in RAM for M3")
+    ap.add_argument("--null", choices=["chunk", "uniform"], default="chunk",
+                    help="chunk (default): null labels are OTHER chunks' real "
+                         "annotations, matched on transition count, so class "
+                         "fraction and run lengths come from the real "
+                         "distribution. uniform: the old _relocate, which "
+                         "preserved neither and is kept only to reproduce "
+                         "pre-2026-07-30 numbers.")
+    ap.add_argument("--n-null", type=int, default=40,
+                    help="null draws per chunk for M4/M7")
+    ap.add_argument("--guard", type=float, default=0.5, metavar="SEC",
+                    help="exclude +/- this many SECONDS around every label "
+                         "change from M7. LaBraM's 1 s window smears a true "
+                         "step over ~10 tokens; without a guard that ramp is "
+                         "counted as within-state jitter and also pulls the "
+                         "centroids together, penalising the baseline for its "
+                         "own receptive field. 0 reproduces the old behaviour.")
     ap.add_argument("--limit", type=int, default=None, help="smoke-test N chunks")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--out", default=None)
@@ -946,6 +1453,8 @@ def main():
 
     global PC_NORM
     PC_NORM = args.pc_norm
+    if args.decoder:
+        args.tracking = True          # M9 reads the same per-second features
     print(f"pc-norm {PC_NORM}"
           f"{'  (figure colour space: per-PC 2/98 stretch to [0,1])' if PC_NORM == 'plot' else '  (raw PCs, PC1 dominates)'}")
 
@@ -965,6 +1474,12 @@ def main():
         index = json.load(f)
     print(f"meta   {index.get('meta')}")
 
+    pool = collect_label_pool(index, args.limit)
+    print(f"null   {args.null}: {pool.summary()}")
+    if args.null == "chunk" and len(pool) < 20:
+        print("  *** WARNING: pool too small for a cross-chunk null; "
+              "the same few patterns will recur. ***")
+
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     model  = load_labram(device)
     print(f"device {device}\n")
@@ -976,7 +1491,14 @@ def main():
     keep = {"laya": [], "labram": []}
     keep_lab = {"laya": [], "labram": []}
     keep_w   = {"laya": [], "labram": []}
-    keep_tr  = {"laya": [], "laya_mean": [], "labram": [], "W": [], "l": []}
+    keep_tr  = {"laya": [], "laya_mean": [], "labram": [], "W": [], "l": [],
+                "rec": []}
+    # M8 needs the embedding in its NATIVE space, not the per-chunk z-scored
+    # copy in `keep`: z-scoring divides each dimension by its own within-chunk
+    # std, which differs from chunk to chunk, so a direction learned on one
+    # chunk means nothing on another.
+    keep_rev = {"laya": [], "labram": [], "laya_lab": [], "labram_lab": [],
+                "rec": []}
     with h5py.File(h5_path, "r") as hf:
         for ci, (seq_id, lab, emb) in enumerate(iter_chunks(index, args.limit)):
             grp = hf.get(f"/recordings/{seq_id}")
@@ -1002,10 +1524,20 @@ def main():
             sfreq = infer_sfreq(eeg, chunk_len_s)
 
             Za = np.asarray(emb, dtype=np.float64)          # (160, 384)
+            if args.labram_mode == "native":
+                Zb, starts = labram_embeddings_native(
+                    model, device, eeg, ch_names, sfreq, args.bipolar_map)
+                # Pool Laya to LaBraM's 1 Hz so the two arms are scored on the
+                # same time grid. Without this LaBraM's smoothness advantage
+                # would be nothing but its coarser sampling.
+                nsec = len(starts)
+                if len(Za) % nsec == 0:
+                    Za = Za.reshape(nsec, len(Za) // nsec, -1).mean(axis=1)
+            else:
+                Zb, starts = labram_embeddings(model, device, eeg, ch_names,
+                                               sfreq, args.bipolar_map,
+                                               args.batch_size)
             la = tok_labels_repeat(lab, len(Za))
-            Zb, starts = labram_embeddings(model, device, eeg, ch_names,
-                                           sfreq, args.bipolar_map,
-                                           args.batch_size)
             Zb = Zb.astype(np.float64)                      # (151, 200)
             lb = tok_labels_windows(lab, starts, LABRAM_PATCH_SZ, LABRAM_SFREQ)
 
@@ -1032,24 +1564,62 @@ def main():
                 # Laya is asked about 10x more signal than its token covers, and
                 # the R2 gap is receptive field rather than training objective.
                 nsec = len(lab)
-                oky  = len(Za) == nsec * 10
-                idxb = np.searchsorted(starts, np.arange(nsec) * LABRAM_SFREQ)
-                okb  = idxb.max() < len(Zb)
+                # native mode has already pooled Laya to 1 token/s, so there is
+                # nothing left to concatenate and both arms are the same rows.
+                per_s = len(Za) // nsec if nsec else 0
+                oky   = len(Za) == nsec * per_s and per_s >= 1
+                idxb  = np.searchsorted(starts, np.arange(nsec) * LABRAM_SFREQ)
+                okb   = idxb.max() < len(Zb)
                 if oky and okb:
                     keep_tr["laya"].append(
                         Za.reshape(nsec, -1).astype(np.float32))
                     keep_tr["laya_mean"].append(
-                        Za.reshape(nsec, 10, -1).mean(axis=1).astype(np.float32))
+                        Za.reshape(nsec, per_s, -1).mean(axis=1).astype(np.float32))
                     keep_tr["labram"].append(Zb[idxb].astype(np.float32))
                     keep_tr["W"].append(
                         _zscore(waveform_features(
                             eeg, sfreq, np.arange(nsec) + 0.5)).astype(np.float32))
                     keep_tr["l"].append(np.asarray(lab))
+                    keep_tr["rec"].append(rec_id(seq_id))
 
-            row = dict(seq_id=seq_id, n_trans=int(transitions(lab).size),
-                       n_pos=int((lab == 1).sum()))
+            if (args.reversal and transitions(lab).size
+                    and len(keep_rev["rec"]) < args.auc_max_chunks):
+                keep_rev["laya"].append(Za.astype(np.float32))
+                keep_rev["labram"].append(Zb.astype(np.float32))
+                keep_rev["laya_lab"].append(la)
+                keep_rev["labram_lab"].append(lb)
+                keep_rev["rec"].append(rec_id(seq_id))
+
+            # Null annotations for THIS chunk, drawn once at second resolution
+            # and converted onto each model's own token grid below, so both
+            # models are scored against the identical set of null labels.
+            nrng = np.random.default_rng(10_000 + ci)
+            if args.null == "chunk":
+                null_secs = sample_null_labels(pool, ci, int(transitions(lab).size),
+                                               args.n_null, nrng)
+            else:
+                null_secs = [_relocate(lab, nrng) for _ in range(args.n_null)]
+
+            row = dict(seq_id=seq_id, rec=rec_id(seq_id),
+                       n_trans=int(transitions(lab).size),
+                       n_pos=int((lab == 1).sum()),
+                       pos_frac=float(np.mean(np.asarray(lab) == 1)))
             for tag, Z, l in [("laya", Za, la), ("labram", Zb, lb)]:
-                hz = len(Z) / 16.0
+                # From the token GEOMETRY, not from the token count. LaBraM
+                # produces 151 windows over 16 s, so len(Z)/16 = 9.4375 Hz,
+                # but the windows are strided 20 samples at 200 Hz and their
+                # true rate is 10 Hz. The old expression inflated LaBraM's M2
+                # and M5 errors in seconds by 10/9.4375, about 6%, against the
+                # baseline. Laya is unaffected: 160/16 is already exactly 10.
+                hz = (len(Za) / chunk_len_s if tag == "laya"
+                      else LABRAM_SFREQ / LABRAM_STRIDE_SAMPLES
+                      if args.labram_mode == "sliding"
+                      else len(Zb) / chunk_len_s)
+                nulls_tok = [(tok_labels_repeat(s, len(Za)) if tag == "laya"
+                              else tok_labels_windows(s, starts, LABRAM_PATCH_SZ,
+                                                      LABRAM_SFREQ))
+                             for s in null_secs]
+                guard_tok = int(round(args.guard * hz))
                 (row[f"pc1t_{tag}"], row[f"evr1_{tag}"],
                  row[f"timer2_{tag}"]) = positional_stats(Z)
                 if ((args.state_auc or args.tracking)
@@ -1066,15 +1636,17 @@ def main():
                     ker = np.ones(args.smooth) / args.smooth
                     Z = np.apply_along_axis(
                         lambda v: np.convolve(v, ker, mode="same"), 0, Z)
-                a, a0 = pca_state_auc(Z, l, seed=ci)
-                q7, q7n, q7j = within_state_consistency(Z, l, seed=ci)
-                row[f"eta2_{tag}"], row[f"eta2n_{tag}"] = q7, q7n
-                row[f"jit_{tag}"] = q7j
+                a, a0, arank = pca_state_auc(Z, l, nulls_tok)
+                q7 = within_state_consistency(Z, l, nulls_tok, guard_tok)
+                for key in ("eta2", "eta2n", "eta2rank", "jit", "jitfree",
+                            "step", "sep", "spread"):
+                    row[f"{key}_{tag}"] = q7[key]
                 e5, s5, tr5 = m5_split_error(Z, l, hz)
                 row[f"m5err_{tag}"]   = e5
                 row[f"m5split_{tag}"] = s5
                 row[f"m5trans_{tag}"] = tr5
                 row[f"pcauc_{tag}"], row[f"pcauc0_{tag}"] = a, a0
+                row[f"pcaucrank_{tag}"] = arank
                 variants = [("", Z), ("_pc3", top3(Z))]
                 if args.detrend:
                     Zd = detrend_tokens(Z, args.detrend)
@@ -1155,21 +1727,99 @@ def main():
                   " ".join(f"{v:7.3f}" for v in r2) + f" {np.mean(r2):7.3f}")
         print(f"    (n={n_tr} chunks x {len(keep_tr['l'][0]) if n_tr else 0} s)")
 
+    if args.reversal:
+        print("\nM8  does the embedding REVERSE at a termination, or keep going?")
+        print("    Direction learned at ONSET on one set of recordings, applied to")
+        print("    events in recordings held out of that fit. A state code moves")
+        print("    back toward interictal at termination, so onset->term should be")
+        print("    NEGATIVE (frac+ well below 0.50). A clock keeps moving forward")
+        print("    and stays positive. No smoothness or boundary artifact can")
+        print("    produce reversal. onset->onset is the control: if it is not")
+        print("    clearly positive there is no consistent direction to test.")
+        print(f"    {'':18s} {'test':>16s} {'frac+':>8s} {'meanProj':>9s} {'n':>6s}")
+        n_rev = len(keep_rev["rec"])
+        for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
+            if n_rev < 10:
+                print(f"    {nm}: too few chunks with a transition ({n_rev})")
+                continue
+            res = onset_termination_reversal(
+                keep_rev[tag], keep_rev[f"{tag}_lab"], keep_rev["rec"], win=20)
+            if not res:
+                print(f"    {nm}: too few onset or termination events")
+                continue
+            for k, (fp, mp, n, per_rec) in res.items():
+                if len(per_rec) >= 6:
+                    alt = "less" if k.endswith("term") else "greater"
+                    p = f"{stats.wilcoxon(per_rec, alternative=alt).pvalue:.2g}"
+                else:
+                    p = f"n/a ({len(per_rec)} rec)"
+                print(f"    {nm:18s} {k:>16s} {fp:8.3f} {mp:>+9.4f} {n:6d}"
+                      f"   p={p}")
+        print(f"    (n={n_rev} chunks, 2.0 s either side of each transition;")
+        print("     p is a recording-level signed-rank test, not event-level)")
+
+    if args.decoder:
+        print("\nM9  does the embedding add state information BEYOND clock+waveform?")
+        print("    One row per second, whole RECORDINGS held out, nested arms.")
+        print("    The number that matters is the last column minus TIME+WAVE. If")
+        print("    it is ~0 the embedding tells you nothing the clock and the")
+        print("    bandpower did not already say, which is exactly the claim in")
+        print("    results.tex:42. perm = same model with label sequences swapped")
+        print("    between recordings, i.e. the null for that increment.")
+        n_tr, tw_max = len(keep_tr["W"]), np.nan
+        hdr = ["TIME", "WAVE", "TIME+WAVE", "TIME+WAVE+EMB"]
+        print(f"    {'':18s} " + " ".join(f"{h:>14s}" for h in hdr)
+              + f" {'gain':>7s} {'permGain':>9s}")
+        for tag, nm in [("laya_mean", "Laya (mean-pool)"), ("labram", "LaBraM")]:
+            if n_tr < 10:
+                print(f"    {nm}: too few aligned chunks ({n_tr})"); continue
+            r = conditional_state_decoder(keep_tr[tag], keep_tr["W"],
+                                          keep_tr["l"], keep_tr["rec"])
+            if not r:
+                print(f"    {nm}: too few recordings for grouped CV"); continue
+            gains = []
+            for s_ in range(5):
+                rp = conditional_state_decoder(keep_tr[tag], keep_tr["W"],
+                                               keep_tr["l"], keep_tr["rec"],
+                                               seed=s_, permute=True)
+                if rp.get("TIME+WAVE+EMB") and rp.get("TIME+WAVE"):
+                    gains.append(rp["TIME+WAVE+EMB"] - rp["TIME+WAVE"])
+            gain   = r.get("TIME+WAVE+EMB", np.nan) - r.get("TIME+WAVE", np.nan)
+            tw_max = np.nanmax([tw_max, r.get("TIME+WAVE", np.nan)])
+            print(f"    {nm:18s} "
+                  + " ".join(f"{r.get(h, float('nan')):14.4f}" for h in hdr)
+                  + f" {gain:>+7.4f} "
+                  + (f"{np.mean(gains):>+9.4f}" if gains else f"{'--':>9s}"))
+        print(f"    (n={n_tr} chunks, {len(set(keep_tr['rec']))} recordings, "
+              f"5-fold grouped CV, 32 global PCs fit on train only)")
+        if np.isfinite(tw_max) and tw_max > 0.95:
+            print(f"    *** TIME+WAVE reaches {tw_max:.4f}. The baseline is at "
+                  "ceiling, so the increment has no headroom and a gain near")
+            print("    zero is UNINTERPRETABLE rather than negative evidence. "
+                  "Report the ceiling, do not report the gain.")
+
     print("\nM7  is each state held at a CONSISTENT colour? (the 3 PCs shown)")
+    print("    jitfree is the LABEL-FREE smoothness statistic (step / chunk 3-PC")
+    print("    radius) and is the one to quote for 'smoother trajectory'. jit")
+    print("    divides by the label-defined centroid distance instead, so a")
+    print("    temporal ramp scores well on it for free; report it only next to")
+    print("    jitfree. step and sep are jit's numerator and denominator.")
     for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
         e  = df[f"eta2_{tag}"].to_numpy(float)
         en = df[f"eta2n_{tag}"].to_numpy(float)
-        j  = df[f"jit_{tag}"].to_numpy(float)
-        m  = np.isfinite(e) & np.isfinite(en) & np.isfinite(j)
-        print(f"  {nm:26s} n={int(m.sum()):5d}  between-state var={np.median(e[m]):.4f}  "
-              f"(null {np.median(en[m]):.4f})  within-state jitter={np.median(j[m]):.4f}")
-    mm = np.isfinite(df["jit_laya"]) & np.isfinite(df["jit_labram"])
-    jl, jb = df["jit_laya"][mm].to_numpy(float), df["jit_labram"][mm].to_numpy(float)
-    if mm.sum() > 5:
-        st = stats.wilcoxon(jl, jb, alternative="less")
-        print(f"  {'paired jitter':26s} n={int(mm.sum()):5d}  Laya {np.median(jl):.4f}  "
-              f"LaBraM {np.median(jb):.4f}  Laya steadier on {100*np.mean(jl<jb):5.1f}%  "
-              f"p={st.pvalue:.3e}")
+        m  = np.isfinite(e) & np.isfinite(en)
+        g = lambda c: np.nanmedian(df[f"{c}_{tag}"].to_numpy(float))
+        # MEAN margin, not median. eta2 is nonlinear in boundary position, so
+        # median[eta2 - mean(nulls)] is biased even under a correct null:
+        # measured +0.0184 on a pure clock where the truth is 0, while the mean
+        # reads +0.0008. See calib_null_bias.py.
+        print(f"  {nm:8s} n={int(m.sum()):5d}  eta2={np.median(e[m]):.4f} "
+              f"(null {np.median(en[m]):.4f}, mean margin {np.mean(e[m]-en[m]):+.4f})  "
+              f"jit={g('jit'):.4f}  jitfree={g('jitfree'):.4f}  "
+              f"step={g('step'):.4f}  sep={g('sep'):.4f}  spread={g('spread'):.4f}")
+    paired_report(df, "jitfree", "paired jitfree")
+    paired_report(df, "jit",     "paired jit")
+    rank_report(df,  "eta2rank", "eta2 rank vs null")
 
     print("\nM5  does the dominant split of the 3 PCs land on the boundary? (s)")
     print("    Null pairs each chunk's split with OTHER chunks' boundaries, so")
@@ -1193,33 +1843,30 @@ def main():
         print(f"  {nm:26s} n={int(m.sum()):5d}  err={obs:.3f}s  "
               f"null={np.median(perm):.3f}s  "
               f"p={(1 + np.sum(perm <= obs)) / (len(perm) + 1):.3e}")
-    mm = np.isfinite(df["m5err_laya"]) & np.isfinite(df["m5err_labram"])
-    el, eb = df["m5err_laya"][mm].to_numpy(float), df["m5err_labram"][mm].to_numpy(float)
-    if mm.sum() > 5:
-        st = stats.wilcoxon(el, eb, alternative="less")
-        print(f"  {'paired':26s} n={int(mm.sum()):5d}  Laya {np.median(el):.3f}s  "
-              f"LaBraM {np.median(eb):.3f}s  Laya better on {100*np.mean(el<eb):5.1f}%  "
-              f"p={st.pvalue:.3e}")
+    paired_report(df, "m5err", "paired", fmt="{:.3f}")
 
     print("\nM4  state separability on the 3 PCs the figure colours with")
-    print("    Circular by design; the null is built the same way, so read the margin.")
+    print("    Circular by design; the null is built the same way. READ THE RANK,")
+    print("    not the margin: on a smooth trajectory every relocated split")
+    print("    already scores near the maximum, so the margin is ceiling-")
+    print("    compressed and a smoother model looks less state-specific purely")
+    print("    for being smooth. The rank is uniform on [0,1] under the null at")
+    print("    any ceiling and is therefore comparable between the two models.")
+    for tag in ("laya", "labram"):
+        df[f"m4margin_{tag}"] = df[f"pcauc_{tag}"] - df[f"pcauc0_{tag}"]
     for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
         a  = df[f"pcauc_{tag}"].to_numpy(float)
         a0 = df[f"pcauc0_{tag}"].to_numpy(float)
         m  = np.isfinite(a) & np.isfinite(a0)
-        st = stats.wilcoxon(a[m], a0[m], alternative="greater") if m.sum() > 5 else None
-        print(f"  {nm:26s} n={int(m.sum()):5d}  AUC={np.median(a[m]):.4f}  "
+        if m.sum() <= 5:
+            print(f"  {nm}: too few"); continue
+        st = stats.wilcoxon(a[m], a0[m], alternative="greater")
+        print(f"  {nm:8s} n={int(m.sum()):5d}  AUC={np.median(a[m]):.4f}  "
               f"null={np.median(a0[m]):.4f}  "
-              f"margin={np.median(a[m] - a0[m]):+.4f}  "
-              f"p={st.pvalue:.3e}" if st else f"  {nm}: too few")
-    ml = np.isfinite(df["pcauc_laya"]) & np.isfinite(df["pcauc_labram"])
-    dl = (df["pcauc_laya"] - df["pcauc0_laya"])[ml].to_numpy(float)
-    db = (df["pcauc_labram"] - df["pcauc0_labram"])[ml].to_numpy(float)
-    if ml.sum() > 5:
-        st = stats.wilcoxon(dl, db, alternative="greater")
-        print(f"  {'paired margin':26s} n={int(ml.sum()):5d}  Laya {np.median(dl):+.4f}  "
-              f"LaBraM {np.median(db):+.4f}  Laya better on {100*np.mean(dl>db):5.1f}%  "
-              f"p={st.pvalue:.3e}")
+              f"mean margin={np.mean(a[m] - a0[m]):+.4f}  p={st.pvalue:.3e}")
+    paired_report(df, "m4margin", "paired margin", alternative="greater",
+                  fmt="{:+.4f}")
+    rank_report(df, "pcaucrank", "M4 rank vs null")
 
     df.to_csv(f"{out}.csv", index=False)
     print(f"\n{len(df)} chunks with a label transition -> {out}.csv "
