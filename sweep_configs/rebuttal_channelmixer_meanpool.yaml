@@ -1,0 +1,33 @@
+# Laya-MeanPool (channel-mixer ablation) — replaces DynamicChannelMixerV2's
+# learned cross-attention over channels with parameter-free masked mean
+# pooling (see eegfmchallenge/rebuttal/channel_mixer/PLAN.md and
+# configs/laya_channelmixer_meanpool.py). Kept as its own file (not merged
+# into full_benchmark.yaml, which is mid-edit for an unrelated sweep) so it
+# can be run standalone against the same tasks/seeds as Table 3.
+#
+# Usage: python run_lejepa_sweep.py --config sweep_configs/rebuttal_channelmixer_meanpool.yaml
+
+models:
+  laya-meanpool: # MeanPoolChannelMixerV2 instead of DynamicChannelMixerV2; 10k steps, 10% data
+    base_path: /REDLRADADM35839/home/spanchavati/eegfmchallenge/lightning_logs_rebuttal/rebuttal_laya_meanpool_10pct
+    version: 0
+
+checkpoints:
+  steps: []
+  include_last: true # only the final (step 10000) checkpoint, matching Table 3
+
+tasks:
+  epoch_sweep: []
+  final_only:
+    - all # all 14 tasks
+
+training:
+  linear_probe: true
+  data_percentages: [1.0]
+  seeds: [42, 123, 456] # same seeds as Table 3 / full_benchmark.yaml / laya-ema-noproj
+
+execution:
+  gpus: 1
+  workers_per_gpu: 1
+  log_dir: rebuttal_logs/laya_meanpool
+  results_dir: results_rebuttal/laya_meanpool

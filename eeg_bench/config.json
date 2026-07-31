@@ -7,7 +7,7 @@
     "chkpt": "./checkpoints/",
     "results": "./results/",
     "lejepa": {
-        "eegfm_path": "/home/spanchavati",
+        "eegfm_path": "/REDLRADADM35839/home/spanchavati",
         "pos_bank_path": "/home/spanchavati/EEG-Bench-vICMl/REVE_posbank/",
         "checkpoint": {
             "base_path": null,
