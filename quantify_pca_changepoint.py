@@ -540,6 +540,11 @@ def within_state_consistency(Z, lab, null_labs=(), guard=0):
                within them. High = each state holds one colour.
       jit      mean within-state token step / distance between state centroids.
       jitfree  mean within-state token step / the chunk's own 3-PC RMS radius.
+               Name it "normalized state-interior step size" in prose. Only
+               the DENOMINATOR is label-free. Labels still decide which steps
+               enter the numerator (cross-state steps are dropped) and where
+               _far_from_transitions puts the guard band, so calling the whole
+               statistic label-free overstates it.
 
     WHY BOTH JITTER FORMS ARE REPORTED. `jit`'s denominator is defined by the
     labels, so it conflates two different things: how smooth the trajectory is,
@@ -550,8 +555,9 @@ def within_state_consistency(Z, lab, null_labs=(), guard=0):
     f the two centroids sit at f/2 and (1+f)/2, so the separation is 1/2 for
     EVERY f and a relocated-label jitter is identical to the real one. `jitfree`
     replaces the denominator with a label-free scale, which makes it an honest
-    smoothness statistic that claims nothing about states. Quote `jitfree` for
-    "Laya's trajectory is smoother"; quote `jit` only alongside it.
+    smoothness statistic whose DENOMINATOR claims nothing about states. Quote
+    `jitfree` for "Laya's trajectory is smoother"; quote `jit` only alongside
+    it. Do not describe either as a label-free statistic in prose.
 
     eta2 gets a null drawn from other chunks' real annotations (see
     sample_null_labels). The nulls are pre-converted to this model's token grid
@@ -1815,7 +1821,15 @@ def main():
                  row[f"timer2_{tag}"]) = positional_stats(Z)
                 if ((args.state_auc or args.tracking)
                         and len(keep[tag]) < args.auc_max_chunks):
-                    keep[tag].append(_zscore(Z).astype(np.float32))
+                    # RAW, not z-scored. The published figure does NOT z-score:
+                    # analyze_embeddings_rebuttals.ipynb cell 2 has
+                    #   # embeddings = (embeddings - emb_mean) / emb_std
+                    # commented out. Per-dimension z-scoring equalises variance
+                    # across the 384 dims and therefore changes which axes PCA
+                    # calls dominant, which is precisely the quantity M11 asks
+                    # about. M3 applies _zscore at its own call site so its
+                    # behaviour is unchanged.
+                    keep[tag].append(Z.astype(np.float32))
                     keep_lab[tag].append(np.asarray(l))
                     keep_rec[tag].append(rec_id(seq_id))
                     if args.tracking:
@@ -1868,15 +1882,21 @@ def main():
             t = np.linspace(-1.0, 1.0, len(l))
             return np.vstack([t, t ** 2, t ** 3]).T.astype(np.float32)
 
-        arms = [("Laya", keep["laya"], keep_lab["laya"], False),
-                ("LaBraM", keep["labram"], keep_lab["labram"], False),
+        # zs=True marks the arms that read keep[], which now holds RAW
+        # embeddings so M11 can work in the figure's own space. M3 z-scores
+        # them here, preserving its previous behaviour exactly. The clock arm
+        # builds its own basis and was never z-scored, so zs=False.
+        arms = [("Laya", keep["laya"], keep_lab["laya"], False, True),
+                ("LaBraM", keep["labram"], keep_lab["labram"], False, True),
                 ("TIME ONLY (clock)",
-                 [_timebasis(l) for l in keep_lab["laya"]], keep_lab["laya"], False),
-                ("Laya  minus clock", keep["laya"], keep_lab["laya"], True),
-                ("LaBraM minus clock", keep["labram"], keep_lab["labram"], True)]
-        for nm, Zs, ls, dt in arms:
+                 [_timebasis(l) for l in keep_lab["laya"]], keep_lab["laya"], False, False),
+                ("Laya  minus clock", keep["laya"], keep_lab["laya"], True, True),
+                ("LaBraM minus clock", keep["labram"], keep_lab["labram"], True, True)]
+        for nm, Zs, ls, dt, zs in arms:
             if not Zs:
                 continue
+            if zs:
+                Zs = [_zscore(Z).astype(np.float32) for Z in Zs]
             Za = [detrend_tokens(Z, 3).astype(np.float32) for Z in Zs] if dt else Zs
             pooled, per = state_auc(Za, ls)
             nulls = [state_auc(Za, ls, seed=s_, shift_null=True)[0] for s_ in range(5)]
@@ -2062,9 +2082,11 @@ def main():
                                                   sorted(r.get("ap", {}).items())))
             print(f"    {'':18s} k95={r['k95']}  D={Es[0].shape[1]}  "
                   f"{rate} rows/chunk  prev={r.get('prev', float('nan')):.3f}")
-        print("    @native rows use the PER-CHUNK Z-SCORED copy (that is what")
-        print("    `keep` holds, for the PCA panel), the @1Hz rows use raw")
-        print("    embeddings. Compare k95 WITHIN a row type, not across.")
+        print("    @native rows are RAW and unpooled, which is the figure's own")
+        print("    space (the notebook's embedding z-score is commented out at")
+        print("    cell 2). @1Hz rows are raw but pooled to 1 token/s. Neither")
+        print("    is the figure exactly, because the figure fits PCA PER CHUNK")
+        print("    and both arms fit it globally; M4 is the per-chunk version.")
         print(f"    AP chance = positive rate = {r.get('prev', float('nan')):.3f}"
               " (SAME labels for both models, so imbalance cannot favour either;")
         print("     it changes how to read the ABSOLUTE values, not the "
@@ -2080,11 +2102,13 @@ def main():
         print("    as it leaves the model, not whether state exists inside it.")
 
     print("\nM7  is each state held at a CONSISTENT colour? (the 3 PCs shown)")
-    print("    jitfree is the LABEL-FREE smoothness statistic (step / chunk 3-PC")
-    print("    radius) and is the one to quote for 'smoother trajectory'. jit")
-    print("    divides by the label-defined centroid distance instead, so a")
-    print("    temporal ramp scores well on it for free; report it only next to")
-    print("    jitfree. step and sep are jit's numerator and denominator.")
+    print("    jitfree = NORMALIZED STATE-INTERIOR STEP SIZE (step / chunk 3-PC")
+    print("    radius) and is the one to quote for 'smoother trajectory'. Its")
+    print("    DENOMINATOR is label-free; the statistic is not, because labels")
+    print("    pick which steps count and set the guard band. jit divides by")
+    print("    the label-defined centroid distance instead, so a temporal ramp")
+    print("    scores well on it for free; report it only next to jitfree.")
+    print("    step and sep are jit's numerator and denominator.")
     for tag, nm in [("laya", "Laya  "), ("labram", "LaBraM")]:
         e  = df[f"eta2_{tag}"].to_numpy(float)
         en = df[f"eta2n_{tag}"].to_numpy(float)
