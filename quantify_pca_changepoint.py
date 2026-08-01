@@ -1678,6 +1678,9 @@ def main():
     rows, t0, warned = [], time.time(), False
     keep = {"laya": [], "labram": []}
     keep_lab = {"laya": [], "labram": []}
+    # recording id parallel to keep[tag], so M11 can run grouped CV on each
+    # model at ITS OWN token rate instead of only on the shared 1 Hz grid.
+    keep_rec = {"laya": [], "labram": []}
     keep_w   = {"laya": [], "labram": []}
     keep_tr  = {"laya": [], "laya_mean": [], "labram": [], "W": [], "l": [],
                 "rec": []}
@@ -1814,6 +1817,7 @@ def main():
                         and len(keep[tag]) < args.auc_max_chunks):
                     keep[tag].append(_zscore(Z).astype(np.float32))
                     keep_lab[tag].append(np.asarray(l))
+                    keep_rec[tag].append(rec_id(seq_id))
                     if args.tracking:
                         ctr = ((np.arange(len(Z)) + 0.5) / hz if tag == "laya"
                                else (starts + LABRAM_PATCH_SZ / 2) / LABRAM_SFREQ)
@@ -2031,18 +2035,36 @@ def main():
         print("    balanced accuracy cannot say. Saturating at small k means")
         print("    state is a dominant axis; climbing to large k means state is")
         print("    present but spread thin, i.e. decodable but not organised.")
-        for tag, nm in [("laya_mean", "Laya (mean-pool)"), ("labram", "LaBraM")]:
-            if n_tr < 10:
-                break
-            r = pc_dimension_sweep(keep_tr[tag], keep_tr["l"], keep_tr["rec"])
+        print("    TWO SETS OF ARMS. The 1 Hz rows force both models onto a")
+        print("    shared grid, which NERFS whichever model is downsampled to")
+        print("    get there -- in --labram-mode native that is Laya, pooled")
+        print("    from 160 tokens to 16 at line 1723, before any metric runs.")
+        print("    The @native rows let each model run at its own token rate")
+        print("    with labels at that rate. AUC chance is 0.5 either way, so")
+        print("    the k-curves stay comparable without a shared grid.")
+        m11 = [("laya_mean", "Laya @1Hz", keep_tr, "l", "rec"),
+               ("labram",    "LaBraM @1Hz", keep_tr, "l", "rec"),
+               ("laya",      "Laya @native", keep, None, None),
+               ("labram",    "LaBraM @native", keep, None, None)]
+        for tag, nm, src, lk, rk in m11:
+            Es = src[tag]
+            if len(Es) < 10:
+                print(f"    {nm}: too few chunks ({len(Es)})"); continue
+            Ls = src[lk] if lk else keep_lab[tag]
+            Rs = src[rk] if rk else keep_rec[tag]
+            r  = pc_dimension_sweep(Es, Ls, Rs)
             if not r:
                 print(f"    {nm}: too few recordings for grouped CV"); continue
+            rate = len(Es[0])
             print(f"    {nm:18s} AUC " + " ".join(f"k{k}:{v:.3f}" for k, v in
                                                   sorted(r["auc"].items())))
             print(f"    {'':18s} AP  " + " ".join(f"k{k}:{v:.3f}" for k, v in
                                                   sorted(r.get("ap", {}).items())))
-            print(f"    {'':18s} k95={r['k95']}  (smallest k at 95% of this "
-                  f"model's own gain over 0.5)")
+            print(f"    {'':18s} k95={r['k95']}  D={Es[0].shape[1]}  "
+                  f"{rate} rows/chunk  prev={r.get('prev', float('nan')):.3f}")
+        print("    @native rows use the PER-CHUNK Z-SCORED copy (that is what")
+        print("    `keep` holds, for the PCA panel), the @1Hz rows use raw")
+        print("    embeddings. Compare k95 WITHIN a row type, not across.")
         print(f"    AP chance = positive rate = {r.get('prev', float('nan')):.3f}"
               " (SAME labels for both models, so imbalance cannot favour either;")
         print("     it changes how to read the ABSOLUTE values, not the "
