@@ -8,18 +8,35 @@ ablation; this doc is just the generic "how do I run one" reference.
 
 ## 1. Pretrain (in `eegfmchallenge`)
 
-Each ablation is a config file in `eegfmchallenge/configs/`. To launch one on
-the cluster:
+Each ablation is a config file in `eegfmchallenge/configs/`, already written
+with a docstring explaining the hypothesis/prediction/falsification
+criterion (see any `configs/guess_*.py` or `configs/*_10pct_10k.py` for the
+pattern) — read that before launching, don't just run it blind.
+
+**Preflight — run this exact block before every submit, no need to
+re-derive it or grep past sessions for the command:**
 
 ```bash
 cd /REDLRADADM35839/home/spanchavati/eegfmchallenge
-git add -A && git commit -m "..." && git push   # REQUIRED before submitting —
-                                                  # baircondor runs off this repo
-                                                  # dir, which the target machine
-                                                  # reads live; local edits not
-                                                  # pushed won't be picked up.
-git pull   # in case another machine already pushed something
+git status --short          # if dirty: commit what belongs to this run, or
+                              # confirm the dirty file is unrelated (e.g. an
+                              # analysis script) and safe to leave as-is
+git pull --rebase            # another machine/session may have pushed
+git push                     # REQUIRED if you have local commits — baircondor
+                              # runs off this repo dir, which the target
+                              # machine reads live over NFS; un-pushed local
+                              # commits ARE visible (same filesystem), but
+                              # push anyway so other sessions stay in sync.
 
+# GPU headroom on the target machine. No SSH access to compute nodes — this
+# is the only way to check. State=Unclaimed/Activity=Idle == free.
+condor_status -constraint 'Machine=="REDLRADADM35840.ad.medctr.ucla.edu"' \
+  -af Name State Activity GPUs_DeviceName AssignedGPUs
+```
+
+Then submit:
+
+```bash
 baircondor submit --machine REDLRADADM35840 \
   --scratch /REDLRADADM35839/home/$USER/condor-scratch \
   --project eegfm --jobname <short-name> \
@@ -28,15 +45,25 @@ baircondor submit --machine REDLRADADM35840 \
   -- python run_pretraining_from_config.py --config configs/<your_config>.py
 ```
 
+If `baircondor` isn't on `PATH` in the current shell, use the full path:
+`/raid/spanchavati/anaconda3/envs/eeg2025/bin/baircondor`.
+
 Notes:
 - `REDLRADADM35840` is the current default target — `REDLRADADM35839` has had
-  intermittent CUDA ECC errors. If a job dies with a `CUDA error: uncorrectable
-  ECC error`, try the other machine.
+  intermittent CUDA ECC errors, and doesn't have `eegfm_data` mounted (fails
+  with `ValueError: No training datasets available.` / `no loader raised, all
+  splits were empty`). If 35840 dies with a `CUDA error: uncorrectable ECC
+  error`, only then try the other machine.
 - If the model has unused parameters under DDP (e.g. `n_local=0` branches),
   add `"strategy": "ddp_find_unused_parameters_true"` in the config's
   `trainer_config`, or plain `"ddp"` will crash on the first optimizer step.
-- Monitor with `condor_q spanchavati`, and check
-  `<scratch>/condor-runs/spanchavati/eegfm/<jobname>/<run_id>/{stdout,stderr}.txt`.
+- **Monitor** with:
+  ```bash
+  condor_q -constraint 'Owner=="spanchavati"' -af ClusterId JobStatus RemoteHost
+  # JobStatus: 1=Idle 2=Running 5=Held
+  tail -c 2000 <scratch>/condor-runs/spanchavati/eegfm/<jobname>/<run_id>/stdout.txt
+  tail -c 2000 <scratch>/condor-runs/spanchavati/eegfm/<jobname>/<run_id>/stderr.txt
+  ```
   Collapse detection raises `ValueError: Embedding collapse detected!` in
   stderr if `batch_std`/`seq_std` drops below 0.05 — check `metrics.csv` in
   the run's `lightning_logs_rebuttal/.../version_N/` dir for the trend.
